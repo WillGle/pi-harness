@@ -4,10 +4,11 @@ import { spawnSync } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { verifySkills } from "../lib/skills.mjs";
+import { findReferences, findSymbol } from "../lib/code-intel.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const pkg = JSON.parse(readFileSync(resolve(root, "package.json"), "utf8"));
-const [command] = process.argv.slice(2);
+const [command, value] = process.argv.slice(2);
 const commandPath = (name) => { const found = spawnSync("sh", ["-c", `command -v ${name}`], { env: process.env, encoding: "utf8" }); return found.status === 0 ? found.stdout.trim() : undefined; };
 const piVersion = () => {
   const pi = spawnSync("sh", ["-c", "pi --version"], { env: process.env, encoding: "utf8", timeout: 3_000 });
@@ -60,7 +61,14 @@ function checkToolCallingReadiness(piReady, extensionExists) {
   } catch {}
   return false;
 }
-if (command !== "doctor") { console.error("Usage: pi-harness doctor"); process.exitCode = 2; }
+if (["find-symbol", "references"].includes(command)) {
+  if (!value) { console.error(`Usage: pi-harness ${command} <symbol>`); process.exitCode = 2; }
+  else {
+    try { console.log(JSON.stringify(command === "find-symbol" ? findSymbol(process.cwd(), value) : findReferences(process.cwd(), value), null, 2)); }
+    catch (error) { console.error(`pi-harness: ${error.message}`); process.exitCode = 1; }
+  }
+}
+else if (command !== "doctor") { console.error("Usage: pi-harness doctor | find-symbol <symbol> | references <symbol>"); process.exitCode = 2; }
 else {
   const pi = piVersion(); const skills = verifySkills(root); const zed = exactZedEntry();
   const resources = { extension: existsSync(resolve(root, "extensions/pi-harness.ts")), skills: existsSync(resolve(root, "skills/skills.lock.json")) };

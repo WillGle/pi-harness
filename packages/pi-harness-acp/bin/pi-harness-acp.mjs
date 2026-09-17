@@ -7,7 +7,7 @@ import { spawn } from "node:child_process";
 
 const VERSION = "1.0.0";
 const STATE_PATH = process.env.PI_HARNESS_ACP_STATE || join(homedir(), ".pi-harness", "acp-sessions.json");
-const EXTENSION_COMMANDS = ["plan", "goal", "skill-hub"];
+const EXTENSION_COMMANDS = ["plan", "goal", "skill-hub", "learn"];
 const sessions = new Map();
 let stored = loadStored();
 if (process.argv.includes("--version")) { console.log(VERSION); process.exit(0); }

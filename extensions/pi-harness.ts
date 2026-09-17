@@ -1,14 +1,18 @@
+import process from "node:process";
 import {
   COMPACT_ENTRY, GOAL_ENTRY, PLAN_ENTRY, READ_ONLY_TOOLS, cavemanSummary, goalState,
   isPlanAllowedTool, parsePlan, planState, restore, transitionGoal,
 } from "../lib/state.mjs";
-import { executeWorkerTask, runWorkerChild, startChild, terminateChildren, validateTask, workerWorktree } from "../lib/coordinator.mjs";
+import { appendProjectMemory, clearProjectMemory, loadProjectMemory } from "../lib/memory.mjs";
+import { executeWorkerTask, modelDispatch, runWorkerChild, startChild, terminateChildren, validateTask, workerWorktree } from "../lib/coordinator.mjs";
+import { findReferences, findSymbol } from "../lib/code-intel.mjs";
+import { readHashlines, replaceHashlines } from "../lib/precise-edit.mjs";
 import { Type } from "typebox";
 
 type Context = { ui?: { notify?: (message: string, level: "info" | "warning" | "error") => void }; abort?: () => void };
 type Pi = Record<string, any>;
 
-const HARNESS_TOOLS = new Set(["pi_harness_goal", "pi_harness_coordinate"]);
+const HARNESS_TOOLS = new Set(["pi_harness_goal", "pi_harness_coordinate", "pi_harness_patch", "pi_harness_learn"]);
 
 export default function harness(pi: Pi): void {
   let plan = planState();
@@ -67,7 +71,13 @@ export default function harness(pi: Pi): void {
   pi.on?.("session_before_compact", (event: any) => { saveCompactState(event); return { customInstructions: "Use the pi-harness compact state (caveman-v1). Preserve goal, plan, decisions, changed files, gates, and blocker exactly.", replaceInstructions: false }; });
   pi.on?.("context", (_event: any, ctx: any) => { if (Number(ctx.getContextUsage?.()?.percent ?? 0) >= 80) { saveCompactState(); ctx.compact?.({ customInstructions: "Use the pi-harness compact state (caveman-v1). Preserve goal, plan, decisions, changed files, gates, and blocker exactly." }); } });
   pi.on?.("agent_settled", () => { continuationQueued = false; continueGoal(); });
-  pi.on?.("before_agent_start", () => plan.enabled ? { message: { customType: "pi-harness-plan-context", display: false, content: "[PLAN MODE: READ ONLY]\nGather context. Return assumptions, numbered steps, and verification criteria. Do not edit or delegate workers." } } : undefined);
+  pi.on?.("before_agent_start", () => {
+    const parts: string[] = [];
+    const memory = loadProjectMemory(process.cwd());
+    if (memory) parts.push(`[PROJECT MEMORY - PRIVATE LOCAL]\n${memory}`);
+    if (plan.enabled) parts.push("[PLAN MODE: READ ONLY]\nGather context. Return assumptions, numbered steps, and verification criteria. Do not edit or delegate workers.");
+    return parts.length ? { message: { customType: "pi-harness-context", display: false, content: parts.join("\n\n") } } : undefined;
+  });
 
   pi.registerCommand?.("plan", { description: "Read-only planning: /plan on|off|status", handler: async (args: string, ctx: Context) => {
     try { const action = parsePlan(args); if (action === "status") say(ctx, `Plan mode: ${plan.enabled ? "on" : "off"}`); else setPlan(action === "on", ctx); } catch (error) { say(ctx, (error as Error).message, "error"); }
@@ -83,6 +93,23 @@ export default function harness(pi: Pi): void {
   pi.registerCommand?.("skill-hub", { description: "Show the pinned curated-skill boundary", handler: async (_args: string, ctx: Context) => {
     say(ctx, "Curated skills are checksum-pinned. Do not install an additional skill without an explicit user request.");
   }});
+  pi.registerCommand?.("learn", { description: "Manage private local project memory: /learn <note> | status | clear", handler: async (args: string, ctx: Context) => {
+    const input = args.trim();
+    if (!input || input === "status") {
+      const memory = loadProjectMemory(process.cwd());
+      return say(ctx, memory ? `[Project Memory]:\n${memory}` : "No memory saved for this project yet. Use /learn <note> to add one.");
+    }
+    if (input === "clear" || input === "reset") {
+      clearProjectMemory(process.cwd());
+      return say(ctx, "Project memory cleared for this project.");
+    }
+    try {
+      const entry = appendProjectMemory(input, process.cwd());
+      say(ctx, `Learned for this project: "${entry.note}"`);
+    } catch (error) {
+      say(ctx, (error as Error).message, "error");
+    }
+  }});
 
   pi.registerTool?.({
     name: "pi_harness_goal", label: "Pi Harness goal",
@@ -94,19 +121,53 @@ export default function harness(pi: Pi): void {
     },
   });
   pi.registerTool?.({
+    name: "pi_harness_hashlines", label: "Pi Harness hashlines",
+    description: "Read up to 200 lines with line hashes and a block SHA-256. Pass the returned SHA-256 unchanged to pi_harness_patch.",
+    parameters: Type.Object({ path: Type.String(), start_line: Type.Integer({ minimum: 1 }), end_line: Type.Integer({ minimum: 1 }) }),
+    execute: async (_id: string, input: { path: string; start_line: number; end_line: number }) => ({
+      content: [{ type: "text", text: JSON.stringify(readHashlines(process.cwd(), input.path, input.start_line, input.end_line), null, 2) }],
+    }),
+  });
+  pi.registerTool?.({
+    name: "pi_harness_patch", label: "Pi Harness precise patch",
+    description: "Replace exactly one previously read line block. The patch is rejected if its SHA-256 is stale. replacement contains only the new block, without surrounding lines.",
+    parameters: Type.Object({ path: Type.String(), start_line: Type.Integer({ minimum: 1 }), end_line: Type.Integer({ minimum: 1 }), expected_sha256: Type.String(), replacement: Type.String() }),
+    execute: async (_id: string, input: { path: string; start_line: number; end_line: number; expected_sha256: string; replacement: string }) => ({
+      content: [{ type: "text", text: JSON.stringify(replaceHashlines(process.cwd(), input.path, input.start_line, input.end_line, input.expected_sha256, input.replacement), null, 2) }],
+    }),
+  });
+  pi.registerTool?.({
+    name: "pi_harness_find_symbol", label: "Pi Harness find symbol",
+    description: "Find symbol declarations with Universal Ctags, or structural ast-grep matches when available. The fallback is explicitly labeled text search.",
+    parameters: Type.Object({ symbol: Type.String() }),
+    execute: async (_id: string, input: { symbol: string }) => ({
+      content: [{ type: "text", text: JSON.stringify(findSymbol(process.cwd(), input.symbol), null, 2) }],
+    }),
+  });
+  pi.registerTool?.({
+    name: "pi_harness_references", label: "Pi Harness references",
+    description: "Find structural symbol references with ast-grep when available. The fallback is explicitly labeled text search.",
+    parameters: Type.Object({ symbol: Type.String() }),
+    execute: async (_id: string, input: { symbol: string }) => ({
+      content: [{ type: "text", text: JSON.stringify(findReferences(process.cwd(), input.symbol), null, 2) }],
+    }),
+  });
+  pi.registerTool?.({
     name: "pi_harness_coordinate", label: "Pi Harness coordinator",
     description: "Start a bounded scout, research, or worker task. Worker changes remain in a temporary worktree and are never integrated automatically.",
     parameters: Type.Object({ owner: Type.Union([Type.Literal("scout"), Type.Literal("research"), Type.Literal("worker")]), scope: Type.String(), verification: Type.String(), permission: Type.Union([Type.Literal("read"), Type.Literal("write")]) }),
     execute: async (_id: string, input: { owner: "scout" | "research" | "worker"; scope: string; verification: string; permission: "read" | "write" }) => {
       const task = validateTask(input);
+      const route = modelDispatch(task);
       if (task.owner === "worker") {
-        const result = await executeWorkerTask(process.cwd(), task, (worktreePath: string) => runWorkerChild(task, { cwd: worktreePath }));
+        const result = await executeWorkerTask(process.cwd(), task, (worktreePath: string) => runWorkerChild(task, { cwd: worktreePath, ...route }), route);
         return {
           content: [
             {
               type: "text",
               text: JSON.stringify({
                 owner: task.owner,
+                model: route.model ?? "Pi default",
                 scope: task.scope,
                 verification: task.verification,
                 worktree: result.worktreePath,
@@ -121,8 +182,18 @@ export default function harness(pi: Pi): void {
           ],
         };
       }
-      const child = startChild(task, { cwd: process.cwd() });
-      return { content: [{ type: "text", text: JSON.stringify({ owner: task.owner, scope: task.scope, verification: task.verification, integration: "read-only task" }) }] };
+      const child = startChild(task, { cwd: process.cwd(), ...route });
+      return { content: [{ type: "text", text: JSON.stringify({ owner: task.owner, model: route.model ?? "Pi default", scope: task.scope, verification: task.verification, integration: "read-only task" }) }] };
+    },
+  });
+
+  pi.registerTool?.({
+    name: "pi_harness_learn", label: "Pi Harness project memory",
+    description: "Record an architectural rule, convention, or lesson learned for this project into private local memory.",
+    parameters: Type.Object({ note: Type.String() }),
+    execute: async (_id: string, input: { note: string }) => {
+      const entry = appendProjectMemory(input.note, process.cwd());
+      return { content: [{ type: "text", text: `Saved project memory: "${entry.note}"` }] };
     },
   });
 }

@@ -11,6 +11,7 @@ Pi-native harness and extension for **Pi 0.85.1**. Provides read-only planning m
 - **5 Curated Skills**: Checksum-pinned skills (`project-scouting`, `caveman`, `ponytail`, `pi-coordinator`, `skill-hub`) verified directly against upstream commit `skills-central@c9dd3e4`.
 - **Bounded Coordinator**: Spawns scoped scout/researcher child processes and worker tasks isolated in temporary git worktrees with strict non-auto-integration guarantees.
 - **ACP Stdio Bridge (`pi-harness-acp`)**: Connects Pi with Zed Editor or any ACP client over JSON-RPC stdio. Advertises extension commands (`/plan`, `/goal`), forwards streaming events, and ensures clean subprocess lifecycle management (cross-restart session reconnect is experimental).
+- **Private Project Memory (`/learn <note>`)**: Retains architectural rules and lessons learned across sessions stored privately in `~/.pi-harness/memory/<project-hash>.md`. Zero repository footprint ensures public codebases never leak private notes.
 
 ---
 
