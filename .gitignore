@@ -1,0 +1,11 @@
+node_modules/
+*.tgz
+*.tar.gz
+*.log
+.DS_Store
+*.tmp
+*.tmp.*
+.pi-harness/
+.env
+.env.*
+!.env.example

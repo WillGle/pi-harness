@@ -1,0 +1,3 @@
+import test from "node:test"; import assert from "node:assert/strict"; import { readFileSync } from "node:fs";
+test("package declares Pi resources and a pinned peer runtime", () => { const pkg = JSON.parse(readFileSync("package.json", "utf8")); assert.deepEqual(pkg.pi.extensions, ["extensions"]); assert.equal(pkg.peerDependencies["@earendil-works/pi-coding-agent"], "0.85.1"); });
+test("ACP bridge exposes the required command contract", () => { const source = readFileSync("packages/pi-harness-acp/bin/pi-harness-acp.mjs", "utf8"); for (const command of ["plan", "goal", "skill-hub", "initialize", "session/cancel"]) assert.match(source, new RegExp(command)); });

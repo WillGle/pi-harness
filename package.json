@@ -1,0 +1,53 @@
+{
+  "name": "@will/pi-harness",
+  "version": "1.0.0",
+  "description": "Pi-native planning and goal harness",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/WillGle/pi-harness.git"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "keywords": [
+    "pi-package",
+    "pi",
+    "acp"
+  ],
+  "bin": {
+    "pi-harness": "bin/pi-harness.mjs",
+    "pi-harness-web": "bin/pi-harness-web.mjs"
+  },
+  "scripts": {
+    "build": "node --experimental-strip-types --check extensions/pi-harness.ts",
+    "test": "node --test test/state.test.mjs test/coordinator.test.mjs test/skills.test.mjs test/web.test.mjs",
+    "test:integration": "node --test test/integration.test.mjs test/acp-acceptance.test.mjs test/pi-rpc-integration.test.mjs test/zed-smoke.test.mjs test/disposable-install.test.mjs",
+    "test:all": "npm run build && npm run test && npm run test:integration",
+    "verify:skills": "node scripts/verify-skills.mjs",
+    "bootstrap": "node scripts/bootstrap.mjs",
+    "doctor": "node bin/pi-harness.mjs doctor"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "0.85.1"
+  },
+  "dependencies": {
+    "typebox": "1.3.7"
+  },
+  "pi": {
+    "extensions": [
+      "extensions"
+    ],
+    "skills": [
+      "skills"
+    ],
+    "prompts": [
+      "prompts"
+    ]
+  }
+}

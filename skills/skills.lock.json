@@ -1,0 +1,12 @@
+{
+  "source": "WillGle/skills-central",
+  "commit": "c9dd3e456be01fbc89a417a50411b9e0fdb8fa20",
+  "sourceCommitVerified": true,
+  "skills": {
+    "project-scouting": "8b5952de22a258b7a1ef8ab042870f9b0956aaeb7d2e894d216cdce71b1299a0",
+    "caveman": "5e30bb56afbd0b01bd736f2da84180e76f18db4a64de8e124525d5c8dc2e8605",
+    "ponytail": "55dcd2fac1d739f23c91d8e71d825509a29529d8b54ec6c1099cc96ef629c99a",
+    "pi-coordinator": "f3402206df6278921f89eb9698bc9d1e94d024fbfb15fc37b568544bdfc0bc10",
+    "skill-hub": "de5c9c06eb27b1c2fd0ca5ec3728573903e862efaf73e6d2e2cd750755b47022"
+  }
+}
