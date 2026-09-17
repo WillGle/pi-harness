@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -10,6 +10,7 @@ import {
   getProjectIdentifier,
   getProjectMemoryPath,
   loadProjectMemory,
+  MAX_MEMORY_BYTES,
 } from "../lib/memory.mjs";
 
 test("getProjectIdentifier returns stable, collision-free slug based on repo/path", () => {
@@ -56,8 +57,15 @@ test("project memory persists in private home dir without touching project repo"
     const memoryPath = getProjectMemoryPath(projectDir);
     assert.ok(existsSync(memoryPath));
     assert.ok(memoryPath.startsWith(fakeHome));
+    assert.equal(statSync(getMemoryDir()).mode & 0o777, 0o700);
+    assert.equal(statSync(memoryPath).mode & 0o777, 0o600);
 
-    // 6. Clear memory
+    // 6. Keep only recent whole notes within the byte limit, including Unicode.
+    for (let i = 0; i < 20; i += 1) appendProjectMemory(`Điều ${i}: ${"😀".repeat(100)}`, projectDir);
+    assert.ok(Buffer.byteLength(readFileSync(memoryPath)) <= MAX_MEMORY_BYTES);
+    assert.ok(Buffer.byteLength(loadProjectMemory(projectDir)) <= MAX_MEMORY_BYTES);
+
+    // 7. Clear memory
     const cleared = clearProjectMemory(projectDir);
     assert.equal(cleared, true);
     assert.equal(loadProjectMemory(projectDir), undefined);
