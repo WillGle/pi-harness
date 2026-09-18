@@ -48,12 +48,25 @@ function parseLines(stream, onLine) {
 }
 function translatePiEvent(sessionId, message) {
   const type = message?.type ?? message?.method ?? "message";
-  if (type === "message_update" || type === "text_delta") {
+  if (type === "message_update") {
+    const event = message.assistantMessageEvent;
+    if (event?.type === "text_delta") {
+      notify("session/update", { sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: event.delta ?? "" }, raw: message } });
+    }
+  } else if (type === "text_delta") {
     notify("session/update", { sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: message.delta ?? message.text ?? "" }, raw: message } });
   } else if (type === "tool_call") {
     notify("session/update", { sessionId, update: { sessionUpdate: "tool_call", toolName: message.toolName, input: message.input, callId: message.callId ?? message.id, raw: message } });
   } else if (type === "tool_result") {
     notify("session/update", { sessionId, update: { sessionUpdate: "tool_result", toolName: message.toolName, result: message.result, callId: message.callId ?? message.id, raw: message } });
+  } else if (type === "tool_execution_start") {
+    notify("session/update", { sessionId, update: { sessionUpdate: "tool_call", toolName: message.toolName, input: message.args ?? {}, callId: message.toolCallId, raw: message } });
+  } else if (type === "tool_execution_end") {
+    notify("session/update", { sessionId, update: { sessionUpdate: "tool_result", result: message.result, callId: message.toolCallId, raw: message } });
+  } else if (type === "agent_settled") {
+    notify("session/update", { sessionId, update: { sessionUpdate: "agent_settled", raw: message } });
+  } else if (type === "message_end" && message.message?.role === "assistant" && message.message.stopReason === "error") {
+    notify("session/update", { sessionId, update: { sessionUpdate: "agent_error", message: message.message.errorMessage ?? "Pi request failed", raw: message } });
   } else if (/assistant|text|tool/i.test(type)) {
     notify("session/update", { sessionId, update: { sessionUpdate: type, ...message } });
   } else {
@@ -77,6 +90,9 @@ function spawnPi(sessionId, resumeId) {
   parseLines(child.stdout, (line) => {
     try {
       const message = JSON.parse(line);
+      if (message.type === "extension_ui_request") {
+        child.stdin.write(`${JSON.stringify({ type: "extension_ui_response", id: message.id })}\n`);
+      }
       if (message.id && session.pending.has(message.id)) {
         session.pending.get(message.id)(message);
         session.pending.delete(message.id);
@@ -140,6 +156,18 @@ async function handle(request) {
         commands: commands(),
       });
     }
+    case "session/inspect": {
+      const session = await ensureSession(params.sessionId);
+      const state = await rpcToPi(session, { type: "get_state" });
+      const resources = await rpcToPi(session, { type: "get_commands" });
+      return result(request.id, {
+        sessionId: params.sessionId,
+        cwd: process.env.PI_CWD || process.cwd(),
+        state: state?.data,
+        commands: resources?.data?.commands ?? [],
+        tools: ["read", "bash", "edit", "write", "grep", "find", "ls"],
+      });
+    }
     case "session/prompt": {
       const session = await ensureSession(params.sessionId);
       const text = params.prompt ?? params.text ?? "";
@@ -189,7 +217,10 @@ parseLines(process.stdin, (line) => {
     failure(undefined, error);
   }
 });
+// An idle stdio pipe does not keep the Node event loop alive on every runtime.
+const lifecycleKeepalive = setInterval(() => {}, 60_000);
 function shutdown() {
+  clearInterval(lifecycleKeepalive);
   for (const session of sessions.values()) {
     try {
       if (!session.child.killed) {
@@ -201,4 +232,3 @@ function shutdown() {
 }
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", () => { shutdown(); process.exit(0); });
-process.stdin.on("end", shutdown);
