@@ -15,6 +15,17 @@ Pi-native harness and extension for **Pi 0.85.1**. Provides read-only planning m
 
 ---
 
+## Clients
+
+Pi Harness is the shared Pi extension and ACP bridge. Clients stay separate:
+
+- **Zed** connects to `pi-harness-acp` as an editor client.
+- **WPi** is an independent terminal UI app that also connects to `pi-harness-acp`; see the WPi repository README for its setup.
+
+Each client starts its own ACP process and session. WPi is not packaged inside Pi Harness and does not import Harness source or private state files.
+
+---
+
 ## Quick Setup (Zero-Config)
 
 ### Multi-Device Setup (PC, Laptop, Mini PC)
@@ -35,6 +46,35 @@ The bootstrap script automatically:
 1. Installs the extension and curated skills into Pi via `pi install .`.
 2. Installs the `pi-harness-acp` binary globally.
 3. Automatically configures Zed Editor (`~/.config/zed/settings.json`) with rollback backup and fingerprint protection.
+
+Use this when Zed integration is wanted too. It is not required to use WPi.
+
+### WPi Terminal Client
+
+Install the Harness extension and expose the ACP bridge once:
+
+```bash
+cd ~/dev/pi-harness
+pi install .
+
+cd packages/pi-harness-acp
+npm link
+```
+
+Then install and expose the separate WPi app:
+
+```bash
+cd ~/dev/pi-harness-tui
+npm install
+npm link
+pi-tui
+```
+
+`pi-tui` starts WPi and its ACP child process. Do not start `pi-harness-acp` separately for that terminal. If the ACP bridge is not on `PATH` during local development, start WPi with:
+
+```bash
+PI_HARNESS_ACP_BIN=~/dev/pi-harness/packages/pi-harness-acp/bin/pi-harness-acp.mjs npm start
+```
 
 ---
 
