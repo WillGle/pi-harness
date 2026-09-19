@@ -44,7 +44,7 @@ function createAcpClient(envOverrides = {}) {
     }
   });
 
-  function request(method, params = {}) {
+  function request(method, params = {}, raw = false) {
     const id = crypto.randomUUID();
     return new Promise((resolvePromise, rejectPromise) => {
       const timer = setTimeout(() => {
@@ -54,6 +54,7 @@ function createAcpClient(envOverrides = {}) {
 
       pending.set(id, (res) => {
         clearTimeout(timer);
+        if (raw) return resolvePromise({ requestId: id, response: res });
         if (res.error) rejectPromise(new Error(res.error.message));
         else resolvePromise(res.result);
       });
@@ -191,6 +192,7 @@ test("ACP lifecycle: initialize, new, prompt, load, cancel, reconnect, and clean
   }
 });
 
+
 test("ACP command forwarding and event updates", async () => {
   const acp = createAcpClient();
 
@@ -213,6 +215,14 @@ test("ACP command forwarding and event updates", async () => {
       prompt: "test notification",
     });
 
+    const badCommand = await acp.request("session/command", {
+      sessionId,
+      command: "not-a-harness-command",
+    }, true);
+    assert.equal(badCommand.response.id, badCommand.requestId);
+    assert.match(badCommand.response.error.message, /Unknown Pi Harness command/);
+    assert.ok(badCommand.response.error.message.length < 300);
+
     // Verify notifications were received
     assert.ok(acp.notifications.length > 0, "session/update notifications should be received");
     assert.ok(acp.notifications.every((n) => n.method === "session/update"));
@@ -220,4 +230,3 @@ test("ACP command forwarding and event updates", async () => {
     await acp.close();
   }
 });
-

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -146,6 +146,7 @@ test("scout and research complete through the package boundary with read-only po
 
 test("worker uses package worktree/concurrency options, runs the gate, preserves parent HEAD, and never integrates", async () => {
   const repo = makeRepo("pi-harness-package-worker-");
+  mkdirSync(join(repo, "node_modules"));
   const before = head(repo);
   const events = new EventBus();
   const fakePackage = packageManagerFor(events, repo, "worker");
@@ -160,6 +161,9 @@ test("worker uses package worktree/concurrency options, runs the gate, preserves
     const request = fakePackage.calls.find((entry) => entry?.type === "worker");
     assert.equal(request.options.isBackground, true);
     assert.equal(request.options.isolation, "worktree");
+    assert.match(request.options.description, /Scope: file\.txt/);
+    assert.match(request.options.description, /Reason: grep 'worker-update' file\.txt/);
+    assert.doesNotMatch(request.prompt, /create exactly one atomic commit/);
     assert.equal(result.success, true);
     assert.equal(result.gatePassed, true);
     assert.equal(result.commitCheck.valid, true);
@@ -168,6 +172,7 @@ test("worker uses package worktree/concurrency options, runs the gate, preserves
     assert.equal(result.integrated, false);
     assert.match(result.integration, /never auto-integrates/);
     assert.equal(head(repo), before);
+    assert.equal(existsSync(join(result.worktreePath, "node_modules")), false);
     assert.equal(existsSync(result.worktreePath), false, "package owns worktree cleanup");
   } finally {
     fakePackage.restore();

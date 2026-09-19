@@ -197,11 +197,9 @@ async function handle(request) {
   }
 }
 parseLines(process.stdin, (line) => {
-  try {
-    handle(JSON.parse(line)).catch((error) => failure(undefined, error));
-  } catch (error) {
-    failure(undefined, error);
-  }
+  let request;
+  try { request = JSON.parse(line); } catch (error) { failure(undefined, error); return; }
+  handle(request).catch((error) => failure(request?.id, error));
 });
 // An idle stdio pipe does not keep the Node event loop alive on every runtime.
 const lifecycleKeepalive = setInterval(() => {}, 60_000);
