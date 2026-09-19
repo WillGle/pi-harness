@@ -1,16 +1,16 @@
 # Pi Harness
 
-Pi-native harness and extension for **Pi 0.85.1**. Provides read-only planning mode (`/plan`), evidence-backed goal tracking (`/goal`), curated skills, a thin coordinator adapter backed by `@tintinweb/pi-subagents@0.19.0`, and an Agent Client Protocol (ACP) bridge for editors like Zed.
+Pi-native harness and extension for **Pi 0.85.1**. Provides read-only planning mode (`/plan`), evidence-backed goal tracking (`/goal`), curated skills, a thin coordinator adapter backed by `@tintinweb/pi-subagents@0.19.0`, and an Agent Client Protocol (ACP) compatibility bridge for editors like Zed.
 
 ---
 
 ## Features
 
-- **Read-Only Planning Mode (`/plan on|off|status`)**: Strips mutating tools (`edit`, `write`), blocks mutating bash syntax (e.g. `sed -i`, redirects, file deletions), and prompts the agent to provide assumptions, steps, and verification gates.
-- **Evidence-Backed Goal (`/goal <objective>`)**: Tracks a single active objective requiring concrete verification evidence and blockers for terminal transitions. Survives session compaction, restore, and fork via native session entries.
+- **Read-Only Planning Mode (`/plan on|off|status`)**: Strips mutating tools (`edit`, `write`), blocks mutating bash syntax (e.g. `sed -i`, redirects, file deletions), and prompts the agent to provide assumptions, steps, and verification gates. Lifecycle tests cover persisted reload, real compaction, real fork/branch independence, and mutation blocking after transitions.
+- **Evidence-Backed Goal (`/goal <objective>`)**: Tracks a single active objective requiring concrete verification evidence and blockers for terminal transitions. It does not provide wait, pause/resume, token-budget, or strong no-progress circuit-breaker states.
 - **5 Curated Skills**: Checksum-pinned skills (`project-scouting`, `caveman`, `ponytail`, `pi-coordinator`, `skill-hub`) verified directly against upstream commit `skills-central@c9dd3e4`.
 - **Package-Backed Coordinator**: Delegates scoped scout/research and isolated worker tasks to `@tintinweb/pi-subagents`; Harness retains role policy, verification, bounded result normalization, and strict non-auto-integration.
-- **ACP Stdio Bridge (`pi-harness-acp`)**: Connects Pi with Zed Editor or any ACP client over JSON-RPC stdio. Advertises extension commands (`/plan`, `/goal`), forwards streaming events, and ensures clean subprocess lifecycle management (cross-restart session reconnect is experimental).
+- **ACP Stdio Compatibility Bridge (`pi-harness-acp`)**: Connects Pi with Zed Editor or any ACP client over JSON-RPC stdio, advertises Harness commands, forwards Pi events, and persists session mappings. Consolidation onto upstream `pi-acp` remains one deferred final implementation wave because upstream does not yet expose extension-command projection.
 - **Project Memory (`/learn <note>`)**: Retains user-saved rules and lessons in owner-only local files at `~/.pi-harness/memory/<project-hash>.md`, outside the repository. Loaded memory is sent with the prompt to the active model provider.
 
 ---
@@ -23,6 +23,25 @@ Pi Harness is the shared Pi extension and ACP bridge. Clients stay separate:
 - **WPi** is an independent terminal UI app that also connects to `pi-harness-acp`; see the WPi repository README for its setup.
 
 Each client starts its own ACP process and session. WPi is not packaged inside Pi Harness and does not import Harness source or private state files.
+
+## Ownership
+
+```text
+Pi 0.85.1
+├── provider, model, authentication, local runtime, session tree, compaction
+├── Pi Harness
+│   ├── plan, goal, explicit project memory, precise editing
+│   ├── code intelligence, skill loading/provenance, bounded web CLI
+│   ├── bootstrap, doctor, and compatibility policy
+│   └── thin coordinator and ACP compatibility policy adapters
+├── @tintinweb/pi-subagents@0.19.0
+│   └── child lifecycle, concurrency, worktrees, and cancellation
+└── ACP
+    ├── upstream pi-acp: generic ACP v1 target
+    └── Pi Harness: /plan, /goal, /learn, /skill-hub compatibility projection
+```
+
+The ACP projection is documented as a target boundary until the dedicated migration wave replaces the current bridge; no second generic ACP implementation should be added.
 
 ---
 
