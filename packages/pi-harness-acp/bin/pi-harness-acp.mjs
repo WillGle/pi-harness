@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/** ACP transport derived from the pi-acp process/session split. */
+/** Pi Harness ACP bridge for Pi RPC sessions and Harness commands. */
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -24,7 +24,7 @@ function persist() {
     }
     writeFileSync(temporary, JSON.stringify(merged, null, 2));
     renameSync(temporary, STATE_PATH);
-  } catch (err) {
+  } catch {
     // Non-fatal persistence error
   }
 }
@@ -137,8 +137,6 @@ async function handle(request) {
         capabilities: { prompt: true, sessionLoad: true, toolCalling: true, sessionCancel: true },
         commands: commands(),
       });
-    case "get_commands":
-      return result(request.id, { commands: commands() });
     case "session/new": {
       const sessionId = crypto.randomUUID();
       const session = spawnPi(sessionId);
@@ -154,18 +152,6 @@ async function handle(request) {
         restored,
         piSessionId: actualPiSessionId,
         commands: commands(),
-      });
-    }
-    case "session/inspect": {
-      const session = await ensureSession(params.sessionId);
-      const state = await rpcToPi(session, { type: "get_state" });
-      const resources = await rpcToPi(session, { type: "get_commands" });
-      return result(request.id, {
-        sessionId: params.sessionId,
-        cwd: process.env.PI_CWD || process.cwd(),
-        state: state?.data,
-        commands: resources?.data?.commands ?? [],
-        tools: ["read", "bash", "edit", "write", "grep", "find", "ls"],
       });
     }
     case "session/prompt": {

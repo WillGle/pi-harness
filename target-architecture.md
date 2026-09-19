@@ -42,9 +42,7 @@ Every delegated task needs an owner, scope, verification command, and permission
 
 ## ACP and external presentation
 
-The intended ownership is upstream `pi-acp@0.0.33` for generic ACP v1 initialize/session lifecycle, Pi RPC streaming, persistence/history, cancellation, UI handling, and errors. Pi Harness owns only the `/plan`, `/goal`, `/learn`, and `/skill-hub` command projection, plus optional legacy `get_commands`, `session/inspect`, and `session/command` compatibility where an existing client requires it.
-
-The cleanup wave defers this migration as one explicit final task. The inspected upstream package advertises Pi commands with extension commands disabled and does not expose a command-projection hook, so the current `packages/pi-harness-acp` bridge remains temporarily in place. The final wave must replace its duplicated generic ACP implementation with an upstream-backed thin adapter; it must not add a second generic ACP stack.
+`packages/pi-harness-acp` is the active ACP owner. It exposes ACP over stdio, owns the Pi RPC session process and session mapping, translates Pi events, relays cancellation, and projects `/plan`, `/goal`, `/learn`, and `/skill-hub`. The bridge has no ACP runtime dependency; upstream `pi-acp@0.0.33` is not an active dependency because it does not expose the required extension-command projection hook.
 
 TUI-specific status is optional; ACP clients receive textual command/status data. The package has no browser or screen-reader claim. Zed registration and end-to-end ACP forwarding require their dedicated smoke tests before release.
 

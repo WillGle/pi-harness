@@ -10,7 +10,7 @@ Pi-native harness and extension for **Pi 0.85.1**. Provides read-only planning m
 - **Evidence-Backed Goal (`/goal <objective>`)**: Tracks a single active objective requiring concrete verification evidence and blockers for terminal transitions. It does not provide wait, pause/resume, token-budget, or strong no-progress circuit-breaker states.
 - **5 Curated Skills**: Checksum-pinned skills (`project-scouting`, `caveman`, `ponytail`, `pi-coordinator`, `skill-hub`) verified directly against upstream commit `skills-central@c9dd3e4`.
 - **Package-Backed Coordinator**: Delegates scoped scout/research and isolated worker tasks to `@tintinweb/pi-subagents`; Harness retains role policy, verification, bounded result normalization, and strict non-auto-integration.
-- **ACP Stdio Compatibility Bridge (`pi-harness-acp`)**: Connects Pi with Zed Editor or any ACP client over JSON-RPC stdio, advertises Harness commands, forwards Pi events, and persists session mappings. Consolidation onto upstream `pi-acp` remains one deferred final implementation wave because upstream does not yet expose extension-command projection.
+- **ACP Stdio Bridge (`pi-harness-acp`)**: Connects Pi with Zed Editor or any ACP client over JSON-RPC stdio, advertises Harness commands, forwards Pi events, persists session mappings, and relays cancellation.
 - **Project Memory (`/learn <note>`)**: Retains user-saved rules and lessons in owner-only local files at `~/.pi-harness/memory/<project-hash>.md`, outside the repository. Loaded memory is sent with the prompt to the active model provider.
 
 ---
@@ -37,11 +37,8 @@ Pi 0.85.1
 ├── @tintinweb/pi-subagents@0.19.0
 │   └── child lifecycle, concurrency, worktrees, and cancellation
 └── ACP
-    ├── upstream pi-acp: generic ACP v1 target
-    └── Pi Harness: /plan, /goal, /learn, /skill-hub compatibility projection
+    └── Pi Harness: ACP bridge and Harness command compatibility
 ```
-
-The ACP projection is documented as a target boundary until the dedicated migration wave replaces the current bridge; no second generic ACP implementation should be added.
 
 ---
 
