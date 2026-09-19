@@ -223,6 +223,11 @@ test("ACP command forwarding and event updates", async () => {
     assert.match(badCommand.response.error.message, /Unknown Pi Harness command/);
     assert.ok(badCommand.response.error.message.length < 300);
 
+    const unknownMethod = await acp.request("unknown/method", {}, true);
+    assert.equal(unknownMethod.response.id, unknownMethod.requestId);
+    assert.match(unknownMethod.response.error.message, /Unknown ACP method/);
+    assert.ok(unknownMethod.response.error.message.length < 300);
+
     // Verify notifications were received
     assert.ok(acp.notifications.length > 0, "session/update notifications should be received");
     assert.ok(acp.notifications.every((n) => n.method === "session/update"));

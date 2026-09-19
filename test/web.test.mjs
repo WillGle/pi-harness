@@ -4,7 +4,7 @@ import { createServer } from "node:http";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { MAX_BYTES, TIMEOUT_MS, cappedBody, searchRequest } from "../bin/pi-harness-web.mjs";
+import { MAX_BYTES, MAX_REDIRECTS, TIMEOUT_MS, cappedBody, searchRequest } from "../bin/pi-harness-web.mjs";
 
 const CLI_PATH = fileURLToPath(new URL("../bin/pi-harness-web.mjs", import.meta.url));
 
@@ -46,6 +46,7 @@ test("web provenance: Brave provider when API key configured", () => {
 test("web limits: timeout and max byte cap constraints", () => {
   assert.equal(TIMEOUT_MS, 10_000, "Timeout must be bounded at 10,000ms");
   assert.equal(MAX_BYTES, 1_000_000, "Max bytes must be capped at 1,000,000 bytes");
+  assert.equal(MAX_REDIRECTS, 5, "Redirects must be explicitly bounded");
 });
 
 test("web security: direct fetch rejects loopback before network access", async () => {
@@ -74,5 +75,33 @@ test("web security: direct fetch rejects loopback before network access", async 
     assert.match(stderr, /pi-harness-web: Blocked or invalid fetch URL/);
   } finally {
     await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("web security: loopback-resolving hostname cannot reach redirect target", async () => {
+  const target = createServer((_request, response) => {
+    target.requests = (target.requests ?? 0) + 1;
+    response.end("private response");
+  });
+  await new Promise((resolve, reject) => {
+    target.once("error", reject);
+    target.listen(0, "127.0.0.1", resolve);
+  });
+
+  try {
+    const { port } = target.address();
+    const child = spawn(process.execPath, [CLI_PATH, "fetch", `http://lvh.me:${port}/redirect`], {
+      cwd: tmpdir(),
+      env: { ...process.env, NO_PROXY: `${process.env.NO_PROXY ?? ""},lvh.me` },
+    });
+    let stderr = "";
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    const result = await new Promise((resolve) => child.on("close", (code, signal) => resolve({ code, signal })));
+    assert.equal(result.code, 1);
+    assert.equal(result.signal, null);
+    assert.equal(target.requests ?? 0, 0);
+    assert.match(stderr, /pi-harness-web: Blocked or invalid fetch URL/);
+  } finally {
+    await new Promise((resolve) => target.close(resolve));
   }
 });

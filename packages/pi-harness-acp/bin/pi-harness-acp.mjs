@@ -193,7 +193,7 @@ async function handle(request) {
       return result(request.id, { cancelled: true, terminated: true, pid: childPid });
     }
     default:
-      return result(request.id, { accepted: true, commands: commands() });
+      throw new Error(`Unknown ACP method: ${request.method}`);
   }
 }
 parseLines(process.stdin, (line) => {

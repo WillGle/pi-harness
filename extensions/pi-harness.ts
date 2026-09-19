@@ -15,12 +15,15 @@ type Pi = Record<string, any>;
 
 const HARNESS_TOOLS = new Set(["pi_harness_goal", "pi_harness_coordinate", "pi_harness_patch"]);
 const PACKAGE_TOOLS = new Set(["Agent", "get_subagent_result", "steer_subagent", "SubagentWorkflow"]);
+const MAX_AUTOMATIC_CONTINUATIONS = 25;
 
 export default function harness(pi: Pi): void {
   let plan = planState();
   let goal: ReturnType<typeof goalState> | undefined;
   let savedTools: string[] | undefined;
   let continuationQueued = false;
+  let continuationCount = 0;
+  let invalidTerminalAttempts = 0;
   let goalGroupId: string | undefined;
 
   const say = (ctx: Context, message: string, level: "info" | "warning" | "error" = "info") => ctx.ui?.notify?.(message, level);
@@ -50,13 +53,30 @@ export default function harness(pi: Pi): void {
     if (goal?.status === "active") goal = transitionGoal(goal, "cancelled");
     goalGroupId = undefined;
     continuationQueued = false;
+    continuationCount = 0;
+    invalidTerminalAttempts = 0;
     const cancelled = cancelCoordinateTasks(groupId);
     ctx.abort?.();
     persist();
     say(ctx, `Goal cancelled; ${cancelled} package-managed task(s) were aborted.`);
   };
+  const stopUnboundedGoal = () => {
+    if (!goal || goal.status !== "active") return;
+    goal = transitionGoal(
+      goal,
+      "error",
+      `Automatic continuation limit reached after ${MAX_AUTOMATIC_CONTINUATIONS} turns.`,
+      "The goal did not reach a terminal state within the automatic continuation limit.",
+    );
+    goalGroupId = undefined;
+    continuationQueued = false;
+    invalidTerminalAttempts = 0;
+    persist();
+  };
   const continueGoal = () => {
     if (!goal || goal.status !== "active" || continuationQueued || plan.enabled) return;
+    if (continuationCount >= MAX_AUTOMATIC_CONTINUATIONS) return stopUnboundedGoal();
+    continuationCount += 1;
     continuationQueued = true;
     pi.sendUserMessage?.(`[GOAL ACTIVE] ${goal.objective}\nContinue until you call pi_harness_goal with a terminal state and concrete evidence.`, { deliverAs: "followUp" });
   };
@@ -67,10 +87,24 @@ export default function harness(pi: Pi): void {
     const entries = ctx.sessionManager?.getEntries?.() ?? [];
     plan = restore(entries, PLAN_ENTRY) ?? plan;
     goal = restore(entries, GOAL_ENTRY) ?? goal;
+    continuationCount = 0;
+    invalidTerminalAttempts = 0;
     goalGroupId = goal?.status === "active" ? randomUUID() : undefined;
     if (plan.enabled) setPlan(true, ctx);
   });
-  pi.on?.("tool_call", (event: any) => {
+  pi.on?.("tool_call", (event: any, ctx: Context) => {
+    if (event.toolName === "pi_harness_goal" && goal?.status === "active") {
+      const input = event.input ?? {};
+      const invalid = !input.evidence?.trim?.() || (["blocked", "error"].includes(input.status) && !input.blocker?.trim?.());
+      if (invalid) {
+        invalidTerminalAttempts += 1;
+        if (invalidTerminalAttempts >= MAX_AUTOMATIC_CONTINUATIONS) {
+          stopUnboundedGoal();
+          ctx.abort?.();
+          return { block: true, reason: "Goal safety limit reached after repeated invalid terminal calls." };
+        }
+      }
+    }
     if (!plan.enabled) return;
     if (HARNESS_TOOLS.has(event.toolName) || !isPlanAllowedTool(event.toolName, event.input)) {
       return { block: true, reason: event.toolName === "bash" ? "Plan mode rejects this bash syntax." : "Plan mode is read-only. Run /plan off before using this tool." };
@@ -96,7 +130,7 @@ export default function harness(pi: Pi): void {
     if (input === "cancel") return cancelGoal(ctx);
     if (plan.enabled) return say(ctx, "Disable plan mode before starting a goal.", "warning");
     if (goal?.status === "active") return say(ctx, "An active goal already exists; use /goal status or /goal cancel.", "warning");
-    try { goal = goalState(input); goalGroupId = randomUUID(); persist(); say(ctx, `Goal active: ${goal.objective}`); continueGoal(); } catch (error) { say(ctx, (error as Error).message, "error"); }
+    try { goal = goalState(input); goalGroupId = randomUUID(); continuationCount = 0; invalidTerminalAttempts = 0; persist(); say(ctx, `Goal active: ${goal.objective}`); continueGoal(); } catch (error) { say(ctx, (error as Error).message, "error"); }
   }});
   pi.registerCommand?.("skill-hub", { description: "Show the pinned curated-skill boundary", handler: async (_args: string, ctx: Context) => {
     say(ctx, "Curated skills are checksum-pinned. Do not install an additional skill without an explicit user request.");

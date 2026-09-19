@@ -60,10 +60,11 @@ function responseChunk(delta, finishReason = null) {
 }
 
 class DisposableProvider {
-  constructor(root, project, agentDir) {
+  constructor(root, project, agentDir, mode = "normal") {
     this.root = root;
     this.project = project;
     this.agentDir = agentDir;
+    this.mode = mode;
     this.requests = [];
     this.server = createServer((request, response) => this.handleRequest(request, response));
   }
@@ -89,7 +90,7 @@ class DisposableProvider {
     const body = JSON.parse(raw);
     const messages = body.messages ?? [];
     const markerIndex = messages.reduce((latest, message, index) => {
-      if (message.role === "user" && messageText(message).includes("CALL_")) return index;
+      if (message.role === "user" && (messageText(message).includes("CALL_") || messageText(message).includes("[GOAL ACTIVE]"))) return index;
       return latest;
     }, -1);
     const marker = markerIndex >= 0 ? messageText(messages[markerIndex]) : undefined;
@@ -104,6 +105,10 @@ class DisposableProvider {
 
     let toolName;
     let argumentsForTool;
+    if (this.mode === "invalid-terminal" && marker?.includes("[GOAL ACTIVE]") && !hasToolResultAfterMarker) {
+      toolName = "pi_harness_goal";
+      argumentsForTool = { status: "complete", evidence: "" };
+    }
     if (marker && !hasToolResultAfterMarker) {
       if (marker.includes("CALL_WRITE") || marker.includes("CALL_CHILD_WRITE") || marker.includes("CALL_PARENT_WRITE")) {
         toolName = "write";
@@ -311,7 +316,7 @@ class DisposablePi {
   }
 }
 
-async function createFixture() {
+async function createFixture(options = {}) {
   const root = mkdtempSync(join(tmpdir(), "pi-plan-lifecycle-"));
   const home = join(root, "home");
   const agentDir = join(home, ".pi", "agent");
@@ -344,7 +349,7 @@ async function createFixture() {
   writeFileSync(join(project, "patch-target.txt"), "original\n");
   writeFileSync(join(project, "read-target.txt"), "read me\n");
 
-  const provider = new DisposableProvider(root, project, agentDir);
+  const provider = new DisposableProvider(root, project, agentDir, options.mode);
   provider.env = {
     ...process.env,
     HOME: home,
@@ -557,5 +562,29 @@ test("Pi plan mode is independent across real fork and switch_session operations
   } finally {
     if (pi) await pi.close();
     await fixture.close();
+  }
+});
+
+test("Pi goal failure modes stop at a bounded continuation error", async () => {
+  for (const mode of ["normal", "invalid-terminal"]) {
+    const fixture = await createFixture({ mode });
+    let pi;
+    try {
+      pi = fixture.spawn();
+      await pi.prompt("/goal bounded failure");
+      let goalEntry;
+      for (let attempt = 0; attempt < 250; attempt += 1) {
+        const entries = (await pi.send({ type: "get_entries" })).data.entries;
+        goalEntry = latestCustom(entries, "pi-harness-goal-state");
+        if (goalEntry?.data?.status !== "active") break;
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
+      }
+      assert.equal(goalEntry?.data?.status, "error", `${mode}: goal must terminate with a safety error`);
+      assert.match(goalEntry.data.evidence.at(-1), /Automatic continuation limit/);
+      assert.ok(fixture.provider.requests.length <= 50, `${mode}: continuation was not bounded`);
+    } finally {
+      if (pi) await pi.close();
+      await fixture.close();
+    }
   }
 });
