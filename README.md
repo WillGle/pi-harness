@@ -1,6 +1,6 @@
 # Pi Harness
 
-Pi-native harness and extension for **Pi 0.85.1**. Provides read-only planning mode (`/plan`), evidence-backed goal tracking (`/goal`), curated skills, a bounded coordinator with isolated git worktrees, and an Agent Client Protocol (ACP) bridge for editors like Zed.
+Pi-native harness and extension for **Pi 0.85.1**. Provides read-only planning mode (`/plan`), evidence-backed goal tracking (`/goal`), curated skills, a thin coordinator adapter backed by `@tintinweb/pi-subagents@0.19.0`, and an Agent Client Protocol (ACP) bridge for editors like Zed.
 
 ---
 
@@ -9,7 +9,7 @@ Pi-native harness and extension for **Pi 0.85.1**. Provides read-only planning m
 - **Read-Only Planning Mode (`/plan on|off|status`)**: Strips mutating tools (`edit`, `write`), blocks mutating bash syntax (e.g. `sed -i`, redirects, file deletions), and prompts the agent to provide assumptions, steps, and verification gates.
 - **Evidence-Backed Goal (`/goal <objective>`)**: Tracks a single active objective requiring concrete verification evidence and blockers for terminal transitions. Survives session compaction, restore, and fork via native session entries.
 - **5 Curated Skills**: Checksum-pinned skills (`project-scouting`, `caveman`, `ponytail`, `pi-coordinator`, `skill-hub`) verified directly against upstream commit `skills-central@c9dd3e4`.
-- **Bounded Coordinator**: Spawns scoped scout/researcher child processes and worker tasks isolated in temporary git worktrees with strict non-auto-integration guarantees.
+- **Package-Backed Coordinator**: Delegates scoped scout/research and isolated worker tasks to `@tintinweb/pi-subagents`; Harness retains role policy, verification, bounded result normalization, and strict non-auto-integration.
 - **ACP Stdio Bridge (`pi-harness-acp`)**: Connects Pi with Zed Editor or any ACP client over JSON-RPC stdio. Advertises extension commands (`/plan`, `/goal`), forwards streaming events, and ensures clean subprocess lifecycle management (cross-restart session reconnect is experimental).
 - **Project Memory (`/learn <note>`)**: Retains user-saved rules and lessons in owner-only local files at `~/.pi-harness/memory/<project-hash>.md`, outside the repository. Loaded memory is sent with the prompt to the active model provider.
 

@@ -1,10 +1,11 @@
 import process from "node:process";
+import { randomUUID } from "node:crypto";
 import {
   COMPACT_ENTRY, GOAL_ENTRY, PLAN_ENTRY, READ_ONLY_TOOLS, cavemanSummary, goalState,
   isPlanAllowedTool, parsePlan, planState, restore, transitionGoal,
 } from "../lib/state.mjs";
 import { appendProjectMemory, clearProjectMemory, loadProjectMemory } from "../lib/memory.mjs";
-import { executeWorkerTask, modelDispatch, runWorkerChild, startChild, terminateChildren, validateTask, workerWorktree } from "../lib/coordinator.mjs";
+import { cancelCoordinateTasks, executeCoordinateTask, validateTask } from "../lib/coordinator.mjs";
 import { findReferences, findSymbol } from "../lib/code-intel.mjs";
 import { readHashlines, replaceHashlines } from "../lib/precise-edit.mjs";
 import { Type } from "typebox";
@@ -13,12 +14,14 @@ type Context = { ui?: { notify?: (message: string, level: "info" | "warning" | "
 type Pi = Record<string, any>;
 
 const HARNESS_TOOLS = new Set(["pi_harness_goal", "pi_harness_coordinate", "pi_harness_patch"]);
+const PACKAGE_TOOLS = new Set(["Agent", "get_subagent_result", "steer_subagent", "SubagentWorkflow"]);
 
 export default function harness(pi: Pi): void {
   let plan = planState();
   let goal: ReturnType<typeof goalState> | undefined;
   let savedTools: string[] | undefined;
   let continuationQueued = false;
+  let goalGroupId: string | undefined;
 
   const say = (ctx: Context, message: string, level: "info" | "warning" | "error" = "info") => ctx.ui?.notify?.(message, level);
   const persist = () => {
@@ -43,12 +46,14 @@ export default function harness(pi: Pi): void {
     say(ctx, `Plan mode ${enabled ? "enabled (read-only)" : "disabled"}.`);
   };
   const cancelGoal = (ctx: Context) => {
+    const groupId = goal?.status === "active" ? goalGroupId : undefined;
     if (goal?.status === "active") goal = transitionGoal(goal, "cancelled");
+    goalGroupId = undefined;
     continuationQueued = false;
-    terminateChildren();
+    const cancelled = cancelCoordinateTasks(groupId);
     ctx.abort?.();
     persist();
-    say(ctx, "Goal cancelled; queued continuation and Pi children were aborted.");
+    say(ctx, `Goal cancelled; ${cancelled} package-managed task(s) were aborted.`);
   };
   const continueGoal = () => {
     if (!goal || goal.status !== "active" || continuationQueued || plan.enabled) return;
@@ -57,9 +62,12 @@ export default function harness(pi: Pi): void {
   };
 
   pi.on?.("session_start", (_event: any, ctx: any) => {
+    const activeTools = pi.getActiveTools?.() ?? [];
+    pi.setActiveTools?.(activeTools.filter((name: string) => !PACKAGE_TOOLS.has(name)));
     const entries = ctx.sessionManager?.getEntries?.() ?? [];
     plan = restore(entries, PLAN_ENTRY) ?? plan;
     goal = restore(entries, GOAL_ENTRY) ?? goal;
+    goalGroupId = goal?.status === "active" ? randomUUID() : undefined;
     if (plan.enabled) setPlan(true, ctx);
   });
   pi.on?.("tool_call", (event: any) => {
@@ -88,7 +96,7 @@ export default function harness(pi: Pi): void {
     if (input === "cancel") return cancelGoal(ctx);
     if (plan.enabled) return say(ctx, "Disable plan mode before starting a goal.", "warning");
     if (goal?.status === "active") return say(ctx, "An active goal already exists; use /goal status or /goal cancel.", "warning");
-    try { goal = goalState(input); persist(); say(ctx, `Goal active: ${goal.objective}`); continueGoal(); } catch (error) { say(ctx, (error as Error).message, "error"); }
+    try { goal = goalState(input); goalGroupId = randomUUID(); persist(); say(ctx, `Goal active: ${goal.objective}`); continueGoal(); } catch (error) { say(ctx, (error as Error).message, "error"); }
   }});
   pi.registerCommand?.("skill-hub", { description: "Show the pinned curated-skill boundary", handler: async (_args: string, ctx: Context) => {
     say(ctx, "Curated skills are checksum-pinned. Do not install an additional skill without an explicit user request.");
@@ -116,7 +124,7 @@ export default function harness(pi: Pi): void {
     description: "Record the terminal state of the active goal. Evidence is mandatory; blocked and error also require a blocker.",
     parameters: Type.Object({ status: Type.Union([Type.Literal("complete"), Type.Literal("blocked"), Type.Literal("error")]), evidence: Type.String(), blocker: Type.Optional(Type.String()) }),
     execute: async (_id: string, input: { status: "complete" | "blocked" | "error"; evidence: string; blocker?: string }) => {
-      goal = transitionGoal(goal, input.status, input.evidence, input.blocker); continuationQueued = false; persist();
+      goal = transitionGoal(goal, input.status, input.evidence, input.blocker); continuationQueued = false; if (goal.status !== "active") goalGroupId = undefined; persist();
       return { content: [{ type: "text", text: JSON.stringify({ status: goal.status, evidence: goal.evidence, blocker: goal.blocker }) }] };
     },
   });
@@ -155,35 +163,15 @@ export default function harness(pi: Pi): void {
   pi.registerTool?.({
     name: "pi_harness_coordinate", label: "Pi Harness coordinator",
     description: "Start a bounded scout, research, or worker task. Worker changes remain in a temporary worktree and are never integrated automatically.",
-    parameters: Type.Object({ owner: Type.Union([Type.Literal("scout"), Type.Literal("research"), Type.Literal("worker")]), scope: Type.String(), verification: Type.String(), permission: Type.Union([Type.Literal("read"), Type.Literal("write")]) }),
-    execute: async (_id: string, input: { owner: "scout" | "research" | "worker"; scope: string; verification: string; permission: "read" | "write" }) => {
+    parameters: Type.Object({ owner: Type.Union([Type.Literal("scout"), Type.Literal("research"), Type.Literal("worker")]), scope: Type.String(), verification: Type.String(), permission: Type.Union([Type.Literal("read"), Type.Literal("write")]), model: Type.Optional(Type.String()) }),
+    execute: async (_id: string, input: { owner: "scout" | "research" | "worker"; scope: string; verification: string; permission: "read" | "write"; model?: string }, signal?: AbortSignal) => {
       const task = validateTask(input);
-      const route = modelDispatch(task);
-      if (task.owner === "worker") {
-        const result = await executeWorkerTask(process.cwd(), task, (worktreePath: string) => runWorkerChild(task, { cwd: worktreePath, ...route }), route);
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({
-                owner: task.owner,
-                model: route.model ?? "Pi default",
-                scope: task.scope,
-                verification: task.verification,
-                worktree: result.worktreePath,
-                branch: result.branch,
-                success: result.success,
-                gatePassed: result.gatePassed,
-                commitCheck: result.commitCheck,
-                diff: result.diff,
-                integration: result.integration,
-              }),
-            },
-          ],
-        };
-      }
-      const child = startChild(task, { cwd: process.cwd(), ...route });
-      return { content: [{ type: "text", text: JSON.stringify({ owner: task.owner, model: route.model ?? "Pi default", scope: task.scope, verification: task.verification, integration: "read-only task" }) }] };
+      const result = await executeCoordinateTask(pi, task, {
+        cwd: process.cwd(),
+        groupId: goal?.status === "active" ? goalGroupId : undefined,
+        signal,
+      });
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
     },
   });
 }

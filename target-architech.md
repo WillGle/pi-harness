@@ -10,13 +10,14 @@ Pi Harness is a Pi package for Pi `0.85.1`; it does not replace Pi, select a pro
 pi-harness/
 ├── extensions/pi-harness.ts       # /plan and /goal Pi extension
 ├── lib/state.mjs                  # persisted-state and safety contracts
-├── lib/coordinator.mjs            # scoped child/worktree helpers
+├── lib/coordinator.mjs            # thin pi-subagents translation and ownership adapter
+├── lib/worker-gate.mjs            # Harness-specific verification and result policy
 ├── bin/pi-harness*.mjs            # doctor and bounded web CLI
 ├── skills/                        # curated, locked Pi skills
 └── packages/pi-harness-acp/       # ACP stdio bridge
 ```
 
-`package.json` declares Pi extensions, skills, prompts, and executable commands. `scripts/bootstrap.mjs` checks Node/Pi and installs this package through `pi install`; it must not modify Pi provider, model, or authentication settings.
+`package.json` declares Pi extensions, skills, prompts, executable commands, and the pinned `@tintinweb/pi-subagents@0.19.0` dependency. `.pi/subagents.json` sets serial-safe package limits and explicit worktree isolation. `scripts/bootstrap.mjs` checks Node/Pi and installs this package through `pi install`; it must not modify Pi provider, model, or authentication settings.
 
 ## Session behavior
 
@@ -30,7 +31,7 @@ The current implementation persists and enforces these command contracts. It doe
 
 ## Coordination boundary
 
-Every delegated task needs an owner, scope, verification command, and permission. Scouts/researchers are read-only Pi children. Workers require a temporary git worktree and branch; integration into a target worktree remains a separate, explicit user-confirmed action. No worker may edit the coordinator worktree.
+Every delegated task needs an owner, scope, verification command, and permission. `@tintinweb/pi-subagents` owns child sessions, tool restrictions, queues, cancellation, model overrides, and worktrees. Harness agent definitions keep scouts/researchers read-only and workers write-capable. Harness runs the worker gate and commit policy, captures bounded evidence, and leaves branch integration as a separate, explicit user-confirmed action. No worker may edit the coordinator worktree.
 
 ## Skills and provenance
 
