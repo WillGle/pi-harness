@@ -49,6 +49,8 @@ if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).
   if (!["search", "fetch"].includes(command) || !value) { console.error("Usage: pi-harness-web search <query> | fetch <url>"); process.exit(2); }
   try {
     try { process.loadEnvFile?.(); } catch {}
+    const jinaUrl = command === "fetch" ? jinaReaderUrl(value) : null;
+    if (command === "fetch" && !jinaUrl) throw new Error("Blocked or invalid fetch URL");
     let request = command === "search" ? searchRequest(value) : { url: value, headers: {}, provider: "direct URL" };
     let response = await fetch(request.url, { signal: AbortSignal.timeout(TIMEOUT_MS), headers: { "user-agent": "pi-harness/1.0", ...request.headers } });
     if (!response.ok && request.provider === "Brave") {
@@ -57,8 +59,7 @@ if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).
     }
     const directStatus = response.status;
     let body = response.ok ? await cappedBody(response) : "";
-    const jinaUrl = command === "fetch" && request.provider === "direct URL" ? jinaReaderUrl(value) : null;
-    if (jinaUrl && (!response.ok || needsJinaFallback(response, body))) {
+    if (jinaUrl && request.provider === "direct URL" && (!response.ok || needsJinaFallback(response, body))) {
       const fallback = await fetch(jinaUrl, { signal: AbortSignal.timeout(TIMEOUT_MS), headers: { "user-agent": "pi-harness/1.0", Accept: "text/markdown" } });
       if (fallback.ok) {
         request = { url: jinaUrl, headers: {}, provider: "Jina Reader (fallback)" };
