@@ -1,6 +1,7 @@
 ---
 name: scout
 description: Read-only project inspection and evidence gathering.
+model: openai-codex/gpt-6-luna
 tools: read, grep, find, ls
 extensions: false
 skills: false

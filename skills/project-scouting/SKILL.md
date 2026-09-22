@@ -19,13 +19,14 @@ You = coordinator. Scout = cheap throwaway agent or zero-token script. Scout rea
 Before doing any other work in a new workspace:
 
 1. Check if `.scout_report.md` exists at the workspace root.
-2. If missing, generate it — either via the `scout-subagent` (preferred, model: haiku) or the local script (zero LLM cost):
+2. If missing, generate it — either via a scout on an available low-cost model (or the active model if no suitable override is known) or the local script (zero LLM cost):
    ```bash
    python3 <skill-dir>/scripts/scout.py .
    # or, if python3 unavailable:
    nix run nixpkgs#python3 -- <skill-dir>/scripts/scout.py .
    ```
    `<skill-dir>` is wherever this skill is installed (e.g. `.claude/skills/project-scouting`).
+   If the script is absent from an installed copy, inspect the project directly with read-only tools and produce the same compact report. Never guess a model name or call a missing script.
 3. **Gitignore the report** — `.scout_report.md` is a regenerable, per-machine
    artifact; it must NOT be committed. If the workspace is a git repo and the
    file isn't already ignored, add it:
@@ -43,7 +44,7 @@ Reading a workspace naively — `ls -R`, full README, every config — burns 50�
 
 | Situation | Use |
 |---|---|
-| Subagent registry available (Claude Code, OpenCode…) | Spawn `scout-subagent` on the cheapest/lite model tier — see [references/agents/scout-subagent.md](references/agents/scout-subagent.md) for per-platform model names |
+| Subagent registry available (Claude Code, OpenCode…) | Spawn `scout-subagent` with a model configured in that host's agent registry; otherwise inherit the active model |
 | No subagent support, python3/nix available | Run `scripts/scout.py` locally — zero LLM cost, instant |
 | `.scout_report.md` already exists and is recent | Read it directly, skip re-generation |
 | Workspace changed significantly (files added/moved/deleted) | Re-run scout to overwrite the stale report |
@@ -62,7 +63,7 @@ On coordinators without an agent registry, skip the subagent and run `scripts/sc
 
 - Don't list full directories or read whole files to "get a feel" for the project — that's what the scout is for.
 - Don't spawn scout on a workspace you already have a fresh `.scout_report.md` for.
-- Don't use a large/expensive model for the scout. The point is a cheap throwaway run. Use the cheapest/lite tier (small model variant) of your platform — see [references/agents/scout-subagent.md](references/agents/scout-subagent.md) for per-platform names. Do NOT use fast/extended-thinking modes — those cost more, not less.
+- Don't guess a model name or its cost. Configure a suitable available model in the host, or use the local script.
 - Don't read the scout's raw tool calls — only its final compressed report matters. Main thread stays clean.
 - Don't skip re-scouting after major structural changes; a stale report will misdirect file targeting.
 
@@ -83,5 +84,5 @@ The scout subagent returns a compact report (not injected raw files). Main threa
 ## Resources
 
 - `scripts/scout.py` — local scanner, zero LLM cost, writes `.scout_report.md`.
-- [references/agents/scout-subagent.md](references/agents/scout-subagent.md) — subagent definition (haiku model constraint, output contract).
+- [references/agents/scout-subagent.md](references/agents/scout-subagent.md) — subagent definition and output contract.
 - [references/setup.md](references/setup.md) — per-host install guide (Claude Code, Codex, plain CLI fallback).
