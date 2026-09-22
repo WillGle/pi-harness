@@ -9,3 +9,12 @@ node_modules/
 .env
 .env.*
 !.env.example
+
+# Only curated skills belong in this public checkout.
+/skills/*
+!/skills/caveman/
+!/skills/pi-coordinator/
+!/skills/ponytail/
+!/skills/project-scouting/
+!/skills/skill-hub/
+!/skills/skills.lock.json

@@ -13,6 +13,8 @@ Pi-native harness and extension for **Pi 0.85.1**. Provides read-only planning m
 - **ACP Stdio Bridge (`pi-harness-acp`)**: Connects Pi with Zed Editor or any ACP client over JSON-RPC stdio, advertises Harness commands, forwards Pi events, persists session mappings, and relays cancellation.
 - **Project Memory (`/learn <note>`)**: Retains user-saved rules and lessons in owner-only local files at `~/.pi-harness/memory/<project-hash>.md`, outside the repository. Loaded memory is sent with the prompt to the active model provider.
 
+Other skill directories are ignored by Git and excluded from the package file list. Review the package contents before publishing this checkout.
+
 ---
 
 ## Clients
@@ -119,6 +121,9 @@ npm test
 
 # Verify curated skill checksums against upstream source
 npm run verify:skills
+
+# Inspect the exact files included before distributing a package
+npm pack --dry-run --json
 ```
 
 ---
