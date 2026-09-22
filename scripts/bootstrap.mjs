@@ -69,15 +69,20 @@ function updateZed() {
 }
 
 requirePi();
+const cliOnly = process.argv[2] === "--cli";
+const packageArgs = process.argv.slice(cliOnly ? 3 : 2);
 const localAcp = join(root, "packages", "pi-harness-acp");
 const defaultPiPkg = existsSync(join(root, "extensions", "pi-harness.ts")) ? root : `${pkg.name}@${pkg.version}`;
 const defaultAcpPkg = existsSync(localAcp) ? localAcp : `@will/pi-harness-acp@${pkg.version}`;
-const piPkg = process.env.PI_HARNESS_PKG || process.argv[2] || defaultPiPkg;
-const acpPkg = process.env.PI_HARNESS_ACP_PKG || process.argv[3] || defaultAcpPkg;
+const piPkg = process.env.PI_HARNESS_PKG || packageArgs[0] || defaultPiPkg;
+const acpPkg = process.env.PI_HARNESS_ACP_PKG || packageArgs[1] || defaultAcpPkg;
 const installed = command("pi", ["install", piPkg], { stdio: "inherit" });
 if (installed.status !== 0) process.exit(installed.status ?? 1);
-const acp = command("npm", ["install", "--global", acpPkg], { stdio: "inherit" });
-if (acp.status !== 0) process.exit(acp.status ?? 1);
-const backup = updateZed();
-console.log(`Pi Harness installed. Zed backup: ${backup}`);
+if (cliOnly) console.log("Pi Harness installed for Pi CLI.");
+else {
+  const acp = command("npm", ["install", "--global", acpPkg], { stdio: "inherit" });
+  if (acp.status !== 0) process.exit(acp.status ?? 1);
+  const backup = updateZed();
+  console.log(`Pi Harness installed. Zed backup: ${backup}`);
+}
 console.log("Provider, model, authentication, aliases, secrets, and environment variables were not changed.");

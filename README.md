@@ -65,6 +65,15 @@ The bootstrap script automatically:
 
 Use this when Zed integration is wanted too. It is not required to use WPi.
 
+### Pi CLI Only
+
+On a machine without Zed, install only the Pi package:
+
+```bash
+npm run bootstrap -- --cli
+npm run doctor
+```
+
 ### WPi Terminal Client
 
 Install the Harness extension and expose the ACP bridge once:
@@ -99,8 +108,11 @@ PI_HARNESS_ACP_BIN=~/dev/pi-harness/packages/pi-harness-acp/bin/pi-harness-acp.m
 Verify system readiness at any time:
 
 ```bash
-# Run health diagnostic
+# Check Pi CLI readiness
 npm run doctor
+
+# Also require ACP and Zed readiness
+npm run doctor -- --zed
 
 # Run unit tests
 npm test

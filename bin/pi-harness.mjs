@@ -68,7 +68,7 @@ if (["find-symbol", "references"].includes(command)) {
     catch (error) { console.error(`pi-harness: ${error.message}`); process.exitCode = 1; }
   }
 }
-else if (command !== "doctor") { console.error("Usage: pi-harness doctor | find-symbol <symbol> | references <symbol>"); process.exitCode = 2; }
+else if (command !== "doctor" || (value && value !== "--zed")) { console.error("Usage: pi-harness doctor [--zed] | find-symbol <symbol> | references <symbol>"); process.exitCode = 2; }
 else {
   const pi = piVersion(); const skills = verifySkills(root); const zed = exactZedEntry();
   const resources = { extension: existsSync(resolve(root, "extensions/pi-harness.ts")), skills: existsSync(resolve(root, "skills/skills.lock.json")) };
@@ -78,8 +78,8 @@ else {
   if (!resources.extension || !resources.skills) failures.push("package resources missing");
   if (!skills.ok) failures.push(...skills.errors);
   if (!toolCalling) failures.push("Pi tool-calling extension readiness check failed");
-  if (!commandPath("pi-harness-acp")) failures.push("pi-harness-acp is not on PATH");
-  if (!zed.ready) failures.push("exact Zed agent_servers.pi-harness entry missing");
+  if (value === "--zed" && !commandPath("pi-harness-acp")) failures.push("pi-harness-acp is not on PATH");
+  if (value === "--zed" && !zed.ready) failures.push("exact Zed agent_servers.pi-harness entry missing");
   console.log(JSON.stringify({
     package: `${pkg.name}@${pkg.version}`, node: process.version, pi,
     resources, commands: { pi: commandPath("pi"), acp: commandPath("pi-harness-acp") },
