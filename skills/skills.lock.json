@@ -3,11 +3,17 @@
   "commit": "8cc8358a98dc3a34e9d982011a20ae167021ea9d",
   "sourceCommitVerified": true,
   "skills": {
+    "ask-user": {
+      "local": true,
+      "files": {
+        "SKILL.md": "559abe0e8f17e90af13487e6e28fd2fc222af0473d975e1ae14ce1448e2f7803"
+      }
+    },
     "architecture-diagram": {
       "sourceSkill": "architecture-diagram",
       "sourceHash": "14e02d191e64e06167ae57aec00b970913a2947726ed3ce817a8dffeb38d504c",
       "files": {
-        "SKILL.md": "d197e67f0d9e989ee0ae495d90e3de4f65d1415b8a0ac00e0a42840eb37b4fa8",
+        "SKILL.md": "1e0ada6ab27e75c1a714394efd9507cb1f8551de1f7572ad371615e5ddb18784",
         "assets/badge_overlap_audit.py": "64831f01321587fd67160afef66115758ff0e85eea05f9c784d6ae57ba782170",
         "assets/template.drawio": "95e509d307a130eef2429889ee619068c54b8f0d88504f1465784b0938f78400",
         "references/readability.md": "70b1b9913af794ab2441b8fd43b009a82d96e5791cbf34c9565ed47d3cea7b5b",

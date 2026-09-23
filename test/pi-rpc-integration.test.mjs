@@ -91,7 +91,7 @@ function spawnPiRpc(options = {}) {
   return { child, sendCommand, prompt, events, close };
 }
 
-test("Pi RPC: command discovery includes plan, goal, and 6 curated skills", async () => {
+test("Pi RPC: command discovery includes plan, goal, and 7 curated skills", async () => {
   const pi = spawnPiRpc();
   try {
     const res = await pi.sendCommand({ type: "get_commands" });
@@ -100,6 +100,7 @@ test("Pi RPC: command discovery includes plan, goal, and 6 curated skills", asyn
     assert.ok(names.includes("plan"));
     assert.ok(names.includes("goal"));
     assert.ok(names.includes("skill-hub"));
+    assert.ok(names.includes("skill:ask-user"));
     assert.ok(names.includes("skill:architecture-diagram"));
     assert.ok(names.includes("skill:caveman"));
     assert.ok(names.includes("skill:pi-coordinator"));

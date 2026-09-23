@@ -36,6 +36,7 @@
     "packages/pi-harness-acp/",
     "scripts/bootstrap.mjs",
     "scripts/verify-skills.mjs",
+    "skills/ask-user/SKILL.md",
     "skills/architecture-diagram/SKILL.md",
     "skills/architecture-diagram/assets/badge_overlap_audit.py",
     "skills/architecture-diagram/assets/template.drawio",
