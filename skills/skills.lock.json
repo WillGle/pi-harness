@@ -3,6 +3,17 @@
   "commit": "8cc8358a98dc3a34e9d982011a20ae167021ea9d",
   "sourceCommitVerified": true,
   "skills": {
+    "architecture-diagram": {
+      "sourceSkill": "architecture-diagram",
+      "sourceHash": "14e02d191e64e06167ae57aec00b970913a2947726ed3ce817a8dffeb38d504c",
+      "files": {
+        "SKILL.md": "d197e67f0d9e989ee0ae495d90e3de4f65d1415b8a0ac00e0a42840eb37b4fa8",
+        "assets/badge_overlap_audit.py": "64831f01321587fd67160afef66115758ff0e85eea05f9c784d6ae57ba782170",
+        "assets/template.drawio": "95e509d307a130eef2429889ee619068c54b8f0d88504f1465784b0938f78400",
+        "references/readability.md": "70b1b9913af794ab2441b8fd43b009a82d96e5791cbf34c9565ed47d3cea7b5b",
+        "references/xml.md": "79343cd7561b0f80ac77093582a248a3244192924060689e33b9e8ec64ce84f3"
+      }
+    },
     "project-scouting": "9e806229a309eeb127d2462ed0b09497208c3e12a6589becbac355b6aeaa84fc",
     "caveman": "5e30bb56afbd0b01bd736f2da84180e76f18db4a64de8e124525d5c8dc2e8605",
     "ponytail": "55dcd2fac1d739f23c91d8e71d825509a29529d8b54ec6c1099cc96ef629c99a",

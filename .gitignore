@@ -12,6 +12,7 @@ node_modules/
 
 # Only curated skills belong in this public checkout.
 /skills/*
+!/skills/architecture-diagram/
 !/skills/caveman/
 !/skills/pi-coordinator/
 !/skills/ponytail/
