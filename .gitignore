@@ -14,6 +14,7 @@ node_modules/
 /skills/*
 !/skills/ask-user/
 !/skills/architecture-diagram/
+!/skills/drawio-modeling/
 !/skills/caveman/
 !/skills/pi-coordinator/
 !/skills/ponytail/

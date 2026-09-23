@@ -34,13 +34,15 @@ test("a modified packaged diagram reference fails verification", () => {
   const temp = mkdtempSync(resolve(tmpdir(), "pi-skills-"));
   try {
     cpSync(resolve(root, "skills"), resolve(temp, "skills"), { recursive: true });
-    for (const [skill, file] of [["architecture-diagram", "readability.md"], ["ask-user", "SKILL.md"]]) {
+    for (const [skill, file] of [["architecture-diagram", "readability.md"], ["ask-user", "SKILL.md"], ["drawio-modeling", "use-case.md"]]) {
       const ref = resolve(temp, "skills", skill, ...(file === "SKILL.md" ? [file] : ["references", file]));
       writeFileSync(ref, readFileSync(ref, "utf8") + "\nchanged\n");
     }
     const result = verifySkills(temp, { sourceRepo: resolve(root, "../skills-central") });
     assert.equal(result.ok, false);
     assert.match(result.errors.join(" "), /architecture-diagram\/references\/readability.md: checksum mismatch/);
+    assert.match(result.errors.join(" "), /ask-user\/SKILL.md: checksum mismatch/);
+    assert.match(result.errors.join(" "), /drawio-modeling\/references\/use-case.md: checksum mismatch/);
   } finally {
     rmSync(temp, { recursive: true, force: true });
   }

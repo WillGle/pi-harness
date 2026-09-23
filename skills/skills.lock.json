@@ -24,6 +24,20 @@
     "caveman": "5e30bb56afbd0b01bd736f2da84180e76f18db4a64de8e124525d5c8dc2e8605",
     "ponytail": "55dcd2fac1d739f23c91d8e71d825509a29529d8b54ec6c1099cc96ef629c99a",
     "pi-coordinator": "f3402206df6278921f89eb9698bc9d1e94d024fbfb15fc37b568544bdfc0bc10",
-    "skill-hub": "de5c9c06eb27b1c2fd0ca5ec3728573903e862efaf73e6d2e2cd750755b47022"
+    "skill-hub": "de5c9c06eb27b1c2fd0ca5ec3728573903e862efaf73e6d2e2cd750755b47022",
+    "drawio-modeling": {
+      "local": true,
+      "files": {
+        "SKILL.md": "dcb4fce129595fa576004b8a1a31168a24d4a85e0ba1a68dd3452ea8eea96f75",
+        "assets/template.drawio": "993b1ca5d76ae4e0c510c02ac3e27d61ac3dc70eebc4025ce6945602b6367af9",
+        "references/activity.md": "634bbb79ed0b0ced46cc83061b383066cc28478ce9041352cf0abfda916c8b83",
+        "references/common.md": "50a09654500b60d22dc29ca2cf4f2b4a5a8b49b4549415cf3ea1dbfe09ad916c",
+        "references/erd.md": "9e8f2406af50541ae59e0275b992068a5b0d570f130b0e7fa2c257653c7bbd26",
+        "references/functional.md": "3d9cc5b8b958b67cc6ba26cb26f7e1e0b09744c3f5432082ec25c5c72a57f41d",
+        "references/sequence.md": "bee78a012e29362f0280839b410764cde752fe5ee8c33d7c2c77b0651a076bd1",
+        "references/state-machine.md": "ef03025f774689a1177faf2980d847f1eaea8dfd1b7ff29590536035a27e79b9",
+        "references/use-case.md": "074a4116ca03ea11ca864bea3f6d6c780e10865be3ef037add32b235f5689933"
+      }
+    }
   }
 }

@@ -1,0 +1,7 @@
+# UML use-case — actor goals, not proof of permissions
+
+A **use-case** describes an actor's goal/interaction with the system. The association actor—use-case means participation, **not authorization**. A role/permission matrix (role × action/resource/scope, allow/deny/conditions) is a separate artifact. If the user says “use-case = phân quyền”, ask whether they need actor-goal coverage, actual access rights, or both. When both: draw use-cases for goals and add a separate permission table/view backed by policy documents; never infer allow/deny from UML associations.
+
+- Actor = external person/system/role interacting with the **system boundary**; use-case = oval containing a user-observable goal in verb phrase. Place actors outside the boundary; place use-cases inside. A line between actor and goal expresses participation, not invocation direction.
+- `«include»` = mandatory reused behavior, dashed dependency pointing to the included use-case; `«extend»` = conditional/optional behavior, dashed dependency pointing to the extended base use-case, with condition/extension point if documented. Actor generalization points to the more general actor; do not use include/extend just to group similar goals.
+- Source: product use-case specs, role descriptions and documented permission policy. Audit: every actor and goal is evidenced, boundary is clear, relationships retain correct direction, and any permission claim is traced separately to policy/enforcement docs. Ask about missing roles, access scopes and deny rules before drawing an authorization view.
