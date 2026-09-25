@@ -145,6 +145,41 @@ test("active direct TaskOrder and semantic Reviewer are never aborted by proacti
   }
 });
 
+test("proactive compaction waits until both parallel Task pipelines settle", async () => {
+  const f = fixture();
+  const cwd = mkdtempSync(join(tmpdir(), "pi-compact-wave-"));
+  const before = process.env.PI_HARNESS_EVIDENCE_DIR;
+  process.env.PI_HARNESS_EVIDENCE_DIR = cwd;
+  try {
+    await f.command("harness-compact", "set 55");
+    f.setPercent(60); f.emit("context");
+    const children = [];
+    f.pi.events.on("subagents:rpc:spawn", (request) => {
+      const id = `research-${children.length + 1}`;
+      children.push({ id, request });
+      f.pi.events.emit(`subagents:rpc:spawn:reply:${request.requestId}`, { success: true, data: { id } });
+    });
+    const input = (task_id) => ({ owner: "research", task_id, scope: `Inspect ${task_id}`, verification: "Inspect report", permission: "read" });
+    const first = executeCoordinateTask(f.pi, input("T-1"), { cwd, timeout: 1500, rpcTimeout: 1000 });
+    const second = executeCoordinateTask(f.pi, input("T-2"), { cwd, timeout: 1500, rpcTimeout: 1000 });
+    for (let i = 0; i < 30 && children.length < 2; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(children.length, 2);
+    f.emit("agent_settled");
+    assert.equal(f.pi.compactions.length, 0);
+    f.pi.events.emit("subagents:completed", { id: children[0].id, status: "completed", result: "First report." });
+    await first;
+    f.emit("agent_settled");
+    assert.equal(f.pi.compactions.length, 0);
+    f.pi.events.emit("subagents:completed", { id: children[1].id, status: "completed", result: "Second report." });
+    await second;
+    f.emit("agent_settled");
+    assert.equal(f.pi.compactions.length, 1);
+  } finally {
+    if (before === undefined) delete process.env.PI_HARNESS_EVIDENCE_DIR; else process.env.PI_HARNESS_EVIDENCE_DIR = before;
+    rmSync(cwd, { force: true, recursive: true });
+  }
+});
+
 test("native compaction satisfies pending request without a second Harness compaction", async () => {
   const f = fixture();
   await f.command("harness-compact", "set 75");

@@ -247,6 +247,57 @@ test("goal cancellation aborts the active managed ExecutionUnit", async () => {
   assert.equal(graph.nodes["T-1"].scheduler_status, "blocked");
 });
 
+test("managed Operation cancellation aborts all claimed wave Tasks and blocks ghost-running nodes", async () => {
+  const pi = fakePi();
+  await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-1", objective: "Cancel wave.", required_task_ids: ["T-1", "T-2"] });
+  const active = [];
+  pi.events.on("subagents:rpc:spawn", (req) => {
+    const id = `agent-${active.length}-${req.type}`;
+    pi.events.emit(`subagents:rpc:spawn:reply:${req.requestId}`, { success: true, data: { id } });
+    if (req.type === "coordinator") queueMicrotask(() => pi.events.emit("subagents:completed", { id, status: "completed", result: decision("dispatch_batch", { tasks: [task("T-1"), task("T-2")] }) }));
+    else {
+      active.push(req);
+      req.options.signal.addEventListener("abort", () => pi.events.emit("subagents:failed", { id, status: "stopped" }), { once: true });
+    }
+  });
+  const pending = call(pi, "pi_harness_run_operation", { operation_id: "O-1" });
+  for (let i = 0; i < 40 && active.length < 2; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(active.length, 2);
+  const snapshotBefore = pi.entries.filter((entry) => entry.customType === TASK_GRAPH_ENTRY).at(-1).data.task_graphs["O-1"];
+  assert.deepEqual(Object.values(snapshotBefore.nodes).map((node) => node.scheduler_status), ["running", "running"]);
+  await call(pi, "pi_harness_cancel_operation", { operation_id: "O-1" });
+  assert.ok(active.every((req) => req.options.signal.aborted));
+  assert.equal((await pending).status, "blocked");
+  const snapshotAfter = pi.entries.filter((entry) => entry.customType === TASK_GRAPH_ENTRY).at(-1).data.task_graphs["O-1"];
+  assert.deepEqual(Object.values(snapshotAfter.nodes).map((node) => node.scheduler_status), ["blocked", "blocked"]);
+});
+
+test("old parallel wave cannot mutate a new session after both children abort", async () => {
+  const pi = fakePi();
+  await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-1", objective: "Old wave.", required_task_ids: ["T-1", "T-2"] });
+  const workers = [];
+  pi.events.on("subagents:rpc:spawn", (req) => {
+    const id = `old-${workers.length}-${req.type}`;
+    pi.events.emit(`subagents:rpc:spawn:reply:${req.requestId}`, { success: true, data: { id } });
+    if (req.type === "coordinator") queueMicrotask(() => pi.events.emit("subagents:completed", { id, status: "completed", result: decision("dispatch_batch", { tasks: [task("T-1"), task("T-2")] }) }));
+    else {
+      workers.push({ id, req });
+      req.options.signal.addEventListener("abort", () => pi.events.emit("subagents:failed", { id, status: "stopped" }), { once: true });
+    }
+  });
+  const old = call(pi, "pi_harness_run_operation", { operation_id: "O-1" });
+  for (let i = 0; i < 40 && workers.length < 2; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(workers.length, 2);
+  const freshEntries = [];
+  pi.sessionStart(freshEntries);
+  await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-1", objective: "New session.", required_task_ids: ["T-1", "T-2"] });
+  assert.ok(workers.every(({ req }) => req.options.signal.aborted));
+  assert.equal((await old).status, "blocked");
+  const snapshot = freshEntries.filter((entry) => entry.customType === TASK_GRAPH_ENTRY).at(-1).data;
+  assert.equal(snapshot.operations["O-1"].objective, "New session.");
+  assert.deepEqual(Object.values(snapshot.task_graphs["O-1"].nodes).map((node) => [node.scheduler_status, node.attempts]), [["ready", 0], ["ready", 0]]);
+});
+
 test("serial Coordinator turns dispatch through Harness; Commander receives only OperationReport", async () => {
   const pi = fakePi();
   await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-1", objective: "Check reports.", required_task_ids: ["T-1", "T-2"], dependencies: { "T-2": ["T-1"] }, acceptance_criteria: ["The Coordinator checked the result."] });

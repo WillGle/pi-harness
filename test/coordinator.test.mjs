@@ -124,7 +124,7 @@ test("public task validation keeps scout and research read-only", () => {
   assert.throws(() => validateTask({ owner: "research", scope: "src", verification: "rg x", permission: "write" }));
   assert.equal(validateTask({ owner: "scout", scope: "src", verification: "rg x", permission: "read" }).owner, "scout");
   assert.deepEqual(JSON.parse(readFileSync(".pi/subagents.json", "utf8")), {
-    maxConcurrent: 1,
+    maxConcurrent: 4,
     maxConcurrentForeground: 1,
     worktreeIsolation: true,
   });

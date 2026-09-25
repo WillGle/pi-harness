@@ -1,5 +1,5 @@
 {
-  "maxConcurrent": 1,
+  "maxConcurrent": 4,
   "maxConcurrentForeground": 1,
   "worktreeIsolation": true
 }

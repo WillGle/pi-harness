@@ -30,7 +30,7 @@ test("Scheduler claims only ready TaskOrders, records results and atomically acc
   assert.throws(() => validateTaskGraph(graph, accepted), /differs/);
   graph = acceptGraphTask(graph, op, accepted, "T-1"); op = accepted;
   assert.deepEqual(readyTaskIds(graph, op), ["T-2", "T-3"]);
-  assert.deepEqual(readyTaskIds(claimTask(graph, op, "T-2"), op), [], "serial Scheduler does not dispatch T-3 while T-2 is running");
+  assert.deepEqual(readyTaskIds(claimTask(graph, op, "T-2"), op), ["T-3"], "readiness does not consume an unrelated Task's capacity");
   assert.equal(status(graph, "T-4"), "pending");
   assert.deepEqual(op.accepted_task_ids, Object.keys(graph.nodes).filter((id) => status(graph, id) === "accepted"));
   graph = recordTaskGraphResult(claimTask(graph, op, "T-2"), recordTaskResult(op, result("T-2")), "T-2");
