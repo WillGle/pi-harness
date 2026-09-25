@@ -1,10 +1,11 @@
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { executeCoordinateTask, validateTask, cancelCoordinateTasks, securityReviewModel } from "../lib/coordinator.mjs";
 import { taskOrder, taskResult } from "../lib/communication.mjs";
+import { loadCustomAgents } from "../node_modules/@tintinweb/pi-subagents/dist/custom-agents.js";
 
 const dir = mkdtempSync(join(tmpdir(), "pi-security-test-"));
 const previous = process.env.PI_HARNESS_EVIDENCE_DIR;
@@ -47,7 +48,23 @@ test("Review Profile validation is exact, independent, bounded, and opt-in", () 
   assert.throws(() => validateTask({ ...input(), acceptance_criteria: [criteria[0], criteria[0]] }));
   assert.equal(securityReviewModel(), "openai/gpt-daybreak-blue-latest");
   const profile = readFileSync(".pi/agents/security-reviewer.md", "utf8");
-  for (const setting of ["tools: none", "extensions: false", "skills: false", "prompt_mode: replace"]) assert.ok(profile.includes(setting));
+  for (const setting of ["tools: read", "extensions: false", "skills: false", "prompt_mode: replace", "Do not use tools.", "Use only the VerificationOrder packet."]) assert.ok(profile.includes(setting));
+  assert.doesNotMatch(profile, /^tools: none$/m);
+  const config = loadCustomAgents(process.cwd(), true).get("security-reviewer");
+  assert.deepEqual(config.builtinToolNames, ["read"]);
+  assert.equal(config.extensions, false);
+  assert.equal(config.skills, false);
+  assert.equal(config.promptMode, "replace");
+  // The installed 0.19.0 parser grants all built-ins when tools is omitted,
+  // but zero built-ins for `tools: none`; neither form is this role's declaration.
+  assert.deepEqual(loadCustomAgents(process.cwd(), true).get("coordinator").builtinToolNames, ["read"]);
+  const agentDir = join(dir, ".pi", "agents");
+  mkdirSync(agentDir, { recursive: true });
+  writeFileSync(join(agentDir, "probe-none.md"), "---\nname: probe-none\ntools: none\n---\nDo not use tools.\n");
+  writeFileSync(join(agentDir, "probe-omitted.md"), "---\nname: probe-omitted\n---\nDo not use tools.\n");
+  const parsed = loadCustomAgents(dir, true);
+  assert.deepEqual(parsed.get("probe-none").builtinToolNames, []);
+  assert.ok(parsed.get("probe-omitted").builtinToolNames.includes("bash"));
 });
 
 test("mixed criteria partition and model route; only selected Evidence and no transcripts", async () => {
