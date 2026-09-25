@@ -9,7 +9,8 @@ import {
   isPlanAllowedTool, parsePlan, planState, restore, transitionGoal,
 } from "../lib/state.mjs";
 import { appendProjectMemory, clearProjectMemory, loadProjectMemory } from "../lib/memory.mjs";
-import { cancelCoordinateTasks, executeCoordinateTask, validateTask } from "../lib/coordinator.mjs";
+import { cancelCoordinateTasks, executeCoordinateTask, executeCoordinatorTurn, validateTask } from "../lib/coordinator.mjs";
+import { COORDINATOR_ENTRY, coordinatorState, runOperation } from "../lib/operation-runner.mjs";
 import { promoteTaskResult } from "../lib/communication.mjs";
 import { OPERATION_ENTRY, acceptOperationCriterion, acceptTaskResult, createOperation, recordTaskResult, rejectTaskResult } from "../lib/operation.mjs";
 import { findReferences, findSymbol } from "../lib/code-intel.mjs";
@@ -19,7 +20,7 @@ import { Type } from "typebox";
 type Context = { ui?: { notify?: (message: string, level: "info" | "warning" | "error") => void }; abort?: () => void };
 type Pi = Record<string, any>;
 
-const HARNESS_TOOLS = new Set(["pi_harness_goal", "pi_harness_coordinate", "pi_harness_operation", "pi_harness_patch"]);
+const HARNESS_TOOLS = new Set(["pi_harness_goal", "pi_harness_coordinate", "pi_harness_operation", "pi_harness_run_operation", "pi_harness_cancel_operation", "pi_harness_patch"]);
 const PACKAGE_TOOLS = new Set(["Agent", "get_subagent_result", "steer_subagent", "SubagentWorkflow"]);
 const MAX_AUTOMATIC_CONTINUATIONS = 25;
 const SKILLS = Object.keys(JSON.parse(readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "../skills/skills.lock.json"), "utf8")).skills).join(", ");
@@ -30,6 +31,9 @@ export default function harness(pi: Pi): void {
   let plan = planState();
   let goal: ReturnType<typeof goalState> | undefined;
   let operations: Record<string, ReturnType<typeof createOperation>> = {};
+  let coordinatorStates: Record<string, ReturnType<typeof coordinatorState>> = {};
+  const activeOperationRuns = new Map<string, { controller: AbortController; goalGroup?: string }>();
+  let sessionEpoch = 0;
   let savedTools: string[] | undefined;
   let continuationQueued = false;
   let continuationCount = 0;
@@ -60,6 +64,7 @@ export default function harness(pi: Pi): void {
   };
   const cancelGoal = (ctx: Context) => {
     const groupId = goal?.status === "active" ? goalGroupId : undefined;
+    for (const run of activeOperationRuns.values()) if (run.goalGroup && run.goalGroup === groupId) run.controller.abort();
     if (goal?.status === "active") goal = transitionGoal(goal, "cancelled");
     goalGroupId = undefined;
     continuationQueued = false;
@@ -92,12 +97,15 @@ export default function harness(pi: Pi): void {
   };
 
   pi.on?.("session_start", (_event: any, ctx: any) => {
+    sessionEpoch++;
+    for (const run of activeOperationRuns.values()) run.controller.abort();
     const activeTools = pi.getActiveTools?.() ?? [];
     pi.setActiveTools?.(activeTools.filter((name: string) => !PACKAGE_TOOLS.has(name)));
     const entries = ctx.sessionManager?.getEntries?.() ?? [];
     plan = restore(entries, PLAN_ENTRY) ?? plan;
     goal = restore(entries, GOAL_ENTRY) ?? goal;
-    operations = restore(entries, OPERATION_ENTRY) ?? operations;
+    operations = restore(entries, OPERATION_ENTRY) ?? {};
+    coordinatorStates = restore(entries, COORDINATOR_ENTRY) ?? {};
     continuationCount = 0;
     invalidTerminalAttempts = 0;
     goalGroupId = goal?.status === "active" ? randomUUID() : undefined;
@@ -264,6 +272,7 @@ export default function harness(pi: Pi): void {
     parameters: Type.Object({ action: Type.Union([Type.Literal("create"), Type.Literal("status"), Type.Literal("accept_task"), Type.Literal("reject_task"), Type.Literal("accept_criterion")]), operation_id: Type.String(), objective: Type.Optional(Type.String()), required_task_ids: Type.Optional(Type.Array(Type.String())), acceptance_criteria: Type.Optional(Type.Array(Type.String())), dependencies: Type.Optional(Type.Record(Type.String(), Type.Array(Type.String()))), task_id: Type.Optional(Type.String()), criterion: Type.Optional(Type.String()), evidence_refs: Type.Optional(Type.Array(Type.String())) }),
     execute: async (_id: string, input: { action: "create" | "status" | "accept_task" | "reject_task" | "accept_criterion"; operation_id: string; objective?: string; required_task_ids?: string[]; acceptance_criteria?: string[]; dependencies?: Record<string, string[]>; task_id?: string; criterion?: string; evidence_refs?: string[] }) => {
       const id = input.operation_id;
+      if (activeOperationRuns.has(id) || (input.action !== "create" && Object.hasOwn(coordinatorStates, id))) throw new Error("The Harness Coordinator owns this Operation; use the bounded OperationReport");
       if (input.action === "create") {
         if (Object.hasOwn(operations, id)) throw new Error("Operation ID already exists");
         const operation = createOperation({ operation_id: id, objective: input.objective, required_task_ids: input.required_task_ids, acceptance_criteria: input.acceptance_criteria, dependencies: input.dependencies });
@@ -281,12 +290,55 @@ export default function harness(pi: Pi): void {
     },
   });
   pi.registerTool?.({
+    name: "pi_harness_run_operation", label: "Pi Harness run Operation",
+    description: "Run a serial Harness-controlled Coordinator loop. Return only a bounded OperationReport to the Commander.",
+    parameters: Type.Object({ operation_id: Type.String(), model: Type.Optional(Type.String()) }),
+    execute: async (_id: string, input: { operation_id: string; model?: string }, signal?: AbortSignal) => {
+      const id = input.operation_id;
+      const operation = Object.hasOwn(operations, id) ? operations[id] : undefined;
+      if (!operation || operation.status !== "open" || activeOperationRuns.size) throw new Error("An open Operation and an idle coordination loop are required");
+      const controller = new AbortController();
+      const abort = () => controller.abort();
+      if (signal?.aborted) controller.abort(); else signal?.addEventListener("abort", abort, { once: true });
+      const runId = randomUUID();
+      const runEpoch = sessionEpoch;
+      activeOperationRuns.set(id, { controller, goalGroup: goal?.status === "active" ? goalGroupId : undefined });
+      const save = (nextOperation: ReturnType<typeof createOperation>, state: ReturnType<typeof coordinatorState>) => {
+        if (runEpoch !== sessionEpoch) return;
+        operations = { ...operations, [id]: nextOperation };
+        coordinatorStates = { ...coordinatorStates, [id]: state };
+        pi.appendEntry?.(OPERATION_ENTRY, operations);
+        pi.appendEntry?.(COORDINATOR_ENTRY, coordinatorStates);
+      };
+      try {
+        const report = await runOperation(operation, {
+          turn: (prompt: string) => executeCoordinatorTurn(pi, prompt, { cwd: process.cwd(), model: input.model, groupId: runId, signal: controller.signal }),
+          dispatch: async (task: any) => promoteTaskResult(await executeCoordinateTask(pi, validateTask(task), { cwd: process.cwd(), groupId: runId, signal: controller.signal })),
+          save,
+        }, { state: coordinatorStates[id] ?? coordinatorState(operation), mission: goal?.status === "active" ? goal.objective : undefined, cwd: process.cwd(), signal: controller.signal });
+        return { content: [{ type: "text", text: JSON.stringify(report) }] };
+      } finally { signal?.removeEventListener("abort", abort); activeOperationRuns.delete(id); }
+    },
+  });
+  pi.registerTool?.({
+    name: "pi_harness_cancel_operation", label: "Pi Harness cancel Operation run",
+    description: "Abort the active Coordinator or ExecutionUnit of this Operation. The Operation stays open for a later handoff.",
+    parameters: Type.Object({ operation_id: Type.String() }),
+    execute: async (_id: string, input: { operation_id: string }) => {
+      const run = activeOperationRuns.get(input.operation_id);
+      if (!run) throw new Error("No active run for this Operation");
+      run.controller.abort();
+      return { content: [{ type: "text", text: JSON.stringify({ operation_id: input.operation_id, status: "blocked", blocker: "The Commander cancelled the active Operation run." }) }] };
+    },
+  });
+  pi.registerTool?.({
     name: "pi_harness_coordinate", label: "Pi Harness coordinator",
     description: "Start a bounded scout, research, or worker task. Worker changes remain in a temporary worktree and are never integrated automatically.",
     parameters: Type.Object({ owner: Type.Union([Type.Literal("scout"), Type.Literal("research"), Type.Literal("worker")]), scope: Type.String(), verification: Type.String(), permission: Type.Union([Type.Literal("read"), Type.Literal("write")]), model: Type.Optional(Type.String()), operation_id: Type.Optional(Type.String()), task_id: Type.Optional(Type.String()), constraints: Type.Optional(Type.Array(Type.String())), acceptance_criteria: Type.Optional(Type.Array(Type.String())), review_evidence: Type.Optional(Type.Record(Type.String(), Type.Union([Type.Literal("diff"), Type.Literal("gate"), Type.Literal("execution"), Type.Literal("report")]))) }),
     execute: async (_id: string, input: { owner: "scout" | "research" | "worker"; scope: string; verification: string; permission: "read" | "write"; model?: string; operation_id?: string; task_id?: string; constraints?: string[]; acceptance_criteria?: string[]; review_evidence?: Record<string, "diff" | "gate" | "execution" | "report"> }, signal?: AbortSignal) => {
       const task = validateTask(input);
       if (task.operation_id) {
+        if (activeOperationRuns.has(task.operation_id) || Object.hasOwn(coordinatorStates, task.operation_id)) throw new Error("The Harness Coordinator owns this Operation; use the bounded OperationReport");
         const operation = Object.hasOwn(operations, task.operation_id) ? operations[task.operation_id] : undefined;
         if (!operation || operation.status !== "open" || !operation.required_task_ids.includes(task.task_id!)) throw new Error("TaskOrder is not registered with an open Operation");
         if (operation.accepted_task_ids.includes(task.task_id!)) throw new Error("The Coordinator already accepted this TaskResult");
