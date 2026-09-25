@@ -4,6 +4,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawn } from "node:child_process";
+import { decodeAcpPrompt } from "../lib/content.mjs";
 
 const VERSION = "1.0.0";
 const STATE_PATH = process.env.PI_HARNESS_ACP_STATE || join(homedir(), ".pi-harness", "acp-sessions.json");
@@ -20,7 +21,7 @@ function persist() {
     stored = loadStored();
     const merged = { ...stored };
     for (const [id, session] of sessions) {
-      merged[id] = { piSessionId: session.piSessionId, updatedAt: new Date().toISOString() };
+      merged[id] = { piSessionId: session.piSessionId, cwd: session.cwd, updatedAt: new Date().toISOString() };
     }
     writeFileSync(temporary, JSON.stringify(merged, null, 2));
     renameSync(temporary, STATE_PATH);
@@ -73,7 +74,7 @@ function translatePiEvent(sessionId, message) {
     notify("session/update", { sessionId, update: { sessionUpdate: "pi_event", event: message } });
   }
 }
-function spawnPi(sessionId, resumeId) {
+function spawnPi(sessionId, resumeId, cwd) {
   const id = resumeId || sessionId;
   const piBin = process.env.PI_BIN || "pi";
   const piArgs = ["--mode", "rpc"];
@@ -83,10 +84,11 @@ function spawnPi(sessionId, resumeId) {
   if (process.env.PI_EXTRA_ARGS) {
     piArgs.push(...process.env.PI_EXTRA_ARGS.split(/\s+/).filter(Boolean));
   }
-  const child = spawn(piBin, piArgs, { stdio: ["pipe", "pipe", "pipe"], cwd: process.env.PI_CWD || process.cwd() });
-  const session = { child, piSessionId: id, pending: new Map() };
+  const sessionCwd = process.env.PI_CWD || cwd || process.cwd();
+  const child = spawn(piBin, piArgs, { stdio: ["pipe", "pipe", "pipe"], cwd: sessionCwd });
+  const session = { child, piSessionId: id, cwd: sessionCwd, pending: new Map() };
   sessions.set(sessionId, session);
-  stored[sessionId] = { piSessionId: id, updatedAt: new Date().toISOString() };
+  stored[sessionId] = { piSessionId: id, cwd: sessionCwd, updatedAt: new Date().toISOString() };
   parseLines(child.stdout, (line) => {
     try {
       const message = JSON.parse(line);
@@ -125,7 +127,7 @@ async function ensureSession(sessionId) {
   stored = loadStored();
   const saved = stored[sessionId];
   if (!saved) throw new Error(`Unknown session: ${sessionId}`);
-  return spawnPi(sessionId, saved.piSessionId);
+  return spawnPi(sessionId, saved.piSessionId, saved.cwd);
 }
 async function handle(request) {
   const params = request.params ?? {};
@@ -135,11 +137,15 @@ async function handle(request) {
         protocolVersion: params.protocolVersion ?? "2025-06-18",
         serverInfo: { name: "pi-harness-acp", version: VERSION },
         capabilities: { prompt: true, sessionLoad: true, toolCalling: true, sessionCancel: true },
+        agentCapabilities: {
+          loadSession: true,
+          promptCapabilities: { image: true, embeddedContext: true },
+        },
         commands: commands(),
       });
     case "session/new": {
       const sessionId = crypto.randomUUID();
-      const session = spawnPi(sessionId);
+      const session = spawnPi(sessionId, undefined, params.cwd);
       return result(request.id, { sessionId, piSessionId: session.piSessionId, commands: commands() });
     }
     case "session/load": {
@@ -156,8 +162,12 @@ async function handle(request) {
     }
     case "session/prompt": {
       const session = await ensureSession(params.sessionId);
-      const text = params.prompt ?? params.text ?? "";
-      const response = await rpcToPi(session, { type: "prompt", message: text });
+      const { message, images } = decodeAcpPrompt(params.prompt ?? params.text ?? "", session.cwd);
+      const response = await rpcToPi(session, {
+        type: "prompt",
+        message,
+        ...(images.length ? { images } : {}),
+      });
       return result(request.id, { accepted: true, commands: commands(), pi: response?.data });
     }
     case "session/command": {

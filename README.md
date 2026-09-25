@@ -8,9 +8,9 @@ Pi-native harness and extension for **Pi 0.85.1**. Provides read-only planning m
 
 - **Read-Only Planning Mode (`/plan on|off|status`)**: Strips mutating tools (`edit`, `write`), blocks mutating bash syntax (e.g. `sed -i`, redirects, file deletions), and prompts the agent to provide assumptions, steps, and verification gates. Lifecycle tests cover persisted reload, real compaction, real fork/branch independence, and mutation blocking after transitions.
 - **Evidence-Backed Goal (`/goal <objective>`)**: Tracks a single active objective requiring concrete verification evidence and blockers for terminal transitions. It does not provide wait, pause/resume, token-budget, or strong no-progress circuit-breaker states.
-- **8 Curated Skills**: Checksum-pinned skills (`ask-user`, `architecture-diagram`, `drawio-modeling`, `project-scouting`, `caveman`, `ponytail`, `pi-coordinator`, `skill-hub`). Upstream-derived skills are verified against `skills-central` commit `8cc8358`; `architecture-diagram` pins its upstream source hash plus all packaged resources. Locally authored skills pin all packaged resources: `drawio-modeling` handles ERD, functional decomposition and UML views separately from product architecture; `ask-user` clarifies ambiguous needs/goals in or outside `/plan` without granting permissions or requiring a special UI tool.
+- **9 Curated Skills**: Checksum-pinned skills (`ask-user`, `requirement-check`, `architecture-diagram`, `drawio-modeling`, `project-scouting`, `caveman`, `ponytail`, `pi-coordinator`, `skill-hub`). Upstream-derived skills are verified against `skills-central` commit `8cc8358`; `architecture-diagram` pins its upstream source hash plus all packaged resources. Locally authored skills pin all packaged resources: `drawio-modeling` handles ERD, functional decomposition and UML views separately from product architecture; `ask-user` clarifies ambiguous needs/goals in or outside `/plan` without granting permissions or requiring a special UI tool; `requirement-check` checks the basis of consequential requirements before implementation.
 - **Package-Backed Coordinator**: Delegates scoped scout/research and isolated worker tasks to `@tintinweb/pi-subagents`; Harness retains role policy, verification, bounded result normalization, and strict non-auto-integration.
-- **ACP Stdio Bridge (`pi-harness-acp`)**: Connects Pi with Zed Editor or any ACP client over JSON-RPC stdio, advertises Harness commands, forwards Pi events, persists session mappings, and relays cancellation.
+- **ACP Stdio Bridge (`pi-harness-acp`)**: Connects Pi with Zed Editor or any ACP client over JSON-RPC stdio, advertises Harness commands, forwards Pi events, persists session mappings, relays cancellation, and passes pasted/dragged images plus text-file resources to Pi.
 - **Project Memory (`/learn <note>`)**: Retains user-saved rules and lessons in owner-only local files at `~/.pi-harness/memory/<project-hash>.md`, outside the repository. Loaded memory is sent with the prompt to the active model provider.
 
 Other skill directories are ignored by Git and excluded from the package file list. Review the package contents before publishing this checkout.
@@ -25,6 +25,8 @@ Pi Harness is the shared Pi extension and ACP bridge. Clients stay separate:
 - **WPi** is an independent terminal UI app that also connects to `pi-harness-acp`; see the WPi repository README for its setup.
 
 Each client starts its own ACP process and session. WPi is not packaged inside Pi Harness and does not import Harness source or private state files.
+
+In Pi's native terminal, use `Ctrl+V` (`Alt+V` on Windows/WSL) for clipboard images or text, drag images from the file manager into a supported terminal, and type `@` to attach text/code files. ACP clients can send standard text, image, embedded-resource, and local `resource_link` content blocks; the bridge forwards images and includes text-file contents in the Pi prompt.
 
 ## Ownership
 

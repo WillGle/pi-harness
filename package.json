@@ -58,6 +58,7 @@
     "skills/project-scouting/references/agents/scout-subagent.md",
     "skills/project-scouting/references/setup.md",
     "skills/project-scouting/scripts/scout.py",
+    "skills/requirement-check/SKILL.md",
     "skills/skill-hub/SKILL.md",
     "skills/skills.lock.json",
     "target-architecture.md"

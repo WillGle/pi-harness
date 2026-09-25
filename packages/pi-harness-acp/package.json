@@ -6,7 +6,7 @@
   "license": "MIT",
   "repository": { "type": "git", "url": "git+https://github.com/WillGle/pi-harness.git", "directory": "packages/pi-harness-acp" },
   "publishConfig": { "access": "public" },
-  "files": ["bin", "UPSTREAM.md", "LICENSE"],
+  "files": ["bin", "lib", "UPSTREAM.md", "LICENSE"],
   "bin": { "pi-harness-acp": "bin/pi-harness-acp.mjs" },
   "engines": { "node": ">=22.19.0" }
 }

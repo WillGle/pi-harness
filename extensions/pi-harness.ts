@@ -1,5 +1,7 @@
 import process from "node:process";
 import { randomUUID } from "node:crypto";
+import { basename } from "node:path";
+import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import {
   COMPACT_ENTRY, GOAL_ENTRY, PLAN_ENTRY, READ_ONLY_TOOLS, cavemanSummary, goalState,
   isPlanAllowedTool, parsePlan, planState, restore, transitionGoal,
@@ -16,6 +18,9 @@ type Pi = Record<string, any>;
 const HARNESS_TOOLS = new Set(["pi_harness_goal", "pi_harness_coordinate", "pi_harness_patch"]);
 const PACKAGE_TOOLS = new Set(["Agent", "get_subagent_result", "steer_subagent", "SubagentWorkflow"]);
 const MAX_AUTOMATIC_CONTINUATIONS = 25;
+const SKILLS = "architecture-diagram, ask-user, caveman, drawio-modeling, drawio-skill, pi-coordinator, ponytail, project-scouting, requirement-check, skill-hub";
+
+const fmtTokens = (count: number) => count < 1000 ? `${count}` : count < 1_000_000 ? `${(count / 1000).toFixed(count < 10_000 ? 1 : 0)}k` : `${(count / 1_000_000).toFixed(1)}M`;
 
 export default function harness(pi: Pi): void {
   let plan = planState();
@@ -91,6 +96,57 @@ export default function harness(pi: Pi): void {
     invalidTerminalAttempts = 0;
     goalGroupId = goal?.status === "active" ? randomUUID() : undefined;
     if (plan.enabled) setPlan(true, ctx);
+    if (ctx.mode !== "tui") return;
+
+    ctx.ui.setHeader((_tui: any, theme: any) => ({
+      invalidate() {},
+      render(width: number): string[] {
+        const title = theme.bold(theme.fg("accent", "π PI HARNESS")) + theme.fg("warning", " / READY");
+        const cwd = theme.fg("dim", `~/${basename(ctx.cwd)}`);
+        const gap = " ".repeat(Math.max(1, width - visibleWidth(title) - visibleWidth(cwd)));
+        const skills = wrapTextWithAnsi(`  ${SKILLS}`, Math.max(1, width));
+        return [truncateToWidth(title + gap + cwd, width), theme.fg("dim", "Focused coding agent · evidence-backed execution"), "", theme.fg("warning", "[Skills]"), ...skills.map((line: string) => theme.fg("dim", line)), "", theme.fg("warning", "[Extensions]"), theme.fg("dim", "  dist, pi-harness.ts"), ""];
+      },
+    }));
+
+    ctx.ui.setFooter((tui: any, theme: any, footerData: any) => {
+      const unsubscribe = footerData.onBranchChange(() => tui.requestRender());
+      return {
+        dispose: unsubscribe,
+        invalidate() {},
+        render(width: number): string[] {
+          let input = 0, output = 0, cacheRead = 0, cost = 0;
+          let latestCacheRate: number | undefined;
+          for (const entry of ctx.sessionManager.getEntries()) {
+            const usage = entry.type === "usage" ? entry.usage
+              : entry.type === "message" && (entry.message.role === "assistant" || entry.message.role === "toolResult") ? entry.message.usage
+              : (entry.type === "branch_summary" || entry.type === "compaction") ? entry.usage : undefined;
+            if (!usage) continue;
+            input += usage.input ?? 0; output += usage.output ?? 0; cacheRead += usage.cacheRead ?? 0; cost += usage.cost?.total ?? 0;
+            if (entry.type === "message" && entry.message.role === "assistant") {
+              const prompt = (usage.input ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
+              latestCacheRate = prompt ? ((usage.cacheRead ?? 0) / prompt) * 100 : undefined;
+            }
+          }
+
+          const branch = footerData.getGitBranch();
+          const left = theme.fg("dim", `${basename(ctx.cwd)}${branch ? ` / ${branch}` : ""}`);
+          const model = `${ctx.model?.id ?? "no-model"} · ${ctx.thinkingLevel ?? "off"}`;
+          const right = theme.fg("dim", model);
+          const first = truncateToWidth(left + " ".repeat(Math.max(1, width - visibleWidth(left) - visibleWidth(right))) + right, width);
+
+          const usage = ctx.getContextUsage?.();
+          const percent = usage?.percent ?? 0;
+          const cells = 12;
+          const filled = Math.max(0, Math.min(cells, Math.round(percent / 100 * cells)));
+          const bar = theme.fg("accent", "█".repeat(filled)) + theme.fg("dim", "░".repeat(cells - filled));
+          const context = usage?.tokens == null ? `? / ${fmtTokens(usage?.contextWindow ?? ctx.model?.contextWindow ?? 0)}` : `${fmtTokens(usage.tokens)} / ${fmtTokens(usage.contextWindow)}`;
+          const cache = latestCacheRate === undefined ? "—" : `${latestCacheRate.toFixed(1)}%`;
+          const details = `Context ${bar} ${context} · ${percent.toFixed(1)}%  I/O ↑${fmtTokens(input)} ↓${fmtTokens(output)}  Cache ${cache}  Cost $${cost.toFixed(3)}`;
+          return [first, truncateToWidth(theme.fg("dim", details), width)];
+        },
+      };
+    });
   });
   pi.on?.("tool_call", (event: any, ctx: Context) => {
     if (event.toolName === "pi_harness_goal" && goal?.status === "active") {

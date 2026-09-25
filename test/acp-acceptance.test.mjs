@@ -1,9 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+import { decodeAcpPrompt } from "../packages/pi-harness-acp/lib/content.mjs";
 
 function createAcpClient(envOverrides = {}) {
   const tmpDir = mkdtempSync(join(tmpdir(), "pi-acp-test-"));
@@ -78,6 +80,34 @@ function createAcpClient(envOverrides = {}) {
   return { child, request, notifications, statePath, tmpDir, close };
 }
 
+test("ACP prompt content converts clipboard images and text/file-manager resources for Pi RPC", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-acp-content-"));
+  try {
+    const textPath = join(dir, "notes.txt");
+    const imagePath = join(dir, "pixel.png");
+    writeFileSync(textPath, "hello from file\n");
+    writeFileSync(imagePath, Buffer.from("fake png"));
+
+    const directImage = Buffer.from("clipboard image").toString("base64");
+    const decoded = decodeAcpPrompt([
+      { type: "text", text: "Review these" },
+      { type: "image", data: directImage, mimeType: "image/png" },
+      { type: "resource", resource: { uri: "clipboard.txt", mimeType: "text/plain", text: "clipboard text" } },
+      { type: "resource_link", uri: pathToFileURL(textPath).href, name: "notes.txt", mimeType: "text/plain" },
+      { type: "resource_link", uri: pathToFileURL(imagePath).href, name: "pixel.png", mimeType: "image/png" },
+    ], dir);
+
+    assert.match(decoded.message, /Review these/);
+    assert.match(decoded.message, /clipboard text/);
+    assert.match(decoded.message, /hello from file/);
+    assert.deepEqual(decoded.images[0], { type: "image", data: directImage, mimeType: "image/png" });
+    assert.equal(decoded.images[1].data, Buffer.from("fake png").toString("base64"));
+    assert.deepEqual(decodeAcpPrompt("legacy prompt"), { message: "legacy prompt", images: [] });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("ACP lifecycle: initialize, new, prompt, load, cancel, reconnect, and cleanup", async () => {
   const acp = createAcpClient();
 
@@ -90,6 +120,8 @@ test("ACP lifecycle: initialize, new, prompt, load, cancel, reconnect, and clean
     assert.ok(initRes.commands.includes("skill-hub"));
     assert.equal(initRes.capabilities.prompt, true);
     assert.equal(initRes.capabilities.sessionLoad, true);
+    assert.equal(initRes.agentCapabilities.promptCapabilities.image, true);
+    assert.equal(initRes.agentCapabilities.promptCapabilities.embeddedContext, true);
 
     // 2. session/new
     const newRes = await acp.request("session/new");
