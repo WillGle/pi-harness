@@ -131,6 +131,8 @@ test("scout and research complete through the package boundary with read-only po
         permission: "read",
       }, { rpcTimeout: 1000, timeout: 1000 });
       assert.equal(result.success, true);
+      assert.equal(result.taskResult.execution_status, "execution_complete");
+      assert.equal(result.taskResult.verification_status, "not_verified");
       assert.equal(result.owner, owner);
       assert.match(result.result, /read-only complete/);
       const request = fakePackage.calls.find((entry) => entry?.type === owner);
@@ -138,6 +140,8 @@ test("scout and research complete through the package boundary with read-only po
       assert.equal(request.options.isBackground, true);
       assert.equal(request.options.model, null);
       assert.ok(request.options.signal instanceof AbortSignal);
+      assert.match(request.prompt, /TaskOrder .*\nExecution Status: assigned/);
+      assert.match(request.prompt, /ExecutionUnit must inspect and report evidence/);
     }
   } finally {
     fakePackage.restore();
@@ -166,6 +170,9 @@ test("worker uses package worktree/concurrency options, runs the gate, preserves
     assert.doesNotMatch(request.prompt, /create exactly one atomic commit/);
     assert.equal(result.success, true);
     assert.equal(result.gatePassed, true);
+    assert.equal(result.taskResult.execution_status, "execution_complete");
+    assert.equal(result.taskResult.verification_status, "not_verified");
+    assert.deepEqual(result.taskResult.changed_paths, ["file.txt"]);
     assert.equal(result.commitCheck.valid, true);
     assert.equal(result.atomicCommit, true);
     assert.match(result.diff, /\+worker-update/);
@@ -205,4 +212,6 @@ test("goal-scoped cancellation aborts only the package task owned by that goal",
   assert.equal(request.options.signal.aborted, true);
   assert.equal(result.success, false);
   assert.equal(result.status, "stopped");
+  assert.equal(result.taskResult.execution_status, "blocked");
+  assert.match(result.taskResult.blocker, /cannot continue until/);
 });
