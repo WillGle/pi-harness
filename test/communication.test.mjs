@@ -33,6 +33,8 @@ test("the Harness Verifier, not Worker prose or legacy success, controls accepta
   assert.equal(taskResult(order, { ...record, commitCount: 2 }).verification_status, "failed");
   assert.equal(taskResult(order, { ...record, commitCheck: { valid: false } }).verification_status, "failed");
   assert.equal(taskResult(order, record).verification_status, "verified");
+  const machine = taskOrder({ owner: "worker", scope: "edit", verification: "npm test", permission: "write", acceptance_criteria: ["The Worker verification command passes.", "The Worker produced exactly one commit."] });
+  assert.equal(taskResult(machine, record).verification_status, "verified");
   const semantic = taskOrder({ owner: "worker", scope: "edit", verification: "npm test", permission: "write", acceptance_criteria: ["The user understands the result."] });
   assert.equal(taskResult(semantic, record).verification_status, "not_verified");
   assert.equal(taskResult(order, record, { evidenceError: true }).verification_status, "failed");

@@ -67,7 +67,12 @@ function packageManagerFor(events, repo, mode = "read") {
     events.emit(`subagents:rpc:spawn:reply:${request.requestId}`, { success: true, data: { id } });
     queueMicrotask(async () => {
       try {
-        if (mode === "worker") {
+        if (mode === "worker-reviewed" && request.type === "reviewer") {
+          const packet = JSON.parse(request.prompt.slice(request.prompt.indexOf("{\"version\"")));
+          events.emit("subagents:completed", { id, status: "completed", result: JSON.stringify({ version: 1, task_id: packet.task_id, status: "verified", summary: "The semantic Verifier checked the criterion.", criteria: packet.acceptance_criteria.map((criterion) => ({ criterion, status: "passed", finding: "The semantic Verifier checked the selected diff.", evidence_refs: [packet.evidence[0].reference] })) }) });
+          return;
+        }
+        if (mode === "worker" || mode === "worker-reviewed") {
           const worktree = mkdtempSync(join(tmpdir(), "pi-package-worktree-"));
           rmSync(worktree, { recursive: true, force: true });
           spawnSync("git", ["-C", repo, "worktree", "add", "--detach", worktree, "HEAD"]);
@@ -188,6 +193,7 @@ test("worker uses package worktree/concurrency options, runs the gate, preserves
       scope: "file.txt",
       verification: "grep 'worker-update' file.txt",
       permission: "write",
+      acceptance_criteria: ["The Worker verification command passes."],
     }, { cwd: repo, rpcTimeout: 1000, timeout: 1000 });
 
     const request = fakePackage.calls.find((entry) => entry?.type === "worker");
@@ -200,6 +206,7 @@ test("worker uses package worktree/concurrency options, runs the gate, preserves
     assert.equal(result.gatePassed, true);
     assert.equal(result.taskResult.execution_status, "execution_complete");
     assert.equal(result.taskResult.verification_status, "verified");
+    assert.equal(fakePackage.calls.some((entry) => entry?.type === "reviewer"), false);
     assert.deepEqual(result.taskResult.changed_paths, ["file.txt"]);
     const items = result.taskResult.evidence_refs.map((ref) => readEvidence(ref, repo));
     assert.deepEqual(items.map((item) => item.metadata.kind), ["execution", "gate", "diff"]);
@@ -230,8 +237,8 @@ test("deterministic Verifier defers semantic criteria and rejects a failed gate"
       owner: "worker", scope: "file.txt", verification: "grep worker-update file.txt", permission: "write",
       acceptance_criteria: ["The change is readable to a new maintainer."],
     }, { cwd: repo, rpcTimeout: 1000, timeout: 1000 });
-    assert.equal(semantic.taskResult.verification_status, "not_verified");
-    assert.match(semantic.taskResult.verification_summary, /semantic verification/);
+    assert.equal(semantic.taskResult.verification_status, "blocked");
+    assert.match(semantic.taskResult.verification_summary, /semantic Verifier/);
     spawnSync("git", ["-C", repo, "branch", "-D", "pi-agent-smoke"]);
     const failed = await executeCoordinateTask({ events }, {
       owner: "worker", scope: "file.txt", verification: "false", permission: "write",
@@ -239,6 +246,19 @@ test("deterministic Verifier defers semantic criteria and rejects a failed gate"
     assert.equal(failed.taskResult.execution_status, "execution_complete");
     assert.equal(failed.taskResult.verification_status, "failed");
     assert.ok(failed.taskResult.evidence_refs.some((ref) => readEvidence(ref, repo).metadata.kind === "gate"));
+  } finally { fakePackage.restore(); rmSync(repo, { recursive: true, force: true }); }
+});
+
+test("Harness combines passed Worker deterministic and semantic checks", async () => {
+  const repo = makeRepo("pi-harness-reviewed-worker-");
+  const events = new EventBus();
+  const fakePackage = packageManagerFor(events, repo, "worker-reviewed");
+  try {
+    const result = await executeCoordinateTask({ events }, { owner: "worker", task_id: "T-worker", scope: "file.txt", verification: "grep worker-update file.txt", permission: "write", acceptance_criteria: ["The new code remains understandable."] }, { cwd: repo, rpcTimeout: 1000, timeout: 1000 });
+    assert.equal(result.taskResult.verification_status, "verified");
+    assert.equal(fakePackage.calls.filter((entry) => entry?.type === "reviewer").length, 1);
+    assert.ok(result.taskResult.evidence_refs.some((ref) => readEvidence(ref, repo).metadata.kind === "semantic_review"));
+    assert.ok(!JSON.stringify(promoteTaskResult(result)).includes("+worker-update"));
   } finally { fakePackage.restore(); rmSync(repo, { recursive: true, force: true }); }
 });
 
