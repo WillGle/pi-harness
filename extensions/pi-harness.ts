@@ -11,6 +11,7 @@ import {
 import { appendProjectMemory, clearProjectMemory, loadProjectMemory } from "../lib/memory.mjs";
 import { cancelCoordinateTasks, executeCoordinateTask, executeCoordinatorTurn, hasActiveCoordinateTasks, validateTask } from "../lib/coordinator.mjs";
 import { PROACTIVE_COMPACT_ENTRY, proactiveCompactionPolicy, restoreProactivePolicy, setProactiveThreshold } from "../lib/compaction-policy.mjs";
+import { HEAD_REGISTRY_ENTRY, HEAD_STATE_ENTRY, createHeadRegistry, validateHeadRegistry, validateHeadState } from "../lib/domain-head.mjs";
 import { COORDINATOR_ENTRY, coordinatorState, runOperation } from "../lib/operation-runner.mjs";
 import { promoteTaskResult } from "../lib/communication.mjs";
 import { OPERATION_ENTRY, acceptOperationCriterion, acceptTaskResult, createOperation, recordTaskResult, rejectTaskResult } from "../lib/operation.mjs";
@@ -35,6 +36,8 @@ export default function harness(pi: Pi): void {
   let operations: Record<string, ReturnType<typeof createOperation>> = {};
   let coordinatorStates: Record<string, ReturnType<typeof coordinatorState>> = {};
   let taskGraphs: Record<string, ReturnType<typeof createTaskGraph>> = {};
+  let headRegistries: Record<string, ReturnType<typeof createHeadRegistry>> = {};
+  let headStates: Record<string, Record<string, any>> = {};
   let sessionTaskGroup = randomUUID();
   const activeDirectTasks = new Set<symbol>();
   const activeOperationRuns = new Map<string, { controller: AbortController; goalGroup?: string }>();
@@ -141,7 +144,16 @@ export default function harness(pi: Pi): void {
     if (Object.keys(taskGraphs).some((id) => !Object.hasOwn(operations, id))) throw new Error("TaskGraph has no owning Operation");
     coordinatorStates = Object.fromEntries(Object.entries(legacyCoordinator).map(([id, state]: [string, any]) => [id, {
       version: 1, operation_id: id, turns: state.turns ?? 0, decisions: (state.decisions ?? []).slice(-7), blocker: state.blocker ?? null,
+      ...(state.consultations_since_progress !== undefined ? { consultations_since_progress: state.consultations_since_progress } : {}),
     }]));
+    headRegistries = restore(entries, HEAD_REGISTRY_ENTRY) ?? {};
+    headStates = restore(entries, HEAD_STATE_ENTRY) ?? {};
+    for (const [id, registry] of Object.entries(headRegistries)) {
+      if (!operations[id]) throw new Error("Head Registry has no owning Operation");
+      validateHeadRegistry(registry, operations[id]);
+      for (const state of Object.values(headStates[id] ?? {})) validateHeadState(state, registry);
+    }
+    if (Object.keys(headStates).some((id) => !headRegistries[id] || Object.keys(headStates[id]).some((headId) => headId !== headStates[id][headId]?.head_id))) throw new Error("HeadState has no registered Head");
     if (Object.keys(coordinatorStates).length) pi.appendEntry?.(COORDINATOR_ENTRY, coordinatorStates);
     if (Object.keys(operations).length) persistScheduler();
     proactivePolicy = restoreProactivePolicy(restore(entries, PROACTIVE_COMPACT_ENTRY));
@@ -225,6 +237,8 @@ export default function harness(pi: Pi): void {
     pi.appendEntry?.(PROACTIVE_COMPACT_ENTRY, proactivePolicy);
     pi.appendEntry?.(OPERATION_ENTRY, operations);
     pi.appendEntry?.(COORDINATOR_ENTRY, coordinatorStates);
+    pi.appendEntry?.(HEAD_REGISTRY_ENTRY, headRegistries);
+    pi.appendEntry?.(HEAD_STATE_ENTRY, headStates);
     persistScheduler();
     saveCompactState(event);
   };
@@ -364,8 +378,8 @@ export default function harness(pi: Pi): void {
   pi.registerTool?.({
     name: "pi_harness_operation", label: "Pi Harness Operation acceptance",
     description: "The Coordinator creates an Operation, accepts a recorded verified TaskResult, or accepts an Operation Acceptance Criterion with Evidence. Operation completion never completes the Mission.",
-    parameters: Type.Object({ action: Type.Union([Type.Literal("create"), Type.Literal("status"), Type.Literal("accept_task"), Type.Literal("reject_task"), Type.Literal("accept_criterion")]), operation_id: Type.String(), objective: Type.Optional(Type.String()), required_task_ids: Type.Optional(Type.Array(Type.String())), acceptance_criteria: Type.Optional(Type.Array(Type.String())), dependencies: Type.Optional(Type.Record(Type.String(), Type.Array(Type.String()))), task_id: Type.Optional(Type.String()), criterion: Type.Optional(Type.String()), evidence_refs: Type.Optional(Type.Array(Type.String())) }),
-    execute: async (_id: string, input: { action: "create" | "status" | "accept_task" | "reject_task" | "accept_criterion"; operation_id: string; objective?: string; required_task_ids?: string[]; acceptance_criteria?: string[]; dependencies?: Record<string, string[]>; task_id?: string; criterion?: string; evidence_refs?: string[] }) => {
+    parameters: Type.Object({ action: Type.Union([Type.Literal("create"), Type.Literal("status"), Type.Literal("accept_task"), Type.Literal("reject_task"), Type.Literal("accept_criterion")]), operation_id: Type.String(), objective: Type.Optional(Type.String()), required_task_ids: Type.Optional(Type.Array(Type.String())), acceptance_criteria: Type.Optional(Type.Array(Type.String())), dependencies: Type.Optional(Type.Record(Type.String(), Type.Array(Type.String()))), heads: Type.Optional(Type.Array(Type.Object({ head_id: Type.String(), domain: Type.String(), task_ids: Type.Array(Type.String()) }))), task_id: Type.Optional(Type.String()), criterion: Type.Optional(Type.String()), evidence_refs: Type.Optional(Type.Array(Type.String())) }),
+    execute: async (_id: string, input: { action: "create" | "status" | "accept_task" | "reject_task" | "accept_criterion"; operation_id: string; objective?: string; required_task_ids?: string[]; acceptance_criteria?: string[]; dependencies?: Record<string, string[]>; heads?: { head_id: string; domain: string; task_ids: string[] }[]; task_id?: string; criterion?: string; evidence_refs?: string[] }) => {
       const id = input.operation_id;
       if (activeOperationRuns.has(id) || (input.action !== "create" && Object.hasOwn(coordinatorStates, id))) throw new Error("The Harness Coordinator owns this Operation; use the bounded OperationReport");
       if (input.action === "create") {
@@ -373,6 +387,9 @@ export default function harness(pi: Pi): void {
         const operation = createOperation({ operation_id: id, objective: input.objective, required_task_ids: input.required_task_ids, acceptance_criteria: input.acceptance_criteria, dependencies: input.dependencies });
         if (operation.required_task_ids.some((taskId: string) => Object.values(operations).some((entry) => entry.required_task_ids.includes(taskId)))) throw new Error("A TaskOrder ID already belongs to another Operation");
         const graph = createTaskGraph(operation);
+        const registry = createHeadRegistry(operation, input.heads ?? []);
+        headRegistries = { ...headRegistries, [id]: registry };
+        pi.appendEntry?.(HEAD_REGISTRY_ENTRY, headRegistries);
         operations = { ...operations, [id]: operation };
         taskGraphs = { ...taskGraphs, [id]: graph };
       } else {
@@ -410,12 +427,14 @@ export default function harness(pi: Pi): void {
       const runId = randomUUID();
       const runEpoch = sessionEpoch;
       activeOperationRuns.set(id, { controller, goalGroup: goal?.status === "active" ? goalGroupId : undefined });
-      const save = (nextOperation: ReturnType<typeof createOperation>, state: ReturnType<typeof coordinatorState>, graph: ReturnType<typeof createTaskGraph>) => {
+      const save = (nextOperation: ReturnType<typeof createOperation>, state: ReturnType<typeof coordinatorState>, graph: ReturnType<typeof createTaskGraph>, nextHeads: Record<string, any>) => {
         if (runEpoch !== sessionEpoch) return;
         validateTaskGraph(graph, nextOperation);
         operations = { ...operations, [id]: nextOperation };
         taskGraphs = { ...taskGraphs, [id]: graph };
         coordinatorStates = { ...coordinatorStates, [id]: state };
+        headStates = { ...headStates, [id]: nextHeads };
+        pi.appendEntry?.(HEAD_STATE_ENTRY, headStates);
         pi.appendEntry?.(OPERATION_ENTRY, operations);
         pi.appendEntry?.(COORDINATOR_ENTRY, coordinatorStates);
         persistScheduler();
@@ -423,9 +442,10 @@ export default function harness(pi: Pi): void {
       try {
         const report = await runOperation(operation, {
           turn: (prompt: string) => executeCoordinatorTurn(pi, prompt, { cwd: process.cwd(), model: input.model, groupId: runId, signal: controller.signal }),
+          headTurn: (prompt: string) => executeCoordinatorTurn(pi, prompt, { cwd: process.cwd(), role: "head", groupId: runId, signal: controller.signal }),
           dispatch: async (task: any) => promoteTaskResult(await executeCoordinateTask(pi, validateTask(task), { cwd: process.cwd(), groupId: runId, signal: controller.signal })),
           save,
-        }, { state: coordinatorStates[id] ?? coordinatorState(operation), graph: taskGraphs[id], mission: goal?.status === "active" ? goal.objective : undefined, cwd: process.cwd(), signal: controller.signal });
+        }, { state: coordinatorStates[id] ?? coordinatorState(operation), graph: taskGraphs[id], registry: headRegistries[id], headStates: headStates[id] ?? {}, mission: goal?.status === "active" ? goal.objective : undefined, cwd: process.cwd(), signal: controller.signal });
         return { content: [{ type: "text", text: JSON.stringify(report) }] };
       } finally { signal?.removeEventListener("abort", abort); if (activeOperationRuns.get(id)?.controller === controller) activeOperationRuns.delete(id); }
     },
