@@ -9,7 +9,8 @@ import {
   isPlanAllowedTool, parsePlan, planState, restore, transitionGoal,
 } from "../lib/state.mjs";
 import { appendProjectMemory, clearProjectMemory, loadProjectMemory } from "../lib/memory.mjs";
-import { cancelCoordinateTasks, executeCoordinateTask, executeCoordinatorTurn, validateTask } from "../lib/coordinator.mjs";
+import { cancelCoordinateTasks, executeCoordinateTask, executeCoordinatorTurn, hasActiveCoordinateTasks, validateTask } from "../lib/coordinator.mjs";
+import { PROACTIVE_COMPACT_ENTRY, proactiveCompactionPolicy, restoreProactivePolicy, setProactiveThreshold } from "../lib/compaction-policy.mjs";
 import { COORDINATOR_ENTRY, coordinatorState, runOperation } from "../lib/operation-runner.mjs";
 import { promoteTaskResult } from "../lib/communication.mjs";
 import { OPERATION_ENTRY, acceptOperationCriterion, acceptTaskResult, createOperation, recordTaskResult, rejectTaskResult } from "../lib/operation.mjs";
@@ -34,6 +35,13 @@ export default function harness(pi: Pi): void {
   let coordinatorStates: Record<string, ReturnType<typeof coordinatorState>> = {};
   const activeOperationRuns = new Map<string, { controller: AbortController; goalGroup?: string }>();
   let sessionEpoch = 0;
+  let proactivePolicy = proactiveCompactionPolicy();
+  let compactionPending = false;
+  let compactionInFlight = false;
+  let compactionArmed = true;
+  let compactionEpoch = 0;
+  let lastCompactedEpoch = -1;
+  const activeToolCalls = new Set<string>();
   let savedTools: string[] | undefined;
   let continuationQueued = false;
   let continuationCount = 0;
@@ -89,7 +97,7 @@ export default function harness(pi: Pi): void {
     persist();
   };
   const continueGoal = () => {
-    if (!goal || goal.status !== "active" || continuationQueued || plan.enabled) return;
+    if (!goal || goal.status !== "active" || continuationQueued || plan.enabled || compactionPending || compactionInFlight) return;
     if (continuationCount >= MAX_AUTOMATIC_CONTINUATIONS) return stopUnboundedGoal();
     continuationCount += 1;
     continuationQueued = true;
@@ -98,6 +106,12 @@ export default function harness(pi: Pi): void {
 
   pi.on?.("session_start", (_event: any, ctx: any) => {
     sessionEpoch++;
+    compactionPending = false;
+    compactionInFlight = false;
+    compactionArmed = true;
+    compactionEpoch = 0;
+    lastCompactedEpoch = -1;
+    activeToolCalls.clear();
     for (const run of activeOperationRuns.values()) run.controller.abort();
     const activeTools = pi.getActiveTools?.() ?? [];
     pi.setActiveTools?.(activeTools.filter((name: string) => !PACKAGE_TOOLS.has(name)));
@@ -106,6 +120,7 @@ export default function harness(pi: Pi): void {
     goal = restore(entries, GOAL_ENTRY) ?? goal;
     operations = restore(entries, OPERATION_ENTRY) ?? {};
     coordinatorStates = restore(entries, COORDINATOR_ENTRY) ?? {};
+    proactivePolicy = restoreProactivePolicy(restore(entries, PROACTIVE_COMPACT_ENTRY));
     continuationCount = 0;
     invalidTerminalAttempts = 0;
     goalGroupId = goal?.status === "active" ? randomUUID() : undefined;
@@ -181,9 +196,53 @@ export default function harness(pi: Pi): void {
     }
   });
   const compactInstructions = "Use the pi-harness control state (agent-english-v1). Preserve Mission, plan, Decisions, changed paths, gates, Blocker and separate Execution Status and Verification Status exactly. Do not promote raw Worker transcripts or infer verification from execution completion.";
-  pi.on?.("session_before_compact", (event: any) => { saveCompactState(event); return { customInstructions: compactInstructions, replaceInstructions: false }; });
-  pi.on?.("context", (_event: any, ctx: any) => { if (Number(ctx.getContextUsage?.()?.percent ?? 0) >= 80) { saveCompactState(); ctx.compact?.({ customInstructions: compactInstructions }); } });
-  pi.on?.("agent_settled", () => { continuationQueued = false; continueGoal(); });
+  const checkpoint = (event: Record<string, unknown> = {}) => {
+    persist();
+    pi.appendEntry?.(PROACTIVE_COMPACT_ENTRY, proactivePolicy);
+    pi.appendEntry?.(OPERATION_ENTRY, operations);
+    pi.appendEntry?.(COORDINATOR_ENTRY, coordinatorStates);
+    saveCompactState(event);
+  };
+  const settleCompaction = (ctx: any) => {
+    if (!compactionPending) return continueGoal();
+    if (compactionInFlight || !ctx.isIdle?.() || ctx.hasPendingMessages?.() || activeToolCalls.size || activeOperationRuns.size || hasActiveCoordinateTasks() || !ctx.compact) return;
+    const runEpoch = sessionEpoch;
+    const attemptEpoch = compactionEpoch;
+    compactionPending = false;
+    compactionInFlight = true;
+    checkpoint();
+    const finish = () => {
+      if (runEpoch !== sessionEpoch) return;
+      compactionInFlight = false;
+      if (attemptEpoch === compactionEpoch) {
+        lastCompactedEpoch = attemptEpoch;
+        compactionArmed = false; // Re-arm only after usage drops below the configured threshold.
+      }
+      continueGoal();
+    };
+    try { ctx.compact({ customInstructions: compactInstructions, onComplete: finish, onError: finish }); }
+    catch { finish(); }
+  };
+  pi.on?.("session_before_compact", (event: any) => { checkpoint(event); return { customInstructions: compactInstructions, replaceInstructions: false }; });
+  pi.on?.("session_compact", () => {
+    // Pi-native manual/automatic compaction can satisfy a pending proactive request.
+    if (!compactionInFlight) { compactionPending = false; lastCompactedEpoch = compactionEpoch; compactionArmed = false; }
+  });
+  pi.on?.("session_compact_failed", () => {
+    if (!compactionInFlight) { compactionPending = false; lastCompactedEpoch = compactionEpoch; compactionArmed = false; }
+  });
+  pi.on?.("context", (_event: any, ctx: any) => {
+    if (!proactivePolicy.enabled) return;
+    const percent = ctx.getContextUsage?.()?.percent;
+    if (typeof percent !== "number" || !Number.isFinite(percent)) return;
+    if (percent < proactivePolicy.threshold_percent!) {
+      if (!compactionArmed && !compactionInFlight) { compactionEpoch++; compactionArmed = true; }
+      compactionPending = false;
+    } else if (compactionArmed && !compactionInFlight && compactionEpoch > lastCompactedEpoch) compactionPending = true;
+  });
+  pi.on?.("agent_settled", (_event: any, ctx: any) => { continuationQueued = false; settleCompaction(ctx); });
+  pi.on?.("tool_execution_start", (event: any) => { activeToolCalls.add(event.toolCallId); });
+  pi.on?.("tool_execution_end", (event: any, ctx: any) => { activeToolCalls.delete(event.toolCallId); if (ctx.isIdle?.()) settleCompaction(ctx); });
   pi.on?.("before_agent_start", () => {
     const parts: string[] = [];
     const memory = loadProjectMemory(process.cwd());
@@ -193,6 +252,17 @@ export default function harness(pi: Pi): void {
     return parts.length ? { message: { customType: "pi-harness-context", display: false, content: parts.join("\n\n") } } : undefined;
   });
 
+  pi.registerCommand?.("harness-compact", { description: "Proactive Harness compaction: /harness-compact set <50-90>|status|disable (independent of /autocompact)", handler: async (args: string, ctx: Context) => {
+    const input = args.trim();
+    if (!input || input === "status") return say(ctx, `Harness proactive compaction: ${proactivePolicy.enabled ? `enabled at ${proactivePolicy.threshold_percent}%` : "disabled"}${proactivePolicy.threshold_percent === null ? " (no threshold set)" : `; threshold ${proactivePolicy.threshold_percent}%`}.`);
+    try {
+      if (input === "disable") { proactivePolicy = { ...proactivePolicy, enabled: false }; compactionPending = false; }
+      else if (input.startsWith("set ")) { proactivePolicy = setProactiveThreshold(input.slice(4).trim()); compactionPending = false; compactionArmed = true; compactionEpoch++; }
+      else throw new Error("Use /harness-compact set <50-90>, status, or disable.");
+      pi.appendEntry?.(PROACTIVE_COMPACT_ENTRY, proactivePolicy);
+      say(ctx, `Harness proactive compaction ${proactivePolicy.enabled ? `set to ${proactivePolicy.threshold_percent}%` : "disabled"}. Pi-native auto-compaction is unchanged.`);
+    } catch (error) { say(ctx, (error as Error).message, "error"); }
+  }});
   pi.registerCommand?.("plan", { description: "Read-only planning: /plan on|off|status", handler: async (args: string, ctx: Context) => {
     try { const action = parsePlan(args); if (action === "status") say(ctx, `Plan mode: ${plan.enabled ? "on" : "off"}`); else setPlan(action === "on", ctx); } catch (error) { say(ctx, (error as Error).message, "error"); }
   }});

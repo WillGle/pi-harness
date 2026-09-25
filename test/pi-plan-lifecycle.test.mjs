@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { COMPACT_ENTRY, PLAN_ENTRY } from "../lib/state.mjs";
+import { PROACTIVE_COMPACT_ENTRY } from "../lib/compaction-policy.mjs";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const PI_TOOLS = [
@@ -489,6 +490,7 @@ test("Pi plan mode survives real compaction and still blocks built-in and Harnes
   try {
     pi = fixture.spawn();
     await pi.prompt("/plan on");
+    await pi.prompt("/harness-compact set 73");
     const autoCompaction = await pi.send({ type: "set_auto_compaction", enabled: false });
     assert.equal(autoCompaction.success, true);
     await pi.prompt("compaction-prefix-a");
@@ -512,6 +514,7 @@ test("Pi plan mode survives real compaction and still blocks built-in and Harnes
     const compactEntries = (await pi.send({ type: "get_entries" })).data.entries;
     assert.ok(compactEntries.some((entry) => entry.type === "compaction"), "a real compaction entry must be persisted");
     assert.ok(latestCustom(compactEntries, COMPACT_ENTRY), `missing ${COMPACT_ENTRY} after real compaction`);
+    assert.deepEqual(latestCustom(compactEntries, PROACTIVE_COMPACT_ENTRY)?.data, { enabled: true, threshold_percent: 73 });
     assertPlanEntry(compactEntries, true, "plan state immediately after compaction");
 
     const writeEvents = pi.events.length;
@@ -553,10 +556,44 @@ test("Pi plan mode survives real compaction and still blocks built-in and Harnes
     pi = fixture.spawn();
     const reloadedEntries = (await pi.send({ type: "get_entries" })).data.entries;
     assertPlanEntry(reloadedEntries, true, "plan state after compaction reload");
+    assert.deepEqual(latestCustom(reloadedEntries, PROACTIVE_COMPACT_ENTRY)?.data, { enabled: true, threshold_percent: 73 });
+    await pi.prompt("/harness-compact status");
+    await pi.waitFor((event) => event.type === "extension_ui_request" && /enabled at 73%/.test(event.message ?? ""));
     await pi.prompt("/plan status");
     await pi.waitFor((event) => event.type === "extension_ui_request" && event.message === "Plan mode: on");
     await pi.prompt("CALL_WRITE");
     assert.equal(existsSync(join(fixture.project, "blocked-write.txt")), false);
+  } finally {
+    if (pi) await pi.close();
+    await fixture.close();
+  }
+});
+
+test("Pi 0.85.1 proactive compaction waits for a settled Task tool call", async () => {
+  const fixture = await createFixture();
+  let pi;
+  try {
+    const modelsPath = join(fixture.root, "home", ".pi", "agent", "models.json");
+    const models = JSON.parse(readFileSync(modelsPath, "utf8"));
+    models.providers.fake.models[0].contextWindow = 80000;
+    writeFileSync(modelsPath, JSON.stringify(models));
+    pi = fixture.spawn();
+    await pi.prompt("proactive-prefix-a");
+    await pi.prompt("proactive-prefix-b");
+    await pi.prompt("/harness-compact set 50");
+    const start = pi.events.length;
+    await pi.prompt("CALL_HASHLINES");
+    const compactStart = await pi.waitFor((event) => event.type === "compaction_start" && pi.events.indexOf(event) >= start, 30000);
+    const compactEnd = await pi.waitFor((event) => event.type === "compaction_end" && pi.events.indexOf(event) >= start, 30000);
+    const toolEndIndex = pi.events.findIndex((event, index) => index >= start && event.type === "tool_execution_end" && event.toolName === "pi_harness_hashlines");
+    assert.ok(toolEndIndex >= 0);
+    assert.equal(pi.events[toolEndIndex].isError, false);
+    assert.ok(toolEndIndex < pi.events.indexOf(compactStart), "Harness compacted before the Task tool completed");
+    assert.equal(compactStart.reason, "manual");
+    assert.equal(compactEnd.aborted, false, JSON.stringify(compactEnd));
+    assert.equal(pi.events.slice(start).filter((event) => event.type === "compaction_start").length, 1);
+    assert.deepEqual(latestCustom((await pi.send({ type: "get_entries" })).data.entries, PROACTIVE_COMPACT_ENTRY)?.data,
+      { enabled: true, threshold_percent: 50 });
   } finally {
     if (pi) await pi.close();
     await fixture.close();
