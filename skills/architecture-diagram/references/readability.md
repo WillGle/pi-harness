@@ -1,6 +1,6 @@
 # Architecture readability contract
 
-Distilled from `skills-central/architecture-diagram` and the editable architecture figures in CPDA; this is a layout/communication system, **not** a mandate to use CPDA's scientific palette or publication pipeline in another repo.
+This is a reusable layout/communication system, **not** a mandate to use any project's scientific palette or publication pipeline in another repository.
 
 ## Plan the picture
 

@@ -54,9 +54,9 @@ Every delegated task needs an owner, scope, verification command, and permission
 | `extensions/pi-harness.ts`, `lib/coordinator.mjs` | Goal cancellation aborts in-memory grouped tasks; timeout only rejects waiter | Track pending verification/review under goal cancellation; ensure timeout/stop signal cancels package child, not only waiter. No agent-originated spawn. | Races between abort, completion and cleanup; preserve package lifecycle ownership. |
 | New Harness-owned project-intelligence store (reuse identity/security conventions in `lib/memory.mjs`, not `/learn` notes) | None; user-written `/learn` is injected into prompts | Replaceable, provenance/freshness-checked structural snapshot outside repo, loaded only when relevant; scout when absent/stale/insufficient. | Cache staleness and untrusted data injection; do not conflate with compaction or user memory. |
 
-## Skills and provenance
+## Skills and ownership
 
-`skills/skills.lock.json` records the required `skills-central` commit and curated skill identifiers. The four Harness-adapted coordination/style skills are local derivatives with packaged checksums, not verbatim upstream snapshots. Skills are local Pi resources; no `SKILLS_CENTRAL_ROOT`, Python runtime, or Codex CLI is required. Additional skills may only be installed at user request after source and checksum verification.
+`skills/skills.lock.json` is the self-contained package manifest: it lists each registered skill and hashes every file shipped with it. `npm run verify:skills` checks the exact skill-directory inventory and file contents without consulting another repository, Git commit, remote, or private workspace. Pi Harness owns every skill under `skills/`; promoted public skills have no active upstream ownership dependency. New skills require explicit review, package allowlisting, and lock updates.
 
 ## ACP and external presentation
 
@@ -70,7 +70,7 @@ TUI-specific status is optional; ACP clients receive textual command/status data
 - Memory writes occur only through explicit `/learn`; storage is bounded and private, with no autonomous write tool.
 - Precise editing is `pi_harness_hashlines` plus `pi_harness_patch` under the small SHA/range contract.
 - Web is a lightweight CLI using Brave or DuckDuckGo search, direct public HTTP(S), and bounded Jina fallback after private/local validation, with 10-second timeouts and a 1 MB body cap.
-- Skills are loaded from the curated local set and verified against the locked upstream checksum.
+- Skills are loaded from the locally canonical package set and verified against per-file checksums in the package lock.
 
 ## Security boundaries
 

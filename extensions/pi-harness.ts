@@ -1,6 +1,8 @@
 import process from "node:process";
 import { randomUUID } from "node:crypto";
-import { basename } from "node:path";
+import { readFileSync } from "node:fs";
+import { basename, dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import {
   COMPACT_ENTRY, GOAL_ENTRY, PLAN_ENTRY, READ_ONLY_TOOLS, cavemanSummary, goalState,
@@ -18,7 +20,7 @@ type Pi = Record<string, any>;
 const HARNESS_TOOLS = new Set(["pi_harness_goal", "pi_harness_coordinate", "pi_harness_patch"]);
 const PACKAGE_TOOLS = new Set(["Agent", "get_subagent_result", "steer_subagent", "SubagentWorkflow"]);
 const MAX_AUTOMATIC_CONTINUATIONS = 25;
-const SKILLS = "architecture-diagram, ask-user, caveman, drawio-modeling, drawio-skill, pi-coordinator, ponytail, project-scouting, requirement-check, skill-hub";
+const SKILLS = Object.keys(JSON.parse(readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "../skills/skills.lock.json"), "utf8")).skills).join(", ");
 
 const fmtTokens = (count: number) => count < 1000 ? `${count}` : count < 1_000_000 ? `${(count / 1000).toFixed(count < 10_000 ? 1 : 0)}k` : `${(count / 1_000_000).toFixed(1)}M`;
 

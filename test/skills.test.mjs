@@ -1,32 +1,74 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { resolve } from "node:path";
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { sha256, verifySkills, verifySourceCommit } from "../lib/skills.mjs";
+import { formatSkillsForPrompt, loadSkills } from "@earendil-works/pi-coding-agent";
+import { sha256, verifySkills } from "../lib/skills.mjs";
 
-test("every checked-in curated skill matches its recorded checksum and verified lock passes", () => {
+test("checked-in skills are self-contained and every packaged file matches the lock", () => {
   const root = resolve(".");
-  const result = verifySkills(root, { requireSourceRepo: true });
+  const result = verifySkills(root);
   assert.equal(result.ok, true, `verifySkills failed: ${result.errors.join(", ")}`);
   assert.equal(result.errors.length, 0);
+  const names = Object.keys(result.lock.skills).sort();
+  const directories = readdirSync(resolve(root, "skills"), { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort();
+  assert.deepEqual(names, directories);
+  assert.equal(Object.hasOwn(result.lock, "source"), false);
+  assert.equal(Object.hasOwn(result.lock, "commit"), false);
   for (const [name, entry] of Object.entries(result.lock.skills)) {
-    const files = typeof entry === "string" ? { "SKILL.md": entry } : entry.files;
-    for (const [file, checksum] of Object.entries(files)) {
+    assert.ok(entry.files["SKILL.md"], `${name} must lock SKILL.md`);
+    for (const [file, checksum] of Object.entries(entry.files)) {
       assert.equal(sha256(resolve(root, "skills", name, file)), checksum);
     }
   }
-  assert.equal(result.lock.sourceCommitVerified, true);
 
-  // Test source commit verification directly
-  const sourceRepo = resolve(root, "../skills-central");
-  const srcCheck = verifySourceCommit(result.lock, sourceRepo);
-  assert.equal(srcCheck.verified, true);
+  const isolated = mkdtempSync(resolve(tmpdir(), "pi-skills-isolated-"));
+  try {
+    cpSync(resolve(root, "skills"), resolve(isolated, "skills"), { recursive: true });
+    assert.equal(verifySkills(isolated).ok, true, "verification must not need another checkout");
+    writeFileSync(resolve(isolated, "skills", "caveman", "unlocked.txt"), "extra");
+    const extra = verifySkills(isolated);
+    assert.equal(extra.ok, false);
+    assert.match(extra.errors.join(" "), /unlocked\.txt: not recorded in lock/);
+  } finally {
+    rmSync(isolated, { recursive: true, force: true });
+  }
+});
 
-  // Mismatched commit hash fails source verification
-  const badLock = { ...result.lock, commit: "0000000000000000000000000000000000000000" };
-  const badCheck = verifySourceCommit(badLock, sourceRepo);
-  assert.equal(badCheck.verified, false);
+test("Pi exposes only contextual skills to model selection and keeps policy modes explicit-only", () => {
+  const root = resolve(".");
+  const { skills } = loadSkills({
+    cwd: root,
+    agentDir: resolve(root, ".missing-agent"),
+    skillPaths: [resolve(root, "skills")],
+    includeDefaults: false,
+  });
+  const byName = new Map(skills.map((skill) => [skill.name, skill]));
+  const explicitOnly = skills.filter((skill) => skill.disableModelInvocation).map((skill) => skill.name).sort();
+  assert.deepEqual(explicitOnly, ["caveman", "ponytail"]);
+  const promptSkills = formatSkillsForPrompt(skills);
+  for (const name of explicitOnly) {
+    assert.ok(byName.has(name), `${name} must remain registered for explicit invocation`);
+    assert.doesNotMatch(promptSkills, new RegExp(`<name>${name}</name>`));
+  }
+  assert.doesNotMatch(promptSkills, /ACTIVE EVERY RESPONSE|The ladder is a reflex/);
+  for (const name of ["ask-user", "pi-coordinator", "project-scouting", "requirement-check"]) {
+    assert.match(promptSkills, new RegExp(`<name>${name}</name>`));
+  }
+  assert.match(byName.get("pi-coordinator").description, /multi-part work/);
+  assert.match(byName.get("requirement-check").description, /medium\/high-impact/);
+
+  const caveman = readFileSync("skills/caveman/SKILL.md", "utf8");
+  assert.match(caveman, /presentation only/i);
+  assert.match(caveman, /Never skip or alter work/);
+  const ponytail = readFileSync("skills/ponytail/SKILL.md", "utf8");
+  assert.match(ponytail, /disable-model-invocation: true/);
+  assert.match(ponytail, /YAGNI only to additions outside it/);
+  assert.match(ponytail, /preserve the requested capability and any specified architecture/i);
 });
 
 test("scouting has one packaged execution path and coordinator doctrine does not promise enforced TaskOrders", () => {
@@ -36,7 +78,8 @@ test("scouting has one packaged execution path and coordinator doctrine does not
   assert.doesNotMatch(scouting, /scripts\/scout\.py|\.scout_report\.md.*exists/);
   assert.match(coordinator, /current `pi_harness_coordinate` API only accepts/);
   assert.match(coordinator, /Do not interpret `success` as DoD/);
-  assert.equal(Object.keys(JSON.parse(readFileSync("skills/skills.lock.json", "utf8")).skills).length, 9);
+  const lock = JSON.parse(readFileSync("skills/skills.lock.json", "utf8"));
+  assert.equal(Object.hasOwn(lock.skills, "skill-hub"), false);
 });
 
 test("a modified packaged diagram reference fails verification", () => {
@@ -48,7 +91,7 @@ test("a modified packaged diagram reference fails verification", () => {
       const ref = resolve(temp, "skills", skill, ...(file === "SKILL.md" ? [file] : ["references", file]));
       writeFileSync(ref, readFileSync(ref, "utf8") + "\nchanged\n");
     }
-    const result = verifySkills(temp, { sourceRepo: resolve(root, "../skills-central") });
+    const result = verifySkills(temp);
     assert.equal(result.ok, false);
     assert.match(result.errors.join(" "), /architecture-diagram\/references\/readability.md: checksum mismatch/);
     assert.match(result.errors.join(" "), /ask-user\/SKILL.md: checksum mismatch/);

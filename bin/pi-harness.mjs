@@ -83,7 +83,7 @@ else {
   console.log(JSON.stringify({
     package: `${pkg.name}@${pkg.version}`, node: process.version, pi,
     resources, commands: { pi: commandPath("pi"), acp: commandPath("pi-harness-acp") },
-    skills: { source: skills.lock?.source, commit: skills.lock?.commit, verified: skills.ok },
+    skills: { count: Object.keys(skills.lock?.skills ?? {}).length, verified: skills.ok },
     provider: "Pi/Zed-owned; not inspected", toolCalling,
     acp: commandPath("pi-harness-acp") ? "available" : "unavailable", zed, failures,
   }, null, 2));

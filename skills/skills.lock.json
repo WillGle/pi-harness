@@ -1,50 +1,74 @@
 {
-  "source": "WillGle/skills-central",
-  "commit": "8cc8358a98dc3a34e9d982011a20ae167021ea9d",
-  "sourceCommitVerified": true,
+  "schema_version": 1,
   "skills": {
+    "architecture-diagram": {
+      "files": {
+        "SKILL.md": "47bd3199cddcfd6c9d0c1d8aa87c4bec73d4fb60a0b09372bd45c47d28c9f153",
+        "assets/badge_overlap_audit.py": "64831f01321587fd67160afef66115758ff0e85eea05f9c784d6ae57ba782170",
+        "assets/template.drawio": "95e509d307a130eef2429889ee619068c54b8f0d88504f1465784b0938f78400",
+        "references/readability.md": "977fd6bc8af8f3cf1e85e5c363050012e1691e44fae80877053e50bb2dde20e0",
+        "references/xml.md": "79343cd7561b0f80ac77093582a248a3244192924060689e33b9e8ec64ce84f3"
+      }
+    },
     "ask-user": {
-      "local": true,
       "files": {
         "SKILL.md": "559abe0e8f17e90af13487e6e28fd2fc222af0473d975e1ae14ce1448e2f7803"
       }
     },
-    "architecture-diagram": {
-      "sourceSkill": "architecture-diagram",
-      "sourceHash": "14e02d191e64e06167ae57aec00b970913a2947726ed3ce817a8dffeb38d504c",
+    "atomic-commit": {
       "files": {
-        "SKILL.md": "1e0ada6ab27e75c1a714394efd9507cb1f8551de1f7572ad371615e5ddb18784",
-        "assets/badge_overlap_audit.py": "64831f01321587fd67160afef66115758ff0e85eea05f9c784d6ae57ba782170",
-        "assets/template.drawio": "95e509d307a130eef2429889ee619068c54b8f0d88504f1465784b0938f78400",
-        "references/readability.md": "70b1b9913af794ab2441b8fd43b009a82d96e5791cbf34c9565ed47d3cea7b5b",
-        "references/xml.md": "79343cd7561b0f80ac77093582a248a3244192924060689e33b9e8ec64ce84f3"
+        "SKILL.md": "685586883afdb9bc9335163c48fdd73126616e1720662028f5c0c01188384a1e",
+        "references/splitting-recipes.md": "f725bbc3531cb57fff9f56b34955280dc085520362ee23dfe411bff544cdaa81"
       }
     },
-    "project-scouting": {
-      "local": true,
-      "files": { "SKILL.md": "654926087e4665bfd0f0e8be3e8d842fabe82914ff3e80b813fe65da97fae8ec" }
+    "cavecrew": {
+      "files": {
+        "SKILL.md": "f49ab426c702e6fd5fe8740a60f736bf6d9282aace4cbb53b33d2d3dca4c2675",
+        "references/agents/cavecrew-builder.md": "135af639b287ed7534b66d01390c4dc48d98683af52232728a0e87db9c558b3e",
+        "references/agents/cavecrew-investigator.md": "f1ce01150aeeec7de98d487f41693d27eba1bc9d4cc67f4c774675bb21c24fc2",
+        "references/agents/cavecrew-reviewer.md": "ae45346edae2cdb97018a38ebdcb79b162c59875cac2921d976a7d7540e4df70"
+      }
     },
     "caveman": {
-      "local": true,
-      "files": { "SKILL.md": "a18560edd2dd47bf5e1ed7c20e40d78d9dacacb17044c3f08a1ebf5da987c7ec" }
-    },
-    "ponytail": {
-      "local": true,
-      "files": { "SKILL.md": "68340a74772667ec4ed36057bc815acaac9be37c45802acc0440fcf02e840519" }
-    },
-    "pi-coordinator": {
-      "local": true,
-      "files": { "SKILL.md": "f04d690c5de1cffc0462f0eb6074c6c1030e7f0aba59911325fcc2428691a43d" }
-    },
-    "requirement-check": {
-      "local": true,
       "files": {
-        "SKILL.md": "3b117e9d7c965fc89ec73d0839db9c0efba1bcb70d054fe520616b43d03905fa"
+        "SKILL.md": "366724f5a47c6ee96f6d006113325aae5228d7d74eec4b5f53cc0ee78fa7c7c5"
       }
     },
-    "skill-hub": "de5c9c06eb27b1c2fd0ca5ec3728573903e862efaf73e6d2e2cd750755b47022",
+    "caveman-commit": {
+      "files": {
+        "SKILL.md": "5c887565a7324d324f54b442083868fcccaebdbaf150f14c465157d8e830c362"
+      }
+    },
+    "caveman-compress": {
+      "files": {
+        "SKILL.md": "beeea3d86ebc30b3fe24efdbf319be0ffdb0d6427e01fede857ce0af0dc57521",
+        "references/security.md": "ac3432493cfe71368a141f437bf35562eb8f4ce07ae699e5399c0cb665e02da3",
+        "scripts/__init__.py": "429c3e1c5cc5b9705f28d77f303c728304ae68693913ad3d5ce9b5a44c8ee40f",
+        "scripts/__main__.py": "6d8b7d7846a845059d7a3107143f11131f63c5511d669b44085b15ec5e3d2279",
+        "scripts/benchmark.py": "84a5a94bebcce03c9dc4a70333f120f03e11075bce9298e1e74b95594e142d43",
+        "scripts/cli.py": "17edb6b425adc0ea04e35f1e90dfe318ba4232a1b815c5ff7d6cff7d574efea6",
+        "scripts/compress.py": "3a5b5a9441284a301ec36ffb35ce4d7cdd857b2c25aaaebc4adee4362b3a8522",
+        "scripts/detect.py": "46bb2b3092c2896eec023135495923701716c586b370976f244674342dd9a35e",
+        "scripts/validate.py": "8b9e752b70868f6e03b3d7e76de19dd6b4ac92dad50522992738340e9916dc0d"
+      }
+    },
+    "caveman-help": {
+      "files": {
+        "SKILL.md": "cc08a97f446d87a777a095b1f108619fdc3168c707e49ec091e0c22e0f30c474"
+      }
+    },
+    "caveman-review": {
+      "files": {
+        "SKILL.md": "d21e71e7937461c7c8bcf51c0d565f41de0e6e6cd497f06f80e8419d8f6def5e"
+      }
+    },
+    "caveman-stats": {
+      "files": {
+        "SKILL.md": "f3aa28647bd45e6fcf7ea03b35aaefdc054d347a297c744bd083dcea8b97c015",
+        "scripts/session_stats.js": "3c51b024cfe31412f9c2498b0cecadf990a2cb830d74cdcdf778f1aa90f029d0"
+      }
+    },
     "drawio-modeling": {
-      "local": true,
       "files": {
         "SKILL.md": "dcb4fce129595fa576004b8a1a31168a24d4a85e0ba1a68dd3452ea8eea96f75",
         "assets/template.drawio": "993b1ca5d76ae4e0c510c02ac3e27d61ac3dc70eebc4025ce6945602b6367af9",
@@ -55,6 +79,66 @@
         "references/sequence.md": "bee78a012e29362f0280839b410764cde752fe5ee8c33d7c2c77b0651a076bd1",
         "references/state-machine.md": "ef03025f774689a1177faf2980d847f1eaea8dfd1b7ff29590536035a27e79b9",
         "references/use-case.md": "074a4116ca03ea11ca864bea3f6d6c780e10865be3ef037add32b235f5689933"
+      }
+    },
+    "pi-coordinator": {
+      "files": {
+        "SKILL.md": "8d401eca1ee08e53fa46c904c873a2dd52cad5d137b9be6e8f2c9f69f26edab6"
+      }
+    },
+    "ponytail": {
+      "files": {
+        "SKILL.md": "b34e63abe90949ccfe266e5b2900045d92bd0de8a726e6d86dcc80e28856e419"
+      }
+    },
+    "ponytail-audit": {
+      "files": {
+        "SKILL.md": "5560b8e383dbe2ddfddc873a1e2bf2e586e23e0cd7d995537482b2315331f6d1"
+      }
+    },
+    "ponytail-debt": {
+      "files": {
+        "SKILL.md": "c84fba75f0ca12bfe83f9a78ea02fd125c5dd3f1fbb18124105a489937f284e6"
+      }
+    },
+    "ponytail-gain": {
+      "files": {
+        "SKILL.md": "e8e5531f12caf1484bf745aa19a46da9e3b5cfd54ee6cbbc016fca9fd1b36e4e"
+      }
+    },
+    "ponytail-help": {
+      "files": {
+        "SKILL.md": "15bc63b43ec7403afc034d33fe15ef09406152354a33f8ba6f807ebbf625b709"
+      }
+    },
+    "ponytail-review": {
+      "files": {
+        "SKILL.md": "40df33b58fc6ef889b93585733feb9566b76e9586efa7f376785c1e995197ac0"
+      }
+    },
+    "project-scouting": {
+      "files": {
+        "SKILL.md": "654926087e4665bfd0f0e8be3e8d842fabe82914ff3e80b813fe65da97fae8ec"
+      }
+    },
+    "requirement-check": {
+      "files": {
+        "SKILL.md": "3b117e9d7c965fc89ec73d0839db9c0efba1bcb70d054fe520616b43d03905fa"
+      }
+    },
+    "skill-creator": {
+      "files": {
+        "SKILL.md": "1f703ef896555715375b1b6b500e0f8d1b7d133781db72f36e1e0190ecaa05cd",
+        "assets/templates/SKILL-template.md": "983e0a7398321fbbb24dfe90ccdc86b587c1c7aa62a1eaeee542a2ce99036e98",
+        "references/anti-patterns.md": "b2b7759e329eaa8e646d19c7b9fafcc14cea43db89b9d3509a2a22c212f9a120",
+        "references/checklist.md": "62bdead257ff1877324948e130911a1a0e40372c2b498b5a28200ad19ab8e159",
+        "references/content-patterns.md": "b29aceb5d05f42756e1e3deaa674bc761c116923618f242c0ba988db5e342a86",
+        "references/frontmatter-guide.md": "3d8fa8e1b7bceb304ab55840533f0dad05987298871069415a58895dbea3fcbe",
+        "references/quality-rubric.md": "667c84722a1fbe41b679b728354a2318b89ecaa4646ce55f327d24e97e1e048c",
+        "references/workflow-patterns.md": "8591c9dc6299b98e92d35a8efc9e9e5bdd70c6dab60b09a64e3a4ddc08ba5e6d",
+        "scripts/init_skill.py": "93ca7cd7e49e8423012a0237de6def17a3c44b69a67970da9bd02bebc57c2ef4",
+        "scripts/package_skill.py": "be30ac1876559b1f3b2006af619c6772bc507b45f667d5e4b83277438da270dc",
+        "scripts/validate_skill.py": "48caab5f105e21684f3996a459044a92fb167828e6d5b22b9e896eed5224023f"
       }
     }
   }

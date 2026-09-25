@@ -10,14 +10,27 @@ node_modules/
 .env.*
 !.env.example
 
-# Only curated skills belong in this public checkout.
+# Only Pi-Harness-owned skills belong in this checkout.
 /skills/*
 !/skills/ask-user/
 !/skills/architecture-diagram/
-!/skills/drawio-modeling/
+!/skills/atomic-commit/
+!/skills/cavecrew/
 !/skills/caveman/
+!/skills/caveman-commit/
+!/skills/caveman-compress/
+!/skills/caveman-help/
+!/skills/caveman-review/
+!/skills/caveman-stats/
+!/skills/drawio-modeling/
 !/skills/pi-coordinator/
 !/skills/ponytail/
+!/skills/ponytail-audit/
+!/skills/ponytail-debt/
+!/skills/ponytail-gain/
+!/skills/ponytail-help/
+!/skills/ponytail-review/
 !/skills/project-scouting/
-!/skills/skill-hub/
+!/skills/requirement-check/
+!/skills/skill-creator/
 !/skills/skills.lock.json

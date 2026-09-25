@@ -187,7 +187,7 @@ class DisposableProvider {
 }
 
 class DisposablePi {
-  constructor(provider, sessionPath) {
+  constructor(provider, sessionPath, { skills = false } = {}) {
     this.provider = provider;
     this.events = [];
     this.pending = new Map();
@@ -204,6 +204,7 @@ class DisposablePi {
         REPO_ROOT,
         "--no-extensions",
         "--no-skills",
+        ...(skills ? ["--skill", join(REPO_ROOT, "skills")] : []),
         "--no-prompt-templates",
         "--no-context-files",
         "--offline",
@@ -364,8 +365,8 @@ async function createFixture(options = {}) {
     project,
     provider,
     sessionPath: join(root, "session.jsonl"),
-    spawn(sessionPath = join(root, "session.jsonl")) {
-      return new DisposablePi(provider, sessionPath);
+    spawn(sessionPath = join(root, "session.jsonl"), options) {
+      return new DisposablePi(provider, sessionPath, options);
     },
     async close() {
       await provider.close();
@@ -390,6 +391,43 @@ function assertNoSuccessfulTool(pi, toolName, eventIndex, context) {
     `${context}: ${toolName} unexpectedly completed successfully: ${JSON.stringify(completed)}`,
   );
 }
+
+test("Pi hides policy modes from ordinary prompts and expands them on explicit invocation", async () => {
+  const fixture = await createFixture();
+  const pi = fixture.spawn(undefined, { skills: true });
+  try {
+    await pi.prompt("Explain a closure briefly.");
+    const system = messageText(fixture.provider.requests[0].body.messages.find((message) => message.role === "system"));
+    assert.match(system, /<name>pi-coordinator<\/name>/);
+    assert.match(system, /<name>requirement-check<\/name>/);
+    assert.match(system, /multi-part work/);
+    assert.match(system, /medium\/high-impact/);
+    assert.doesNotMatch(system, /<name>caveman<\/name>|<name>ponytail<\/name>/);
+    assert.doesNotMatch(system, /ACTIVE EVERY RESPONSE|YAGNI only to additions outside it/);
+
+    const invoke = async (name) => {
+      const requestIndex = fixture.provider.requests.length;
+      const result = await pi.send({ type: "prompt", message: `/skill:${name}` });
+      assert.equal(result.success, true);
+      for (let attempt = 0; attempt < 500 && fixture.provider.requests.length <= requestIndex; attempt++) {
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+      }
+      assert.ok(fixture.provider.requests.length > requestIndex, `${name} invocation must reach the model`);
+      return fixture.provider.requests[requestIndex].body.messages.map(messageText).join("\n");
+    };
+
+    const caveman = await invoke("caveman");
+    assert.match(caveman, /<skill name="caveman"/);
+    assert.match(caveman, /Scope: presentation only/);
+    const ponytail = await invoke("ponytail");
+    assert.match(ponytail, /<skill name="ponytail"/);
+    assert.match(ponytail, /requested capability/);
+    assert.match(ponytail, /TaskOrder/);
+  } finally {
+    await pi.close();
+    await fixture.close();
+  }
+});
 
 test("Pi plan mode persists across RPC reload and restores mutations after /plan off", async () => {
   const fixture = await createFixture();

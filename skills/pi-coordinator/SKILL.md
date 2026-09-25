@@ -1,6 +1,6 @@
 ---
 name: pi-coordinator
-description: Plan bounded Pi Harness tasks while keeping child execution context out of strategic reasoning.
+description: Plan bounded Pi Harness delegation while keeping execution details out of strategic reasoning. Use for multi-part work when delegated scout, research, or worker tasks are warranted; not routine single-threaded tasks.
 ---
 
 # Coordinator doctrine

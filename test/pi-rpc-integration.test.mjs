@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -91,23 +91,19 @@ function spawnPiRpc(options = {}) {
   return { child, sendCommand, prompt, events, close };
 }
 
-test("Pi RPC: command discovery includes plan, goal, and 8 curated skills", async () => {
+test("Pi RPC: command discovery includes every packaged skill and Harness command", async () => {
   const pi = spawnPiRpc();
   try {
     const res = await pi.sendCommand({ type: "get_commands" });
     assert.equal(res.success, true);
     const names = res.data.commands.map((c) => c.name);
+    const lock = JSON.parse(readFileSync("skills/skills.lock.json", "utf8"));
     assert.ok(names.includes("plan"));
     assert.ok(names.includes("goal"));
     assert.ok(names.includes("skill-hub"));
-    assert.ok(names.includes("skill:ask-user"));
-    assert.ok(names.includes("skill:architecture-diagram"));
-    assert.ok(names.includes("skill:drawio-modeling"));
-    assert.ok(names.includes("skill:caveman"));
-    assert.ok(names.includes("skill:pi-coordinator"));
-    assert.ok(names.includes("skill:ponytail"));
-    assert.ok(names.includes("skill:project-scouting"));
-    assert.ok(names.includes("skill:skill-hub"));
+    for (const skill of Object.keys(lock.skills)) assert.ok(names.includes(`skill:${skill}`), `${skill} must be registered`);
+    for (const skill of ["caveman", "ponytail"]) assert.ok(names.includes(`skill:${skill}`), `${skill} must stay explicitly invocable`);
+    assert.equal(names.includes("skill:skill-hub"), false);
   } finally {
     await pi.close();
   }

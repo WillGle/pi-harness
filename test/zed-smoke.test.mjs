@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { isPlanAllowedTool } from "../lib/state.mjs";
 
-test("Zed smoke: server entry, 8 skills, commands, plan block, state load, and no model claim", async () => {
+test("Zed smoke: server entry, packaged skills, commands, plan block, state load, and no model claim", async () => {
   const tmpDir = mkdtempSync(join(tmpdir(), "pi-zed-smoke-"));
   const zedConfigDir = join(tmpDir, ".config", "zed");
   mkdirSync(zedConfigDir, { recursive: true });
