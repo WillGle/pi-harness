@@ -417,7 +417,7 @@ export default function harness(pi: Pi): void {
     name: "pi_harness_run_operation", label: "Pi Harness run Operation",
     description: "Run a serial Harness-controlled Coordinator loop. Return only a bounded OperationReport to the Commander.",
     parameters: Type.Object({ operation_id: Type.String(), model: Type.Optional(Type.String()) }),
-    execute: async (_id: string, input: { operation_id: string; model?: string }, signal?: AbortSignal) => {
+    execute: async (_id: string, input: { operation_id: string; model?: string }, signal?: AbortSignal, _onUpdate?: any, ctx?: any) => {
       const id = input.operation_id;
       const operation = Object.hasOwn(operations, id) ? operations[id] : undefined;
       if (!operation || operation.status !== "open" || activeOperationRuns.size || activeDirectTasks.size) throw new Error("An open Operation and an idle serial Scheduler are required");
@@ -443,7 +443,7 @@ export default function harness(pi: Pi): void {
         const report = await runOperation(operation, {
           turn: (prompt: string) => executeCoordinatorTurn(pi, prompt, { cwd: process.cwd(), model: input.model, groupId: runId, signal: controller.signal }),
           headTurn: (prompt: string) => executeCoordinatorTurn(pi, prompt, { cwd: process.cwd(), role: "head", groupId: runId, signal: controller.signal }),
-          dispatch: async (task: any) => promoteTaskResult(await executeCoordinateTask(pi, validateTask(task), { cwd: process.cwd(), groupId: runId, signal: controller.signal })),
+          dispatch: async (task: any) => promoteTaskResult(await executeCoordinateTask(pi, validateTask(task), { cwd: process.cwd(), groupId: runId, signal: controller.signal, modelRegistry: ctx?.modelRegistry })),
           save,
         }, { state: coordinatorStates[id] ?? coordinatorState(operation), graph: taskGraphs[id], registry: headRegistries[id], headStates: headStates[id] ?? {}, mission: goal?.status === "active" ? goal.objective : undefined, cwd: process.cwd(), signal: controller.signal });
         return { content: [{ type: "text", text: JSON.stringify(report) }] };
@@ -464,8 +464,8 @@ export default function harness(pi: Pi): void {
   pi.registerTool?.({
     name: "pi_harness_coordinate", label: "Pi Harness coordinator",
     description: "Start a bounded scout, research, or worker task. Worker changes remain in a temporary worktree and are never integrated automatically.",
-    parameters: Type.Object({ owner: Type.Union([Type.Literal("scout"), Type.Literal("research"), Type.Literal("worker")]), scope: Type.String(), verification: Type.String(), permission: Type.Union([Type.Literal("read"), Type.Literal("write")]), model: Type.Optional(Type.String()), operation_id: Type.Optional(Type.String()), task_id: Type.Optional(Type.String()), constraints: Type.Optional(Type.Array(Type.String())), acceptance_criteria: Type.Optional(Type.Array(Type.String())), review_evidence: Type.Optional(Type.Record(Type.String(), Type.Union([Type.Literal("diff"), Type.Literal("gate"), Type.Literal("execution"), Type.Literal("report")]))) }),
-    execute: async (_id: string, input: { owner: "scout" | "research" | "worker"; scope: string; verification: string; permission: "read" | "write"; model?: string; operation_id?: string; task_id?: string; constraints?: string[]; acceptance_criteria?: string[]; review_evidence?: Record<string, "diff" | "gate" | "execution" | "report"> }, signal?: AbortSignal) => {
+    parameters: Type.Object({ owner: Type.Union([Type.Literal("scout"), Type.Literal("research"), Type.Literal("worker")]), scope: Type.String(), verification: Type.String(), permission: Type.Union([Type.Literal("read"), Type.Literal("write")]), model: Type.Optional(Type.String()), operation_id: Type.Optional(Type.String()), task_id: Type.Optional(Type.String()), constraints: Type.Optional(Type.Array(Type.String())), acceptance_criteria: Type.Optional(Type.Array(Type.String())), review_evidence: Type.Optional(Type.Record(Type.String(), Type.Union([Type.Literal("diff"), Type.Literal("gate"), Type.Literal("execution"), Type.Literal("report")]))), review_profile: Type.Optional(Type.Record(Type.String(), Type.Union([Type.Literal("default"), Type.Literal("security")]))) }),
+    execute: async (_id: string, input: { owner: "scout" | "research" | "worker"; scope: string; verification: string; permission: "read" | "write"; model?: string; operation_id?: string; task_id?: string; constraints?: string[]; acceptance_criteria?: string[]; review_evidence?: Record<string, "diff" | "gate" | "execution" | "report">; review_profile?: Record<string, "default" | "security"> }, signal?: AbortSignal, _onUpdate?: any, ctx?: any) => {
       const task = validateTask(input);
       if (activeDirectTasks.size || activeOperationRuns.size) throw new Error("The Harness serial Scheduler already has an active TaskOrder or Operation");
       const directToken = Symbol("direct TaskOrder");
@@ -482,7 +482,7 @@ export default function harness(pi: Pi): void {
       const dispatchEpoch = sessionEpoch;
       let result;
       try { result = await executeCoordinateTask(pi, task, {
-        cwd: process.cwd(), groupId: goal?.status === "active" ? goalGroupId : sessionTaskGroup, signal,
+        cwd: process.cwd(), groupId: goal?.status === "active" ? goalGroupId : sessionTaskGroup, signal, modelRegistry: ctx?.modelRegistry,
       }); } catch (error) {
         if (task.operation_id && dispatchEpoch === sessionEpoch) {
           taskGraphs = { ...taskGraphs, [task.operation_id]: blockGraphTask(taskGraphs[task.operation_id], operations[task.operation_id], task.task_id!, "retry the TaskOrder", "the Coordinator checks the unknown child outcome") };

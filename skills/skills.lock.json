@@ -126,6 +126,11 @@
         "SKILL.md": "3b117e9d7c965fc89ec73d0839db9c0efba1bcb70d054fe520616b43d03905fa"
       }
     },
+    "security": {
+      "files": {
+        "SKILL.md": "23adcd08e99fa99d4c4502f5c91d51ef2e438690c9446719ac8f150eed1761b7"
+      }
+    },
     "skill-creator": {
       "files": {
         "SKILL.md": "1f703ef896555715375b1b6b500e0f8d1b7d133781db72f36e1e0190ecaa05cd",

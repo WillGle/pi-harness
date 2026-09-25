@@ -408,7 +408,7 @@ test("Pi hides policy modes from ordinary prompts and expands them on explicit i
     assert.match(system, /<name>requirement-check<\/name>/);
     assert.match(system, /multi-part work/);
     assert.match(system, /medium\/high-impact/);
-    assert.doesNotMatch(system, /<name>caveman<\/name>|<name>ponytail<\/name>/);
+    assert.doesNotMatch(system, /<name>caveman<\/name>|<name>ponytail<\/name>|<name>security<\/name>/);
     assert.doesNotMatch(system, /ACTIVE EVERY RESPONSE|YAGNI only to additions outside it/);
 
     const invoke = async (name) => {
@@ -429,6 +429,12 @@ test("Pi hides policy modes from ordinary prompts and expands them on explicit i
     assert.match(ponytail, /<skill name="ponytail"/);
     assert.match(ponytail, /requested capability/);
     assert.match(ponytail, /TaskOrder/);
+    const priorModel = fixture.provider.requests.at(-1).body.model;
+    const security = await invoke("security");
+    assert.match(security, /<skill name="security"/);
+    assert.match(security, /trust boundaries/i);
+    assert.equal(fixture.provider.requests.at(-1).body.model, priorModel);
+    assert.doesNotMatch(security, /<skill name="security"[^>]*model=/);
   } finally {
     await pi.close();
     await fixture.close();

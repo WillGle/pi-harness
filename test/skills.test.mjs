@@ -49,7 +49,7 @@ test("Pi exposes only contextual skills to model selection and keeps policy mode
   });
   const byName = new Map(skills.map((skill) => [skill.name, skill]));
   const explicitOnly = skills.filter((skill) => skill.disableModelInvocation).map((skill) => skill.name).sort();
-  assert.deepEqual(explicitOnly, ["caveman", "ponytail"]);
+  assert.deepEqual(explicitOnly, ["caveman", "ponytail", "security"]);
   const promptSkills = formatSkillsForPrompt(skills);
   for (const name of explicitOnly) {
     assert.ok(byName.has(name), `${name} must remain registered for explicit invocation`);
@@ -60,6 +60,7 @@ test("Pi exposes only contextual skills to model selection and keeps policy mode
     assert.match(promptSkills, new RegExp(`<name>${name}</name>`));
   }
   assert.match(byName.get("pi-coordinator").description, /multi-part work/);
+  assert.match(readFileSync(byName.get("security").filePath, "utf8"), /trust boundaries/i);
   assert.match(byName.get("requirement-check").description, /medium\/high-impact/);
 
   const caveman = readFileSync("skills/caveman/SKILL.md", "utf8");

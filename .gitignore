@@ -32,5 +32,6 @@ node_modules/
 !/skills/ponytail-review/
 !/skills/project-scouting/
 !/skills/requirement-check/
+!/skills/security/
 !/skills/skill-creator/
 !/skills/skills.lock.json
