@@ -225,7 +225,7 @@ test("Pi RPC: compaction, restore, and fork state preservation", async () => {
     assert.equal(restoredGoal.objective, "Verify state compaction");
     assert.equal(restoredGoal.status, "cancelled");
 
-    // Verify caveman compaction contract
+    // Verify canonical control-state compaction contract
     const compactSummary = cavemanSummary({
       goal: restoredGoal,
       plan: restoredPlan,
@@ -234,8 +234,8 @@ test("Pi RPC: compaction, restore, and fork state preservation", async () => {
       gates: ["unit", "rpc"],
       blocker: undefined,
     });
-    assert.equal(compactSummary.format, "caveman-v1");
-    assert.equal(compactSummary.goal.objective, "Verify state compaction");
+    assert.equal(compactSummary.format, "agent-english-v1");
+    assert.equal(compactSummary.mission.objective, "Verify state compaction");
     assert.deepEqual(compactSummary.gates, ["unit", "rpc"]);
 
     // Test compact command execution in RPC

@@ -13,7 +13,9 @@ test("goals require terminal evidence and a blocker where applicable", () => {
   const goal = goalState("verify harness"); assert.throws(() => transitionGoal(goal, "complete")); assert.throws(() => transitionGoal(goal, "blocked", "gate failed"));
   const done = transitionGoal(goal, "complete", "npm test passed"); assert.equal(done.status, "complete"); assert.equal(restore([{ customType: GOAL_ENTRY, data: done }], GOAL_ENTRY).objective, "verify harness");
 });
-test("caveman compaction summary retains required state", () => {
-  const compact = cavemanSummary({ goal: goalState("finish"), plan: planState(true, ["inspect"]), decisions: ["minimal"], changedFiles: ["a"], gates: ["test"], blocker: "none" });
-  for (const key of ["goal", "plan", "decisions", "changedFiles", "gates", "blocker"]) assert.ok(key in compact);
+test("control compaction summary retains Mission state without Caveman compression", () => {
+  const compact = cavemanSummary({ goal: goalState("finish"), plan: planState(true, ["inspect"]), decisions: ["If gate passes, accept."], changedFiles: ["a"], gates: ["test"], blocker: "none" });
+  for (const key of ["mission", "plan", "decisions", "changedFiles", "gates", "blocker"]) assert.ok(key in compact);
+  assert.equal(compact.format, "agent-english-v1");
+  assert.equal(compact.decisions[0], "If gate passes, accept.");
 });
