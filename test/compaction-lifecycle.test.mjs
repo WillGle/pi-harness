@@ -30,14 +30,20 @@ function fixture(entries = []) {
     latest: (name) => entries.filter((entry) => entry.customType === name).at(-1)?.data };
 }
 
-test("threshold is configurable, bounded, persisted and disabled by default", async () => {
+test("threshold defaults to 70% of the active model context window and remains configurable", async () => {
   const f = fixture();
-  f.setPercent(89); f.emit("context"); f.emit("agent_settled");
+  await f.command("harness-compact", "status");
+  assert.match(f.pi.notices.at(-1).message, /enabled at 70%/);
+  f.setPercent(69); f.emit("context"); f.emit("agent_settled");
   assert.equal(f.pi.compactions.length, 0);
+  f.setPercent(70); f.emit("context"); f.emit("agent_settled");
+  assert.equal(f.pi.compactions.length, 1);
+  f.pi.compactions[0].onComplete({ summary: "DONE" });
+  f.setPercent(60); f.emit("context");
   await f.command("harness-compact", "set 73");
   assert.deepEqual(f.latest(PROACTIVE_COMPACT_ENTRY), { enabled: true, threshold_percent: 73 });
   f.setPercent(72); f.emit("context"); f.emit("agent_settled");
-  assert.equal(f.pi.compactions.length, 0);
+  assert.equal(f.pi.compactions.length, 1);
   for (const invalid of ["49", "91", "73.5", "abc", "80%", "set", "set  77abc"]) {
     if (invalid.startsWith("set")) await f.command("harness-compact", invalid);
     else assert.throws(() => setProactiveThreshold(invalid));
@@ -50,6 +56,9 @@ test("threshold is configurable, bounded, persisted and disabled by default", as
   assert.deepEqual(restored.latest(PROACTIVE_COMPACT_ENTRY), { enabled: false, threshold_percent: 73 });
   restored.setPercent(95); restored.emit("context"); restored.emit("agent_settled");
   assert.equal(restored.pi.compactions.length, 0);
+  const legacyDisabled = fixture([{ customType: PROACTIVE_COMPACT_ENTRY, data: { enabled: false, threshold_percent: null } }]);
+  await legacyDisabled.command("harness-compact", "status");
+  assert.match(legacyDisabled.pi.notices.at(-1).message, /disabled/);
 });
 
 test("context only marks pending; settled compaction completes before Goal continuation", async () => {
