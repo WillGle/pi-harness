@@ -20,10 +20,22 @@
         "references/xml.md": "79343cd7561b0f80ac77093582a248a3244192924060689e33b9e8ec64ce84f3"
       }
     },
-    "project-scouting": "9e806229a309eeb127d2462ed0b09497208c3e12a6589becbac355b6aeaa84fc",
-    "caveman": "5e30bb56afbd0b01bd736f2da84180e76f18db4a64de8e124525d5c8dc2e8605",
-    "ponytail": "55dcd2fac1d739f23c91d8e71d825509a29529d8b54ec6c1099cc96ef629c99a",
-    "pi-coordinator": "f3402206df6278921f89eb9698bc9d1e94d024fbfb15fc37b568544bdfc0bc10",
+    "project-scouting": {
+      "local": true,
+      "files": { "SKILL.md": "654926087e4665bfd0f0e8be3e8d842fabe82914ff3e80b813fe65da97fae8ec" }
+    },
+    "caveman": {
+      "local": true,
+      "files": { "SKILL.md": "a18560edd2dd47bf5e1ed7c20e40d78d9dacacb17044c3f08a1ebf5da987c7ec" }
+    },
+    "ponytail": {
+      "local": true,
+      "files": { "SKILL.md": "68340a74772667ec4ed36057bc815acaac9be37c45802acc0440fcf02e840519" }
+    },
+    "pi-coordinator": {
+      "local": true,
+      "files": { "SKILL.md": "f04d690c5de1cffc0462f0eb6074c6c1030e7f0aba59911325fcc2428691a43d" }
+    },
     "requirement-check": {
       "local": true,
       "files": {

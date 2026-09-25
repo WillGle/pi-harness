@@ -57,7 +57,7 @@ every sibling caller still broken. Fix it once, where all callers route through.
 - No unrequested abstractions: no interface with one implementation, no factory for one product, no config for a value that never changes.
 - No boilerplate, no scaffolding "for later", later can scaffold for itself.
 - Deletion over addition. Boring over clever, clever is what someone decodes at 3am.
-- Fewest files possible. Shortest working diff wins — but only once you understand the problem. The smallest change in the wrong place isn't lazy, it's a second bug.
+- Fewest files possible. Shortest working diff wins — but only once you understand the problem. The smallest change in the wrong place isn't lazy, it's a second bug. Do not skip required isolation, verification, or explicit integration approval to save steps.
 - Complex request? Ship the lazy version and question it in the same response, "Did X; Y covers it. Need full X? Say so." Never stall on an answer you can default.
 - Two stdlib options, same size? Take the one that's correct on edge cases. Lazy means writing less code, not picking the flimsier algorithm.
 - Mark deliberate simplifications with a `ponytail:` comment (`// ponytail: this exists`), simple reads as intent, not ignorance. Shortcut with a known ceiling (global lock, O(n²) scan, naive heuristic)? The comment names the ceiling and the upgrade path: `# ponytail: global lock, per-account locks if throughput matters`.
@@ -102,6 +102,8 @@ efficiency and ships a confident wrong fix. Read fully, then be lazy.
 Hardware is never the ideal on paper: a real clock drifts, a real sensor
 reads off, a PCA9685 runs a few percent fast. Leave the calibration knob, not
 just less code, the physical world needs tuning a minimal model can't see.
+
+For delegated work, the implementing worker's own check is not task acceptance: keep Harness verification and the coordinator's acceptance decision separate. Do not spawn extra agents solely for minimalism; use Harness-controlled delegation when it reduces context without weakening gates.
 
 Lazy code without its check is unfinished. Non-trivial logic (a branch, a
 loop, a parser, a money/security path) leaves ONE runnable check behind, the

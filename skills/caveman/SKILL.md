@@ -73,6 +73,10 @@ Example — destructive op:
 > ```
 > Caveman resume. Verify backup exist first.
 
+## Context and compaction
+
+Terse style does not authorize dropping evidence or declaring tasks verified. Pi owns compaction; Harness compact state tracks goal, plan, decisions, changed-file names, gates and blocker, not worker transcripts. Preserve concise task status and evidence/artifact pointers when available, never raw child logs, diffs, or retry history. `/learn` memory is user-saved reference, not a dump of execution context or a replacement for repository intelligence.
+
 ## Boundaries
 
 Code/commits/PRs: write normal. "stop caveman" or "normal mode": revert. Level persist until changed or session end.

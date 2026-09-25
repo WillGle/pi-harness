@@ -29,6 +29,16 @@ test("every checked-in curated skill matches its recorded checksum and verified 
   assert.equal(badCheck.verified, false);
 });
 
+test("scouting has one packaged execution path and coordinator doctrine does not promise enforced TaskOrders", () => {
+  const scouting = readFileSync("skills/project-scouting/SKILL.md", "utf8");
+  const coordinator = readFileSync("skills/pi-coordinator/SKILL.md", "utf8");
+  assert.match(scouting, /pi_harness_coordinate/);
+  assert.doesNotMatch(scouting, /scripts\/scout\.py|\.scout_report\.md.*exists/);
+  assert.match(coordinator, /current `pi_harness_coordinate` API only accepts/);
+  assert.match(coordinator, /Do not interpret `success` as DoD/);
+  assert.equal(Object.keys(JSON.parse(readFileSync("skills/skills.lock.json", "utf8")).skills).length, 9);
+});
+
 test("a modified packaged diagram reference fails verification", () => {
   const root = resolve(".");
   const temp = mkdtempSync(resolve(tmpdir(), "pi-skills-"));
