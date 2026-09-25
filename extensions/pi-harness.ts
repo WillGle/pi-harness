@@ -14,6 +14,7 @@ import { PROACTIVE_COMPACT_ENTRY, proactiveCompactionPolicy, restoreProactivePol
 import { COORDINATOR_ENTRY, coordinatorState, runOperation } from "../lib/operation-runner.mjs";
 import { promoteTaskResult } from "../lib/communication.mjs";
 import { OPERATION_ENTRY, acceptOperationCriterion, acceptTaskResult, createOperation, recordTaskResult, rejectTaskResult } from "../lib/operation.mjs";
+import { TASK_GRAPH_ENTRY, acceptGraphTask, blockGraphTask, claimTask, createTaskGraph, migrateTaskGraph, readyTaskIds, reconcileTaskGraph, recordTaskGraphResult, rejectGraphTask, validateTaskGraph } from "../lib/task-graph.mjs";
 import { findReferences, findSymbol } from "../lib/code-intel.mjs";
 import { readHashlines, replaceHashlines } from "../lib/precise-edit.mjs";
 import { Type } from "typebox";
@@ -33,6 +34,9 @@ export default function harness(pi: Pi): void {
   let goal: ReturnType<typeof goalState> | undefined;
   let operations: Record<string, ReturnType<typeof createOperation>> = {};
   let coordinatorStates: Record<string, ReturnType<typeof coordinatorState>> = {};
+  let taskGraphs: Record<string, ReturnType<typeof createTaskGraph>> = {};
+  let sessionTaskGroup = randomUUID();
+  const activeDirectTasks = new Set<symbol>();
   const activeOperationRuns = new Map<string, { controller: AbortController; goalGroup?: string }>();
   let sessionEpoch = 0;
   let proactivePolicy = proactiveCompactionPolicy();
@@ -53,6 +57,8 @@ export default function harness(pi: Pi): void {
     pi.appendEntry?.(PLAN_ENTRY, plan);
     if (goal) pi.appendEntry?.(GOAL_ENTRY, goal);
   };
+  // One canonical session entry commits Operation and TaskGraph together.
+  const persistScheduler = () => pi.appendEntry?.(TASK_GRAPH_ENTRY, { version: 1, operations, task_graphs: taskGraphs });
   const saveCompactState = (event: Record<string, unknown> = {}) => pi.appendEntry?.(COMPACT_ENTRY, controlStateSummary({
     goal, plan, decisions: Array.isArray(event.decisions) ? event.decisions : [],
     changedFiles: Array.isArray(event.changedFiles) ? event.changedFiles : [],
@@ -105,6 +111,9 @@ export default function harness(pi: Pi): void {
   };
 
   pi.on?.("session_start", (_event: any, ctx: any) => {
+    cancelCoordinateTasks(sessionTaskGroup);
+    if (goalGroupId) cancelCoordinateTasks(goalGroupId);
+    sessionTaskGroup = randomUUID();
     sessionEpoch++;
     compactionPending = false;
     compactionInFlight = false;
@@ -112,14 +121,29 @@ export default function harness(pi: Pi): void {
     compactionEpoch = 0;
     lastCompactedEpoch = -1;
     activeToolCalls.clear();
+    activeDirectTasks.clear();
     for (const run of activeOperationRuns.values()) run.controller.abort();
+    activeOperationRuns.clear(); // Old callbacks are epoch-guarded and cannot clear a new run.
     const activeTools = pi.getActiveTools?.() ?? [];
     pi.setActiveTools?.(activeTools.filter((name: string) => !PACKAGE_TOOLS.has(name)));
     const entries = ctx.sessionManager?.getEntries?.() ?? [];
     plan = restore(entries, PLAN_ENTRY) ?? plan;
     goal = restore(entries, GOAL_ENTRY) ?? goal;
-    operations = restore(entries, OPERATION_ENTRY) ?? {};
-    coordinatorStates = restore(entries, COORDINATOR_ENTRY) ?? {};
+    const schedulerSnapshot = restore(entries, TASK_GRAPH_ENTRY);
+    operations = schedulerSnapshot ? schedulerSnapshot.operations : restore(entries, OPERATION_ENTRY) ?? {};
+    const legacyCoordinator = restore(entries, COORDINATOR_ENTRY) ?? {};
+    taskGraphs = schedulerSnapshot ? schedulerSnapshot.task_graphs : Object.fromEntries(Object.entries(operations).map(([id, operation]) => [id, migrateTaskGraph(operation, legacyCoordinator[id]?.dispatch_counts)]));
+    for (const [id, operation] of Object.entries(operations)) {
+      if (!taskGraphs[id]) throw new Error("TaskGraph is missing for a restored Operation");
+      validateTaskGraph(taskGraphs[id], operation);
+      taskGraphs[id] = reconcileTaskGraph(taskGraphs[id], operation);
+    }
+    if (Object.keys(taskGraphs).some((id) => !Object.hasOwn(operations, id))) throw new Error("TaskGraph has no owning Operation");
+    coordinatorStates = Object.fromEntries(Object.entries(legacyCoordinator).map(([id, state]: [string, any]) => [id, {
+      version: 1, operation_id: id, turns: state.turns ?? 0, decisions: (state.decisions ?? []).slice(-7), blocker: state.blocker ?? null,
+    }]));
+    if (Object.keys(coordinatorStates).length) pi.appendEntry?.(COORDINATOR_ENTRY, coordinatorStates);
+    if (Object.keys(operations).length) persistScheduler();
     proactivePolicy = restoreProactivePolicy(restore(entries, PROACTIVE_COMPACT_ENTRY));
     continuationCount = 0;
     invalidTerminalAttempts = 0;
@@ -201,6 +225,7 @@ export default function harness(pi: Pi): void {
     pi.appendEntry?.(PROACTIVE_COMPACT_ENTRY, proactivePolicy);
     pi.appendEntry?.(OPERATION_ENTRY, operations);
     pi.appendEntry?.(COORDINATOR_ENTRY, coordinatorStates);
+    persistScheduler();
     saveCompactState(event);
   };
   const settleCompaction = (ctx: any) => {
@@ -347,15 +372,27 @@ export default function harness(pi: Pi): void {
         if (Object.hasOwn(operations, id)) throw new Error("Operation ID already exists");
         const operation = createOperation({ operation_id: id, objective: input.objective, required_task_ids: input.required_task_ids, acceptance_criteria: input.acceptance_criteria, dependencies: input.dependencies });
         if (operation.required_task_ids.some((taskId: string) => Object.values(operations).some((entry) => entry.required_task_ids.includes(taskId)))) throw new Error("A TaskOrder ID already belongs to another Operation");
+        const graph = createTaskGraph(operation);
         operations = { ...operations, [id]: operation };
+        taskGraphs = { ...taskGraphs, [id]: graph };
       } else {
         const operation = Object.hasOwn(operations, id) ? operations[id] : undefined;
         if (!operation) throw new Error("Unknown Operation");
-        if (input.action === "accept_task") operations = { ...operations, [id]: acceptTaskResult(operation, input.task_id ?? "") };
-        if (input.action === "reject_task") operations = { ...operations, [id]: rejectTaskResult(operation, input.task_id ?? "") };
+        const graph = taskGraphs[id];
+        validateTaskGraph(graph, operation);
+        if (input.action === "accept_task") {
+          const next = acceptTaskResult(operation, input.task_id ?? "");
+          const nextGraph = acceptGraphTask(graph, operation, next, input.task_id ?? "");
+          operations = { ...operations, [id]: next }; taskGraphs = { ...taskGraphs, [id]: nextGraph };
+        }
+        if (input.action === "reject_task") {
+          const next = rejectTaskResult(operation, input.task_id ?? "");
+          const nextGraph = rejectGraphTask(graph, next, input.task_id ?? "");
+          operations = { ...operations, [id]: next }; taskGraphs = { ...taskGraphs, [id]: nextGraph };
+        }
         if (input.action === "accept_criterion") operations = { ...operations, [id]: acceptOperationCriterion(operation, input.criterion ?? "", input.evidence_refs, process.cwd()) };
       }
-      if (input.action !== "status") pi.appendEntry?.(OPERATION_ENTRY, operations);
+      if (input.action !== "status") { pi.appendEntry?.(OPERATION_ENTRY, operations); persistScheduler(); }
       return { content: [{ type: "text", text: JSON.stringify(operations[id]) }] };
     },
   });
@@ -366,28 +403,31 @@ export default function harness(pi: Pi): void {
     execute: async (_id: string, input: { operation_id: string; model?: string }, signal?: AbortSignal) => {
       const id = input.operation_id;
       const operation = Object.hasOwn(operations, id) ? operations[id] : undefined;
-      if (!operation || operation.status !== "open" || activeOperationRuns.size) throw new Error("An open Operation and an idle coordination loop are required");
+      if (!operation || operation.status !== "open" || activeOperationRuns.size || activeDirectTasks.size) throw new Error("An open Operation and an idle serial Scheduler are required");
       const controller = new AbortController();
       const abort = () => controller.abort();
       if (signal?.aborted) controller.abort(); else signal?.addEventListener("abort", abort, { once: true });
       const runId = randomUUID();
       const runEpoch = sessionEpoch;
       activeOperationRuns.set(id, { controller, goalGroup: goal?.status === "active" ? goalGroupId : undefined });
-      const save = (nextOperation: ReturnType<typeof createOperation>, state: ReturnType<typeof coordinatorState>) => {
+      const save = (nextOperation: ReturnType<typeof createOperation>, state: ReturnType<typeof coordinatorState>, graph: ReturnType<typeof createTaskGraph>) => {
         if (runEpoch !== sessionEpoch) return;
+        validateTaskGraph(graph, nextOperation);
         operations = { ...operations, [id]: nextOperation };
+        taskGraphs = { ...taskGraphs, [id]: graph };
         coordinatorStates = { ...coordinatorStates, [id]: state };
         pi.appendEntry?.(OPERATION_ENTRY, operations);
         pi.appendEntry?.(COORDINATOR_ENTRY, coordinatorStates);
+        persistScheduler();
       };
       try {
         const report = await runOperation(operation, {
           turn: (prompt: string) => executeCoordinatorTurn(pi, prompt, { cwd: process.cwd(), model: input.model, groupId: runId, signal: controller.signal }),
           dispatch: async (task: any) => promoteTaskResult(await executeCoordinateTask(pi, validateTask(task), { cwd: process.cwd(), groupId: runId, signal: controller.signal })),
           save,
-        }, { state: coordinatorStates[id] ?? coordinatorState(operation), mission: goal?.status === "active" ? goal.objective : undefined, cwd: process.cwd(), signal: controller.signal });
+        }, { state: coordinatorStates[id] ?? coordinatorState(operation), graph: taskGraphs[id], mission: goal?.status === "active" ? goal.objective : undefined, cwd: process.cwd(), signal: controller.signal });
         return { content: [{ type: "text", text: JSON.stringify(report) }] };
-      } finally { signal?.removeEventListener("abort", abort); activeOperationRuns.delete(id); }
+      } finally { signal?.removeEventListener("abort", abort); if (activeOperationRuns.get(id)?.controller === controller) activeOperationRuns.delete(id); }
     },
   });
   pi.registerTool?.({
@@ -407,22 +447,41 @@ export default function harness(pi: Pi): void {
     parameters: Type.Object({ owner: Type.Union([Type.Literal("scout"), Type.Literal("research"), Type.Literal("worker")]), scope: Type.String(), verification: Type.String(), permission: Type.Union([Type.Literal("read"), Type.Literal("write")]), model: Type.Optional(Type.String()), operation_id: Type.Optional(Type.String()), task_id: Type.Optional(Type.String()), constraints: Type.Optional(Type.Array(Type.String())), acceptance_criteria: Type.Optional(Type.Array(Type.String())), review_evidence: Type.Optional(Type.Record(Type.String(), Type.Union([Type.Literal("diff"), Type.Literal("gate"), Type.Literal("execution"), Type.Literal("report")]))) }),
     execute: async (_id: string, input: { owner: "scout" | "research" | "worker"; scope: string; verification: string; permission: "read" | "write"; model?: string; operation_id?: string; task_id?: string; constraints?: string[]; acceptance_criteria?: string[]; review_evidence?: Record<string, "diff" | "gate" | "execution" | "report"> }, signal?: AbortSignal) => {
       const task = validateTask(input);
+      if (activeDirectTasks.size || activeOperationRuns.size) throw new Error("The Harness serial Scheduler already has an active TaskOrder or Operation");
+      const directToken = Symbol("direct TaskOrder");
+      activeDirectTasks.add(directToken);
+      try {
       if (task.operation_id) {
         if (activeOperationRuns.has(task.operation_id) || Object.hasOwn(coordinatorStates, task.operation_id)) throw new Error("The Harness Coordinator owns this Operation; use the bounded OperationReport");
         const operation = Object.hasOwn(operations, task.operation_id) ? operations[task.operation_id] : undefined;
         if (!operation || operation.status !== "open" || !operation.required_task_ids.includes(task.task_id!)) throw new Error("TaskOrder is not registered with an open Operation");
-        if (operation.accepted_task_ids.includes(task.task_id!)) throw new Error("The Coordinator already accepted this TaskResult");
+        if (!readyTaskIds(taskGraphs[task.operation_id], operation).includes(task.task_id!)) throw new Error("The TaskOrder is not in the Scheduler ready set");
+        taskGraphs = { ...taskGraphs, [task.operation_id]: claimTask(taskGraphs[task.operation_id], operation, task.task_id!) };
+        persistScheduler(); // running must be durable before the package spawn.
       }
-      const result = await executeCoordinateTask(pi, task, {
-        cwd: process.cwd(),
-        groupId: goal?.status === "active" ? goalGroupId : undefined,
-        signal,
-      });
+      const dispatchEpoch = sessionEpoch;
+      let result;
+      try { result = await executeCoordinateTask(pi, task, {
+        cwd: process.cwd(), groupId: goal?.status === "active" ? goalGroupId : sessionTaskGroup, signal,
+      }); } catch (error) {
+        if (task.operation_id && dispatchEpoch === sessionEpoch) {
+          taskGraphs = { ...taskGraphs, [task.operation_id]: blockGraphTask(taskGraphs[task.operation_id], operations[task.operation_id], task.task_id!, "retry the TaskOrder", "the Coordinator checks the unknown child outcome") };
+          persistScheduler();
+        }
+        throw error;
+      }
+      if (dispatchEpoch !== sessionEpoch) throw new Error("Old-session TaskResult cannot mutate the new TaskGraph");
       if (task.operation_id) {
-        operations = { ...operations, [task.operation_id]: recordTaskResult(operations[task.operation_id], promoteTaskResult(result)) };
+        const operation = operations[task.operation_id];
+        const next = recordTaskResult(operation, promoteTaskResult(result));
+        const nextGraph = recordTaskGraphResult(taskGraphs[task.operation_id], next, task.task_id!);
+        operations = { ...operations, [task.operation_id]: next };
+        taskGraphs = { ...taskGraphs, [task.operation_id]: nextGraph };
         pi.appendEntry?.(OPERATION_ENTRY, operations);
+        persistScheduler();
       }
       return { content: [{ type: "text", text: JSON.stringify(promoteTaskResult(result)) }] };
+      } finally { activeDirectTasks.delete(directToken); }
     },
   });
 }

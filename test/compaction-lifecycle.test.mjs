@@ -156,7 +156,11 @@ test("native compaction satisfies pending request without a second Harness compa
   assert.deepEqual(f.latest(PROACTIVE_COMPACT_ENTRY), { enabled: true, threshold_percent: 75 });
   assert.equal(f.latest("pi-harness-operation-state")["O-1"].status, "open");
   assert.deepEqual(f.latest("pi-harness-coordinator-state"), {});
+  const snapshot = f.latest("pi-harness-task-graph-state");
+  assert.equal(snapshot.operations["O-1"].status, "open");
+  assert.equal(snapshot.task_graphs["O-1"].nodes["T-1"].scheduler_status, "ready");
   f.emit("session_compact", { reason: "threshold" });
   f.emit("agent_settled");
   assert.equal(f.pi.compactions.length, 0);
+  assert.equal(f.latest("pi-harness-task-graph-state").task_graphs["O-1"].nodes["T-1"].scheduler_status, "ready");
 });

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import harness from "../extensions/pi-harness.ts";
 import { OPERATION_ENTRY } from "../lib/operation.mjs";
+import { TASK_GRAPH_ENTRY } from "../lib/task-graph.mjs";
 
 function makePi(entries) {
   const tools = new Map(), handlers = new Map(), listeners = new Map();
@@ -46,6 +47,7 @@ test("Operation tool records only the Harness TaskResult and requires Coordinato
         pi.events.emit("subagents:completed", { id, status: "completed", result: JSON.stringify(response) });
       });
     });
+    assert.equal(entries.filter((entry) => entry.customType === TASK_GRAPH_ENTRY).at(-1).data.task_graphs["O-test"].nodes["T-test"].scheduler_status, "ready");
     const taskResult = await call(pi, "pi_harness_coordinate", { owner: "research", task_id: "T-test", operation_id: "O-test", scope: "Inspect logic.", permission: "read", verification: "Inspect report.", acceptance_criteria: ["The report identifies `lib/coordinator.mjs`."] });
     assert.equal(taskResult.verification_status, "verified");
     assert.equal(taskResult.operation_id, "O-test");
@@ -53,9 +55,13 @@ test("Operation tool records only the Harness TaskResult and requires Coordinato
     const pending = await call(pi, "pi_harness_operation", { action: "status", operation_id: "O-test" });
     assert.equal(pending.status, "open");
     assert.equal(pending.task_results["T-test"].verification_status, "verified");
+    assert.equal(entries.filter((entry) => entry.customType === TASK_GRAPH_ENTRY).at(-1).data.task_graphs["O-test"].nodes["T-test"].scheduler_status, "result_available");
     assert.equal((await call(pi, "pi_harness_operation", { action: "accept_task", operation_id: "O-test", task_id: "T-test" })).status, "complete");
     assert.equal(entries.some((entry) => entry.customType === "pi-harness-goal-state"), false);
     assert.ok(entries.some((entry) => entry.customType === OPERATION_ENTRY));
+    const snapshot = entries.filter((entry) => entry.customType === TASK_GRAPH_ENTRY).at(-1).data;
+    assert.deepEqual(snapshot.operations["O-test"].accepted_task_ids, ["T-test"]);
+    assert.equal(snapshot.task_graphs["O-test"].nodes["T-test"].scheduler_status, "accepted");
     const restored = makePi(entries);
     assert.equal((await call(restored, "pi_harness_operation", { action: "status", operation_id: "O-test" })).status, "complete");
     await assert.rejects(() => call(restored, "pi_harness_operation", { action: "accept_task", operation_id: "O-test", task_id: "T-test" }));

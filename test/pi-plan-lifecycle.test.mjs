@@ -16,6 +16,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { COMPACT_ENTRY, PLAN_ENTRY } from "../lib/state.mjs";
 import { PROACTIVE_COMPACT_ENTRY } from "../lib/compaction-policy.mjs";
+import { TASK_GRAPH_ENTRY } from "../lib/task-graph.mjs";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const PI_TOOLS = [
@@ -31,6 +32,7 @@ const PI_TOOLS = [
   "pi_harness_references",
   "pi_harness_patch",
   "pi_harness_coordinate",
+  "pi_harness_operation",
   "pi_harness_goal",
 ].join(",");
 
@@ -110,7 +112,7 @@ class DisposableProvider {
       toolName = "pi_harness_goal";
       argumentsForTool = { status: "complete", evidence: "" };
     }
-    if (marker && !hasToolResultAfterMarker) {
+    if (marker && !hasToolResultAfterMarker && (body.tools?.length ?? 0) > 0) {
       if (marker.includes("CALL_WRITE") || marker.includes("CALL_CHILD_WRITE") || marker.includes("CALL_PARENT_WRITE")) {
         toolName = "write";
         const path = marker.includes("CALL_CHILD_WRITE")
@@ -119,6 +121,9 @@ class DisposableProvider {
             ? "parent-write.txt"
             : "blocked-write.txt";
         argumentsForTool = { path, content: `${path}\n` };
+      } else if (marker.includes("CALL_OPERATION_CREATE")) {
+        toolName = "pi_harness_operation";
+        argumentsForTool = { action: "create", operation_id: "O-compact", objective: "Preserve the TaskGraph.", required_task_ids: ["T-root", "T-child"], dependencies: { "T-child": ["T-root"] } };
       } else if (marker.includes("CALL_EDIT")) {
         toolName = "edit";
         argumentsForTool = { path: "edit-target.txt", oldText: "original\n", newText: "edited\n" };
@@ -489,6 +494,8 @@ test("Pi plan mode survives real compaction and still blocks built-in and Harnes
   let pi;
   try {
     pi = fixture.spawn();
+    await pi.prompt("CALL_OPERATION_CREATE");
+    assert.equal(latestCustom((await pi.send({ type: "get_entries" })).data.entries, TASK_GRAPH_ENTRY)?.data.task_graphs["O-compact"].nodes["T-root"].scheduler_status, "ready");
     await pi.prompt("/plan on");
     await pi.prompt("/harness-compact set 73");
     const autoCompaction = await pi.send({ type: "set_auto_compaction", enabled: false });
@@ -515,6 +522,7 @@ test("Pi plan mode survives real compaction and still blocks built-in and Harnes
     assert.ok(compactEntries.some((entry) => entry.type === "compaction"), "a real compaction entry must be persisted");
     assert.ok(latestCustom(compactEntries, COMPACT_ENTRY), `missing ${COMPACT_ENTRY} after real compaction`);
     assert.deepEqual(latestCustom(compactEntries, PROACTIVE_COMPACT_ENTRY)?.data, { enabled: true, threshold_percent: 73 });
+    assert.equal(latestCustom(compactEntries, TASK_GRAPH_ENTRY)?.data.task_graphs["O-compact"].nodes["T-child"].scheduler_status, "pending");
     assertPlanEntry(compactEntries, true, "plan state immediately after compaction");
 
     const writeEvents = pi.events.length;
@@ -557,6 +565,8 @@ test("Pi plan mode survives real compaction and still blocks built-in and Harnes
     const reloadedEntries = (await pi.send({ type: "get_entries" })).data.entries;
     assertPlanEntry(reloadedEntries, true, "plan state after compaction reload");
     assert.deepEqual(latestCustom(reloadedEntries, PROACTIVE_COMPACT_ENTRY)?.data, { enabled: true, threshold_percent: 73 });
+    assert.equal(latestCustom(reloadedEntries, TASK_GRAPH_ENTRY)?.data.task_graphs["O-compact"].nodes["T-root"].scheduler_status, "ready");
+    assert.equal(latestCustom(reloadedEntries, TASK_GRAPH_ENTRY)?.data.task_graphs["O-compact"].nodes["T-child"].scheduler_status, "pending");
     await pi.prompt("/harness-compact status");
     await pi.waitFor((event) => event.type === "extension_ui_request" && /enabled at 73%/.test(event.message ?? ""));
     await pi.prompt("/plan status");

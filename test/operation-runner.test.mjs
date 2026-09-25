@@ -7,6 +7,7 @@ import harness from "../extensions/pi-harness.ts";
 import { createOperation } from "../lib/operation.mjs";
 import { coordinatorPrompt, coordinatorState, operationBrief, parseCoordinatorDecision, runOperation } from "../lib/operation-runner.mjs";
 import { cancelCoordinateTasks, executeCoordinatorTurn } from "../lib/coordinator.mjs";
+import { TASK_GRAPH_ENTRY } from "../lib/task-graph.mjs";
 
 const dir = mkdtempSync(join(tmpdir(), "pi-phasee-test-"));
 const prior = process.env.PI_HARNESS_EVIDENCE_DIR;
@@ -20,7 +21,8 @@ test("Coordinator packet contains bounded semantic state, not transcripts", () =
   const operation = op();
   const packet = operationBrief(operation, coordinatorState(operation), "Mission objective.");
   assert.equal(packet.OperationBrief.mission, "Mission objective.");
-  assert.deepEqual(packet.OperationBrief.pending_task_ids, ["T-1", "T-2"]);
+  assert.deepEqual(packet.OperationBrief.ready_task_ids, ["T-1"]);
+  assert.deepEqual(packet.OperationBrief.pending_task_ids, ["T-2"]);
   assert.ok(!coordinatorPrompt(packet).includes("raw Worker transcript"));
   const profile = readFileSync(".pi/agents/coordinator.md", "utf8");
   assert.match(profile, /tools: read/);
@@ -49,7 +51,7 @@ test("pi-subagents 0.19.0 RPC cannot safely resume a completed Coordinator sessi
 test("malformed or unauthorized CoordinatorDecision fails closed", () => {
   for (const raw of ["not JSON", decision("dispatch", { task: task("UNKNOWN") }), decision("accept_task", { task_id: "UNKNOWN" }), decision("report", { mission_complete: true }), decision("accept_task", { task_id: "T-1", task: task("T-1") }), JSON.stringify({ ...JSON.parse(decision("report")), operation_id: "O-foreign" })]) assert.throws(() => parseCoordinatorDecision(raw, op()));
   const state = coordinatorState(op());
-  assert.deepEqual(Object.keys(state).sort(), ["blocker", "decisions", "dispatch_counts", "operation_id", "turns", "version"]);
+  assert.deepEqual(Object.keys(state).sort(), ["blocker", "decisions", "operation_id", "turns", "version"]);
 });
 
 test("Harness rejects Dependency bypass and unverified acceptance", async () => {
@@ -74,7 +76,8 @@ test("strategic block escalates, but ordinary retry failure stays operational", 
 test("Harness bounds repeated failed TaskOrders without an infinite loop", async () => {
   let spawns = 0;
   const report = await runOperation(createOperation({ operation_id: "O-1", objective: "Retry task.", required_task_ids: ["T-1"] }), {
-    turn: async () => decision("dispatch", { task: task("T-1") }),
+    turn: async (prompt) => JSON.parse(prompt.slice(prompt.indexOf('{"OperationBrief"'))).OperationBrief.result_available_task_ids.includes("T-1")
+      ? decision("reject_task", { task_id: "T-1" }) : decision("dispatch", { task: task("T-1") }),
     dispatch: async () => { spawns++; return { task_id: "T-1", operation_id: "O-1", execution_status: "execution_complete", verification_status: "failed", evidence_refs: [] }; },
   });
   assert.equal(spawns, 2);
@@ -101,6 +104,26 @@ function fakePi(entries = []) {
   return pi;
 }
 const call = async (pi, tool, input, signal) => JSON.parse((await pi.tools.get(tool).execute("id", input, signal)).content[0].text);
+
+test("a legacy Operation entry migrates to TaskGraph without resetting accepted TaskResults", () => {
+  const operation = op();
+  const verified = { version: 1, operation_id: "O-1", task_id: "T-1", execution_status: "execution_complete", verification_status: "verified", evidence_refs: [] };
+  const previous = { ...operation, accepted_task_ids: ["T-1"], task_results: { "T-1": verified } };
+  const pi = fakePi([{ customType: "pi-harness-operation-state", data: { "O-1": previous } }]);
+  const snapshot = pi.entries.filter((entry) => entry.customType === TASK_GRAPH_ENTRY).at(-1).data;
+  assert.equal(snapshot.task_graphs["O-1"].nodes["T-1"].scheduler_status, "accepted");
+  assert.equal(snapshot.task_graphs["O-1"].nodes["T-2"].scheduler_status, "ready");
+  assert.deepEqual(snapshot.operations["O-1"].accepted_task_ids, ["T-1"]);
+  const failed = { ...previous, task_results: { ...previous.task_results, "T-2": { ...verified, task_id: "T-2", verification_status: "failed" } }, rejected_task_ids: ["T-2"] };
+  const legacy = fakePi([
+    { customType: "pi-harness-operation-state", data: { "O-1": failed } },
+    { customType: "pi-harness-coordinator-state", data: { "O-1": { version: 1, operation_id: "O-1", turns: 3, decisions: [], blocker: null, dispatch_counts: { "T-2": 2 } } } },
+  ]);
+  const migrated = legacy.entries.filter((entry) => entry.customType === TASK_GRAPH_ENTRY).at(-1).data.task_graphs["O-1"];
+  assert.equal(migrated.nodes["T-2"].attempts, 2);
+  assert.equal(migrated.nodes["T-2"].scheduler_status, "exhausted");
+  assert.equal(Object.hasOwn(legacy.entries.filter((entry) => entry.customType === "pi-harness-coordinator-state").at(-1).data["O-1"], "dispatch_counts"), false);
+});
 
 test("goal cancellation aborts the Coordinator turn; an unrelated turn is unaffected", async () => {
   const pi = fakePi();
@@ -152,6 +175,57 @@ test("switching sessions aborts the run without writing old Coordinator state in
   await assert.rejects(() => call(pi, "pi_harness_operation", { action: "status", operation_id: "O-1" }), /Unknown Operation/);
 });
 
+test("Scheduler attempt budget survives Coordinator replacement and session restore", async () => {
+  const pi = fakePi();
+  await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-1", objective: "Inspect report.", required_task_ids: ["T-1"] });
+  let stage = 0, counter = 0;
+  const steps = [
+    decision("dispatch", { task: task("T-1") }), decision("reject_task", { task_id: "T-1" }),
+    decision("block", { blocked_action: "choose another report", required_condition: "the Coordinator checks an alternate source" }),
+  ];
+  const scripted = (instance, decisions) => instance.events.on("subagents:rpc:spawn", (req) => {
+    const id = `agent-${++counter}`;
+    instance.events.emit(`subagents:rpc:spawn:reply:${req.requestId}`, { success: true, data: { id } });
+    queueMicrotask(() => instance.events.emit("subagents:completed", { id, status: "completed", result: req.type === "coordinator" ? decisions[stage++] : "A read-only report." }));
+  });
+  scripted(pi, steps);
+  assert.equal((await call(pi, "pi_harness_run_operation", { operation_id: "O-1" })).status, "blocked");
+  let snapshot = pi.entries.filter((entry) => entry.customType === TASK_GRAPH_ENTRY).at(-1).data;
+  assert.equal(snapshot.task_graphs["O-1"].nodes["T-1"].attempts, 1);
+  assert.equal(snapshot.task_graphs["O-1"].nodes["T-1"].scheduler_status, "ready");
+  const restored = fakePi(pi.entries);
+  stage = 0;
+  scripted(restored, [decision("dispatch", { task: task("T-1") }), decision("reject_task", { task_id: "T-1" }), decision("dispatch", { task: task("T-1") })]);
+  const report = await call(restored, "pi_harness_run_operation", { operation_id: "O-1" });
+  assert.equal(report.status, "blocked");
+  assert.match(report.blocker, /retry limit/);
+  snapshot = restored.entries.filter((entry) => entry.customType === TASK_GRAPH_ENTRY).at(-1).data;
+  assert.equal(snapshot.task_graphs["O-1"].nodes["T-1"].attempts, 2);
+  assert.equal(snapshot.task_graphs["O-1"].nodes["T-1"].scheduler_status, "exhausted");
+});
+
+test("old-session direct TaskResult cannot mutate a new session's TaskGraph", async () => {
+  const pi = fakePi();
+  await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-1", objective: "Old session.", required_task_ids: ["T-1"] });
+  let request;
+  pi.events.on("subagents:rpc:spawn", (next) => {
+    request = next;
+    pi.events.emit(`subagents:rpc:spawn:reply:${next.requestId}`, { success: true, data: { id: "old-worker" } });
+    next.options.signal.addEventListener("abort", () => pi.events.emit("subagents:failed", { id: "old-worker", status: "stopped" }), { once: true });
+  });
+  const old = call(pi, "pi_harness_coordinate", { operation_id: "O-1", task_id: "T-1", owner: "research", permission: "read", scope: "Inspect old session.", verification: "Check the result." });
+  for (let i = 0; i < 20 && !request; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.ok(request);
+  const nextEntries = [];
+  pi.sessionStart(nextEntries);
+  await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-1", objective: "New session.", required_task_ids: ["T-1"] });
+  await assert.rejects(old, /Old-session TaskResult/);
+  const snapshot = nextEntries.filter((entry) => entry.customType === TASK_GRAPH_ENTRY).at(-1).data;
+  assert.equal(snapshot.operations["O-1"].objective, "New session.");
+  assert.equal(snapshot.task_graphs["O-1"].nodes["T-1"].attempts, 0);
+  assert.equal(snapshot.task_graphs["O-1"].nodes["T-1"].scheduler_status, "ready");
+});
+
 test("goal cancellation aborts the active managed ExecutionUnit", async () => {
   const pi = fakePi();
   await pi.commands.get("goal").handler("Mission objective.", {});
@@ -169,6 +243,8 @@ test("goal cancellation aborts the active managed ExecutionUnit", async () => {
   await pi.commands.get("goal").handler("cancel", {});
   assert.equal(workerSignal.aborted, true);
   assert.equal((await pending).status, "blocked");
+  const graph = pi.entries.filter((entry) => entry.customType === TASK_GRAPH_ENTRY).at(-1).data.task_graphs["O-1"];
+  assert.equal(graph.nodes["T-1"].scheduler_status, "blocked");
 });
 
 test("serial Coordinator turns dispatch through Harness; Commander receives only OperationReport", async () => {
@@ -178,6 +254,12 @@ test("serial Coordinator turns dispatch through Harness; Commander receives only
   let stage = 0, seq = 0;
   pi.events.on("subagents:rpc:spawn", (request) => {
     types.push(request.type); prompts.push(request.prompt);
+    if (request.type === "research") {
+      const graph = pi.entries.filter((entry) => entry.customType === TASK_GRAPH_ENTRY).at(-1).data.task_graphs["O-1"];
+      const currentTask = types.filter((type) => type === "research").length === 1 ? "T-1" : "T-2";
+      assert.equal(graph.nodes[currentTask].scheduler_status, "running", "claim must persist before package spawn");
+      assert.equal(graph.nodes[currentTask].attempts, 1);
+    }
     const id = `agent-${++seq}`;
     pi.events.emit(`subagents:rpc:spawn:reply:${request.requestId}`, { success: true, data: { id } });
     queueMicrotask(() => {
@@ -211,5 +293,9 @@ test("serial Coordinator turns dispatch through Harness; Commander receives only
   assert.equal(pi.entries.some((entry) => entry.customType === "pi-harness-goal-state"), false);
   const restored = fakePi(pi.entries);
   assert.equal(restored.entries.filter((entry) => entry.customType === "pi-harness-operation-state").at(-1).data["O-1"].status, "complete");
+  const snapshot = restored.entries.filter((entry) => entry.customType === TASK_GRAPH_ENTRY).at(-1).data;
+  assert.deepEqual(snapshot.operations["O-1"].accepted_task_ids, Object.keys(snapshot.task_graphs["O-1"].nodes).filter((id) => snapshot.task_graphs["O-1"].nodes[id].scheduler_status === "accepted"));
+  assert.ok(!JSON.stringify(snapshot.task_graphs).includes("RAW PRIVATE REPORT"));
+  assert.ok(!JSON.stringify(snapshot.task_graphs).includes("RAW REVIEWER OUTPUT"));
   await assert.rejects(() => call(restored, "pi_harness_operation", { action: "status", operation_id: "O-1" }), /bounded OperationReport/);
 });
