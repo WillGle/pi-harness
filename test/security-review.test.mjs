@@ -48,15 +48,14 @@ test("Review Profile validation is exact, independent, bounded, and opt-in", () 
   assert.throws(() => validateTask({ ...input(), acceptance_criteria: [criteria[0], criteria[0]] }));
   assert.equal(securityReviewModel(), "openai/gpt-daybreak-blue-latest");
   const profile = readFileSync(".pi/agents/security-reviewer.md", "utf8");
-  for (const setting of ["tools: read", "extensions: false", "skills: false", "prompt_mode: replace", "Do not use tools.", "Use only the VerificationOrder packet."]) assert.ok(profile.includes(setting));
-  assert.doesNotMatch(profile, /^tools: none$/m);
+  for (const setting of ["tools: none", "extensions: false", "skills: false", "prompt_mode: replace", "Do not use tools.", "Use only the VerificationOrder packet."]) assert.ok(profile.includes(setting));
   const config = loadCustomAgents(process.cwd(), true).get("security-reviewer");
-  assert.deepEqual(config.builtinToolNames, ["read"]);
+  assert.deepEqual(config.builtinToolNames, []);
   assert.equal(config.extensions, false);
   assert.equal(config.skills, false);
   assert.equal(config.promptMode, "replace");
   // The installed 0.19.0 parser grants all built-ins when tools is omitted,
-  // but zero built-ins for `tools: none`; neither form is this role's declaration.
+  // but zero built-ins for this role's explicit `tools: none` declaration.
   assert.deepEqual(loadCustomAgents(process.cwd(), true).get("coordinator").builtinToolNames, ["read"]);
   const agentDir = join(dir, ".pi", "agents");
   mkdirSync(agentDir, { recursive: true });

@@ -1,7 +1,7 @@
 ---
 name: security-reviewer
 description: Harness security semantic Acceptance Criterion Verifier
-tools: read
+tools: none
 extensions: false
 skills: false
 prompt_mode: replace
