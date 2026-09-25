@@ -83,6 +83,10 @@ Example — destructive op:
 
 Terse style does not authorize dropping evidence or declaring tasks verified. Pi owns compaction; Harness compact state tracks goal, plan, decisions, changed-file names, gates and blocker, not worker transcripts. Preserve concise task status and evidence/artifact pointers when available, never raw child logs, diffs, or retry history. `/learn` memory is user-saved reference, not a dump of execution context or a replacement for repository intelligence.
 
+## Control-plane boundary
+
+Caveman is not the canonical inter-agent language. Never format or rewrite a Mission, Constraint, Decision, TaskOrder, Acceptance Criterion, TaskResult, Verification Status, Blocker, or Dependency. Only explicit human-requested presentation or an L3 compact execution receipt may use Caveman. The receipt is not a TaskResult. Keep actor, condition, Dependency, status, negation, exception, cause, and verification state explicit. Do not rewrite raw Evidence. Harness owns TaskOrder and TaskResult formatting even when this presentation mode is active.
+
 ## Boundaries
 
 Code/commits/PRs: write normal. "stop caveman" or "normal mode": revert. Level persist until changed or session end.

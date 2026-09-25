@@ -23,15 +23,15 @@
     },
     "cavecrew": {
       "files": {
-        "SKILL.md": "f49ab426c702e6fd5fe8740a60f736bf6d9282aace4cbb53b33d2d3dca4c2675",
-        "references/agents/cavecrew-builder.md": "135af639b287ed7534b66d01390c4dc48d98683af52232728a0e87db9c558b3e",
-        "references/agents/cavecrew-investigator.md": "f1ce01150aeeec7de98d487f41693d27eba1bc9d4cc67f4c774675bb21c24fc2",
-        "references/agents/cavecrew-reviewer.md": "ae45346edae2cdb97018a38ebdcb79b162c59875cac2921d976a7d7540e4df70"
+        "SKILL.md": "b8f329dfdde6a5dfa9aa6d4e559da89574b025c971b19e77225b1f330ab0f63a",
+        "references/agents/cavecrew-builder.md": "406186f294a7473998ca703032ce51042672c1d177ef395aee0395d96948f007",
+        "references/agents/cavecrew-investigator.md": "14a8f035a700011d2136fc950ade399eb578beef79945bbcdf03266dabcc15c2",
+        "references/agents/cavecrew-reviewer.md": "13a149a9992b8b03eb93c7f6a827d58e59cd0898c792a349c55e87ff80de74ad"
       }
     },
     "caveman": {
       "files": {
-        "SKILL.md": "366724f5a47c6ee96f6d006113325aae5228d7d74eec4b5f53cc0ee78fa7c7c5"
+        "SKILL.md": "2024a77cbcdd9986311b9e62deea97f4dbc1aec8f479b2783e54f01063a8b9b6"
       }
     },
     "caveman-commit": {
@@ -83,7 +83,7 @@
     },
     "pi-coordinator": {
       "files": {
-        "SKILL.md": "8d401eca1ee08e53fa46c904c873a2dd52cad5d137b9be6e8f2c9f69f26edab6"
+        "SKILL.md": "003bd7a74dcfd76fde925fdecc5a89e056338ee2c61ff56b193512c98d515dc0"
       }
     },
     "ponytail": {
