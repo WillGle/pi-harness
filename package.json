@@ -97,7 +97,7 @@
   ],
   "scripts": {
     "build": "node --experimental-strip-types --check extensions/pi-harness.ts",
-    "test": "node --test test/communication.test.mjs test/state.test.mjs test/coordinator.test.mjs test/skills.test.mjs test/web.test.mjs test/memory.test.mjs test/precise-edit.test.mjs test/code-intel.test.mjs",
+    "test": "node --test test/communication.test.mjs test/evidence.test.mjs test/state.test.mjs test/coordinator.test.mjs test/skills.test.mjs test/web.test.mjs test/memory.test.mjs test/precise-edit.test.mjs test/code-intel.test.mjs",
     "test:integration": "node --test test/integration.test.mjs test/acp-acceptance.test.mjs test/pi-rpc-integration.test.mjs test/pi-plan-lifecycle.test.mjs test/zed-smoke.test.mjs test/disposable-install.test.mjs",
     "test:all": "npm run build && npm run test && npm run test:integration",
     "verify:skills": "node scripts/verify-skills.mjs",
