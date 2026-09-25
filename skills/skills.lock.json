@@ -26,7 +26,7 @@
         "SKILL.md": "b8f329dfdde6a5dfa9aa6d4e559da89574b025c971b19e77225b1f330ab0f63a",
         "references/agents/cavecrew-builder.md": "406186f294a7473998ca703032ce51042672c1d177ef395aee0395d96948f007",
         "references/agents/cavecrew-investigator.md": "14a8f035a700011d2136fc950ade399eb578beef79945bbcdf03266dabcc15c2",
-        "references/agents/cavecrew-reviewer.md": "13a149a9992b8b03eb93c7f6a827d58e59cd0898c792a349c55e87ff80de74ad"
+        "references/agents/cavecrew-reviewer.md": "1b2cd8a494d045988bae88e7b0e935bb9a8398349b32c03438d8ff2f56d48fbf"
       }
     },
     "caveman": {
@@ -83,7 +83,7 @@
     },
     "pi-coordinator": {
       "files": {
-        "SKILL.md": "41901e64621ef0dd96788862399c55e58f0560ed5a2bca60cc97de583e3032e4"
+        "SKILL.md": "fba0694b5ffdfe348a5fc6ff1c8f9dc73f818aa1c884f2ecb268ab18052dccd4"
       }
     },
     "ponytail": {
