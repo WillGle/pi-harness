@@ -1,14 +1,25 @@
-import test from "node:test";
+import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
+import { readEvidence } from "../lib/evidence.mjs";
+import { promoteTaskResult } from "../lib/communication.mjs";
 import {
   cancelCoordinateTasks,
   executeCoordinateTask,
   validateTask,
 } from "../lib/coordinator.mjs";
+
+const evidenceDir = mkdtempSync(join(tmpdir(), "pi-harness-evidence-test-"));
+const previousEvidenceDir = process.env.PI_HARNESS_EVIDENCE_DIR;
+process.env.PI_HARNESS_EVIDENCE_DIR = evidenceDir;
+after(() => {
+  if (previousEvidenceDir === undefined) delete process.env.PI_HARNESS_EVIDENCE_DIR;
+  else process.env.PI_HARNESS_EVIDENCE_DIR = previousEvidenceDir;
+  rmSync(evidenceDir, { recursive: true, force: true });
+});
 
 class EventBus {
   #handlers = new Map();
@@ -86,7 +97,7 @@ function packageManagerFor(events, repo, mode = "read") {
           id,
           type: request.type,
           status: "completed",
-          result: `${request.type} evidence: read-only complete`,
+          result: mode === "long" ? "x".repeat(9_000) : `${request.type} evidence: read-only complete`,
         });
       } catch (error) {
         events.emit("subagents:failed", { id, type: request.type, status: "error", error: String(error) });
@@ -133,6 +144,9 @@ test("scout and research complete through the package boundary with read-only po
       assert.equal(result.success, true);
       assert.equal(result.taskResult.execution_status, "execution_complete");
       assert.equal(result.taskResult.verification_status, "not_verified");
+      assert.equal(result.taskResult.evidence_refs.length, 1);
+      assert.equal(readEvidence(result.taskResult.evidence_refs[0]).content.toString(), result.result);
+      assert.equal(JSON.stringify(promoteTaskResult(result)).includes("read-only complete"), false);
       assert.equal(result.owner, owner);
       assert.match(result.result, /read-only complete/);
       const request = fakePackage.calls.find((entry) => entry?.type === owner);
@@ -146,6 +160,20 @@ test("scout and research complete through the package boundary with read-only po
   } finally {
     fakePackage.restore();
   }
+});
+
+test("bounded read-only capture records real truncation metadata", async () => {
+  const events = new EventBus();
+  const fakePackage = packageManagerFor(events, process.cwd(), "long");
+  try {
+    const result = await executeCoordinateTask({ events }, { owner: "research", scope: "lib", verification: "inspect", permission: "read" }, { rpcTimeout: 1000, timeout: 1000 });
+    assert.equal(result.resultTruncated, true);
+    const stored = readEvidence(result.taskResult.evidence_refs[0]);
+    assert.equal(stored.metadata.truncated, true);
+    assert.equal(stored.metadata.bytes, Buffer.byteLength(result.result));
+    assert.equal(stored.content.toString(), result.result);
+    assert.equal(JSON.stringify(promoteTaskResult(result)).includes("x".repeat(100)), false);
+  } finally { fakePackage.restore(); }
 });
 
 test("worker uses package worktree/concurrency options, runs the gate, preserves parent HEAD, and never integrates", async () => {
@@ -171,8 +199,14 @@ test("worker uses package worktree/concurrency options, runs the gate, preserves
     assert.equal(result.success, true);
     assert.equal(result.gatePassed, true);
     assert.equal(result.taskResult.execution_status, "execution_complete");
-    assert.equal(result.taskResult.verification_status, "not_verified");
+    assert.equal(result.taskResult.verification_status, "verified");
     assert.deepEqual(result.taskResult.changed_paths, ["file.txt"]);
+    const items = result.taskResult.evidence_refs.map((ref) => readEvidence(ref, repo));
+    assert.deepEqual(items.map((item) => item.metadata.kind), ["execution", "gate", "diff"]);
+    assert.equal(items[0].content.toString(), result.result);
+    assert.equal(items[1].content.toString(), result.gateEvidence);
+    assert.equal(items[2].content.toString(), result.diff);
+    assert.equal(JSON.stringify(promoteTaskResult(result)).includes("+worker-update"), false);
     assert.equal(result.commitCheck.valid, true);
     assert.equal(result.atomicCommit, true);
     assert.match(result.diff, /\+worker-update/);
@@ -184,6 +218,44 @@ test("worker uses package worktree/concurrency options, runs the gate, preserves
   } finally {
     fakePackage.restore();
     rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("deterministic Verifier defers semantic criteria and rejects a failed gate", async () => {
+  const repo = makeRepo("pi-harness-verifier-");
+  const events = new EventBus();
+  const fakePackage = packageManagerFor(events, repo, "worker");
+  try {
+    const semantic = await executeCoordinateTask({ events }, {
+      owner: "worker", scope: "file.txt", verification: "grep worker-update file.txt", permission: "write",
+      acceptance_criteria: ["The change is readable to a new maintainer."],
+    }, { cwd: repo, rpcTimeout: 1000, timeout: 1000 });
+    assert.equal(semantic.taskResult.verification_status, "not_verified");
+    assert.match(semantic.taskResult.verification_summary, /semantic verification/);
+    spawnSync("git", ["-C", repo, "branch", "-D", "pi-agent-smoke"]);
+    const failed = await executeCoordinateTask({ events }, {
+      owner: "worker", scope: "file.txt", verification: "false", permission: "write",
+    }, { cwd: repo, rpcTimeout: 1000, timeout: 1000 });
+    assert.equal(failed.taskResult.execution_status, "execution_complete");
+    assert.equal(failed.taskResult.verification_status, "failed");
+    assert.ok(failed.taskResult.evidence_refs.some((ref) => readEvidence(ref, repo).metadata.kind === "gate"));
+  } finally { fakePackage.restore(); rmSync(repo, { recursive: true, force: true }); }
+});
+
+test("Evidence Store failure never gives a fake reference or verified status", async () => {
+  const events = new EventBus();
+  const fakePackage = packageManagerFor(events, process.cwd());
+  const old = process.env.PI_HARNESS_EVIDENCE_DIR;
+  process.env.PI_HARNESS_EVIDENCE_DIR = "relative/unsafe";
+  try {
+    const result = await executeCoordinateTask({ events }, { owner: "scout", scope: "lib", verification: "inspect", permission: "read" }, { timeout: 1000, rpcTimeout: 1000 });
+    assert.equal(result.taskResult.verification_status, "failed");
+    assert.deepEqual(result.taskResult.evidence_refs, []);
+    assert.match(result.taskResult.evidence_error, /could not persist/);
+  } finally {
+    if (old === undefined) delete process.env.PI_HARNESS_EVIDENCE_DIR;
+    else process.env.PI_HARNESS_EVIDENCE_DIR = old;
+    fakePackage.restore();
   }
 });
 
@@ -214,4 +286,6 @@ test("goal-scoped cancellation aborts only the package task owned by that goal",
   assert.equal(result.status, "stopped");
   assert.equal(result.taskResult.execution_status, "blocked");
   assert.match(result.taskResult.blocker, /cannot continue until/);
+  assert.equal(result.taskResult.verification_status, "blocked");
+  assert.deepEqual(result.taskResult.evidence_refs, []);
 });

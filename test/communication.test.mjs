@@ -16,7 +16,7 @@ test("terminal execution and a gate alone cannot verify or complete a TaskResult
   const result = taskResult(order, record);
   assert.equal(result.version, 1);
   assert.equal(result.execution_status, "execution_complete");
-  assert.equal(result.verification_status, "not_verified");
+  assert.equal(result.verification_status, "failed");
   assert.deepEqual(result.changed_paths, ["lib/state.mjs"]);
   assert.equal(result.summary.includes("Verified!"), false);
   assert.deepEqual(promoteTaskResult({ ...record, taskResult: result }), result);
@@ -24,6 +24,18 @@ test("terminal execution and a gate alone cannot verify or complete a TaskResult
   assert.equal(record.gateEvidence, "raw\nstdout");
   assert.equal(record.diff, "raw\ndiff");
   assert.equal(taskResult(order, { status: "completed", verificationRan: true, gatePassed: false }).verification_status, "failed");
+});
+
+test("the Harness Verifier, not Worker prose or legacy success, controls acceptance", () => {
+  const order = taskOrder({ owner: "worker", scope: "edit", verification: "npm test", permission: "write" });
+  const record = { status: "completed", result: "verified", success: true, verificationRan: true, gatePassed: true, branch: "branch", commitCheck: { valid: true }, commitCount: 1 };
+  assert.equal(taskResult(order, { ...record, verificationRan: false }).verification_status, "failed");
+  assert.equal(taskResult(order, { ...record, commitCount: 2 }).verification_status, "failed");
+  assert.equal(taskResult(order, { ...record, commitCheck: { valid: false } }).verification_status, "failed");
+  assert.equal(taskResult(order, record).verification_status, "verified");
+  const semantic = taskOrder({ owner: "worker", scope: "edit", verification: "npm test", permission: "write", acceptance_criteria: ["The user understands the result."] });
+  assert.equal(taskResult(semantic, record).verification_status, "not_verified");
+  assert.equal(taskResult(order, record, { evidenceError: true }).verification_status, "failed");
 });
 
 test("Execution Status, Verification Status, and Operation acceptance are distinct", () => {
