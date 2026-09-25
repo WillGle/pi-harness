@@ -22,6 +22,14 @@ const coordinator = (action, extra = {}) => JSON.stringify({ version: 1, operati
 const head = JSON.stringify({ version: 1, operation_id: "O-G", head_id: "H-A", action: "report", reason: "T-A is ready." });
 const wait = async (condition) => { for (let i = 0; i < 100 && !condition(); i++) await new Promise((resolve) => setTimeout(resolve, 2)); assert.ok(condition()); };
 
+test("Operation setup persists bounded Task intents and shared constraints for Head context", async () => {
+  const pi = fakePi();
+  const op = await call(pi, "pi_harness_operation", { ...create, constraints: ["Do not integrate."], task_intents: { "T-A": "Inspect architecture.", "T-B": "Unrelated task." } });
+  assert.deepEqual(op.constraints, ["Do not integrate."]);
+  assert.equal(op.task_intents["T-A"], "Inspect architecture.");
+  await assert.rejects(() => call(pi, "pi_harness_operation", { ...create, operation_id: "O-BAD", task_intents: { "T-UNKNOWN": "Invented task." } }), /Task intents/);
+});
+
 test("Head Registry and bounded HeadState survive checkpoint and reload; no transcript persists", async () => {
   const pi = fakePi(); await call(pi, "pi_harness_operation", create);
   const registry = latest(pi, "pi-harness-head-registry-state");

@@ -7,7 +7,7 @@ import { acceptGraphTask, claimTask, createTaskGraph, recordTaskGraphResult } fr
 import { createHeadRegistry, domainBrief, headReport, headState, parseHeadDecision, validateHeadRegistry } from "../lib/domain-head.mjs";
 import { parseCoordinatorDecision, runOperation } from "../lib/operation-runner.mjs";
 
-const operation = () => createOperation({ operation_id: "O-G", objective: "Complete both domains.", required_task_ids: ["T-ARCH", "T-TEST", "T-FREE"], dependencies: { "T-TEST": ["T-ARCH"] } });
+const operation = () => createOperation({ operation_id: "O-G", objective: "Complete both domains.", required_task_ids: ["T-ARCH", "T-TEST", "T-FREE"], dependencies: { "T-TEST": ["T-ARCH"] }, constraints: ["Do not integrate branches."], acceptance_criteria: ["The Operation has checked domain evidence."], task_intents: { "T-ARCH": "Assess the architecture boundary.", "T-TEST": "Verify cancellation behavior.", "T-FREE": "Write unrelated documentation." } });
 const heads = [{ head_id: "H-A", domain: "architecture", task_ids: ["T-ARCH"] }, { head_id: "H-T", domain: "testing", task_ids: ["T-TEST"] }];
 const decision = (action, extra = {}) => JSON.stringify({ version: 1, operation_id: "O-G", head_id: "H-A", action, reason: "The Head recommends the assigned TaskOrder.", ...extra });
 const coordinator = (action, extra = {}) => JSON.stringify({ version: 1, operation_id: "O-G", action, reason: "The Coordinator needs domain advice.", ...extra });
@@ -27,6 +27,14 @@ test("static registry validates IDs and permits unassigned Tasks and no Heads", 
   ]) assert.throws(() => createHeadRegistry(op, invalid));
 });
 
+test("Operation rejects unknown or oversized Task intent and invalid shared constraints", () => {
+  const base = { operation_id: "O-G", objective: "Verify work.", required_task_ids: ["T-A"] };
+  assert.throws(() => createOperation({ ...base, task_intents: { "T-OTHER": "Foreign intent." } }));
+  assert.throws(() => createOperation({ ...base, task_intents: { "T-A": "x".repeat(501) } }));
+  assert.throws(() => createOperation({ ...base, constraints: [" "] }));
+  assert.equal(createOperation(base).task_intents, undefined);
+});
+
 test("DomainBrief isolates assigned Tasks and exposes foreign Dependencies only as accepted status", () => {
   const op = operation(), graph = createTaskGraph(op), registry = createHeadRegistry(op, heads);
   const packet = domainBrief(op, graph, registry, "H-T", headState("O-G", "H-T"));
@@ -34,6 +42,10 @@ test("DomainBrief isolates assigned Tasks and exposes foreign Dependencies only 
   assert.deepEqual(packet.DomainBrief.pending_task_ids, ["T-TEST"]);
   assert.deepEqual(packet.DomainBrief.dependencies["T-TEST"], [{ task_id: "T-ARCH", status: "pending" }]);
   assert.deepEqual(packet.DomainBrief.task_ids, ["T-TEST"]);
+  assert.equal(packet.DomainBrief.objective, "Complete both domains.");
+  assert.deepEqual(packet.DomainBrief.task_intents, { "T-TEST": "Verify cancellation behavior." });
+  assert.deepEqual(packet.DomainBrief.constraints, ["Do not integrate branches."]);
+  assert.deepEqual(packet.DomainBrief.acceptance_criteria, ["The Operation has checked domain evidence."]);
   assert.ok(!JSON.stringify(packet).includes("T-FREE"));
   for (const forbidden of ["Commander transcript", "Worker transcript", "Reviewer transcript", "raw Evidence", "diff", "stdout", "stderr"]) assert.ok(!JSON.stringify(packet).includes(forbidden));
   assert.deepEqual(domainBrief(op, graph, registry, "H-A", headState("O-G", "H-A")).DomainBrief.ready_task_ids, ["T-ARCH"]);
@@ -53,6 +65,9 @@ test("HeadDecision rejects foreign identity, pending dispatch and malformed auth
   const parse = (raw, id = "H-A") => parseHeadDecision(raw, op, graph, registry, id);
   const valid = parse(decision("recommend_dispatch", { task_id: "T-ARCH", task }));
   assert.equal(headReport(valid, registry).recommendation.task_id, "T-ARCH");
+  assert.deepEqual(headReport(valid, registry).recommendation.task, task);
+  const detailed = { ...task, constraints: ["Do not integrate."], acceptance_criteria: ["Check the boundary."], review_evidence: { "Check the boundary.": "report" } };
+  assert.deepEqual(headReport(parse(decision("recommend_dispatch", { task_id: "T-ARCH", task: detailed })), registry).recommendation.task, detailed);
   for (const raw of ["nonsense", decision("recommend_dispatch", { task_id: "T-TEST", task: { ...task, task_id: "T-TEST" } }), decision("recommend_dispatch", { task_id: "T-ARCH", task: { ...task, owner: "head" } }), decision("complete_mission"), decision("recommend_accept", { task_id: "T-ARCH" }), decision("report", { spawn: "worker" }), decision("report").replace('"O-G"', '"O-FOREIGN"'), decision("report").replace('"H-A"', '"H-T"')]) assert.throws(() => parse(raw));
   assert.throws(() => parse(JSON.stringify({ ...JSON.parse(decision("recommend_dispatch", { task_id: "T-TEST", task: { ...task, task_id: "T-TEST" } })), head_id: "H-T" }), "H-T"));
   assert.throws(() => parseCoordinatorDecision(coordinator("consult_head", { head_id: " " }), op));
@@ -68,6 +83,7 @@ test("consultation returns advice without dispatch or acceptance; repeated advic
       if (calls > 0) {
         const packet = JSON.parse(prompt.slice(prompt.indexOf('{"OperationBrief"')));
         assert.equal(packet.OperationBrief.head_report.recommendation.action, "recommend_dispatch");
+        assert.deepEqual(packet.OperationBrief.head_report.recommendation.task, task);
         assert.ok(!JSON.stringify(packet).includes("Head transcript"));
       }
       return coordinator("consult_head", { head_id: "H-A" });
