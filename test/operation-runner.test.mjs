@@ -272,30 +272,56 @@ test("managed Operation cancellation aborts all claimed wave Tasks and blocks gh
   assert.deepEqual(Object.values(snapshotAfter.nodes).map((node) => node.scheduler_status), ["blocked", "blocked"]);
 });
 
-test("old parallel wave cannot mutate a new session after both children abort", async () => {
+test("late results from both old-session parallel Tasks cannot overwrite the new session", async () => {
   const pi = fakePi();
-  await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-1", objective: "Old wave.", required_task_ids: ["T-1", "T-2"] });
+  await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-OLD", objective: "Old wave.", required_task_ids: ["T-1", "T-2"] });
   const workers = [];
   pi.events.on("subagents:rpc:spawn", (req) => {
-    const id = `old-${workers.length}-${req.type}`;
+    const id = req.type === "coordinator" ? "old-coordinator" : `old-${workers.length + 1}`;
     pi.events.emit(`subagents:rpc:spawn:reply:${req.requestId}`, { success: true, data: { id } });
-    if (req.type === "coordinator") queueMicrotask(() => pi.events.emit("subagents:completed", { id, status: "completed", result: decision("dispatch_batch", { tasks: [task("T-1"), task("T-2")] }) }));
-    else {
-      workers.push({ id, req });
-      req.options.signal.addEventListener("abort", () => pi.events.emit("subagents:failed", { id, status: "stopped" }), { once: true });
-    }
+    if (req.type === "coordinator") queueMicrotask(() => pi.events.emit("subagents:completed", { id, status: "completed", result: JSON.stringify({ version: 1, operation_id: "O-OLD", action: "dispatch_batch", reason: "Both Tasks are independent.", tasks: [task("T-1"), task("T-2")] }) }));
+    else workers.push({ id, req }); // Hold terminal events even after abort to test late completions.
   });
-  const old = call(pi, "pi_harness_run_operation", { operation_id: "O-1" });
-  for (let i = 0; i < 40 && workers.length < 2; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+  const NativeAbortController = globalThis.AbortController;
+  const controllers = [];
+  let old;
+  try {
+    globalThis.AbortController = class extends NativeAbortController {
+      constructor() { super(); controllers.push(this); }
+    };
+    old = call(pi, "pi_harness_run_operation", { operation_id: "O-OLD" });
+    for (let i = 0; i < 40 && workers.length < 2; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+  } finally { globalThis.AbortController = NativeAbortController; }
   assert.equal(workers.length, 2);
+  assert.equal(controllers[0].signal.aborted, false, "the managed Operation is active before session_start");
+  const running = pi.entries.filter((entry) => entry.customType === TASK_GRAPH_ENTRY).at(-1).data.task_graphs["O-OLD"];
+  assert.deepEqual([running.nodes["T-1"].scheduler_status, running.nodes["T-2"].scheduler_status], ["running", "running"]);
+  assert.ok(workers.every(({ req }) => !req.options.signal.aborted));
+
   const freshEntries = [];
   pi.sessionStart(freshEntries);
-  await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-1", objective: "New session.", required_task_ids: ["T-1", "T-2"] });
-  assert.ok(workers.every(({ req }) => req.options.signal.aborted));
+  assert.equal(controllers[0].signal.aborted, true, "session_start aborts the old managed Operation controller");
+  assert.ok(workers.every(({ req }) => req.options.signal.aborted), "session_start aborts both ExecutionUnits");
+  await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-NEW", objective: "New session sentinel.", required_task_ids: ["T-NEW"], heads: [{ head_id: "H-NEW", domain: "testing", task_ids: ["T-NEW"] }] });
+  const expectedEntries = structuredClone(freshEntries);
+  const assertFresh = () => {
+    assert.deepEqual(freshEntries, expectedEntries, "stale callbacks must not append or overwrite any new-session entry");
+    const snapshot = freshEntries.filter((entry) => entry.customType === TASK_GRAPH_ENTRY).at(-1).data;
+    assert.deepEqual(Object.keys(snapshot.operations), ["O-NEW"]);
+    assert.equal(snapshot.operations["O-NEW"].objective, "New session sentinel.");
+    assert.deepEqual(Object.keys(snapshot.operations["O-NEW"].task_results), []);
+    assert.deepEqual([snapshot.task_graphs["O-NEW"].nodes["T-NEW"].scheduler_status, snapshot.task_graphs["O-NEW"].nodes["T-NEW"].attempts], ["ready", 0]);
+    assert.equal(freshEntries.some((entry) => ["pi-harness-coordinator-state", "pi-harness-head-state"].includes(entry.customType)), false);
+  };
+  assertFresh();
+  // Reverse completion order: both old child results arrive after O-NEW exists.
+  for (const child of [...workers].reverse()) {
+    pi.events.emit("subagents:completed", { id: child.id, status: "completed", result: `Late private report from ${child.id}.` });
+    await new Promise((resolve) => setImmediate(resolve));
+    assertFresh();
+  }
   assert.equal((await old).status, "blocked");
-  const snapshot = freshEntries.filter((entry) => entry.customType === TASK_GRAPH_ENTRY).at(-1).data;
-  assert.equal(snapshot.operations["O-1"].objective, "New session.");
-  assert.deepEqual(Object.values(snapshot.task_graphs["O-1"].nodes).map((node) => [node.scheduler_status, node.attempts]), [["ready", 0], ["ready", 0]]);
+  assertFresh();
 });
 
 test("serial Coordinator turns dispatch through Harness; Commander receives only OperationReport", async () => {
