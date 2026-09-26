@@ -8,8 +8,8 @@ Pi-native harness and extension for **Pi 0.85.1**. Provides read-only planning (
 
 - **Read-Only Planning Mode (`/plan on|off|status`)**: Strips mutating tools (`edit`, `write`), blocks mutating bash syntax (e.g. `sed -i`, redirects, file deletions), and prompts the agent to provide assumptions, steps, and verification gates. Lifecycle tests cover persisted reload, real compaction, real fork/branch independence, and mutation blocking after transitions.
 - **Evidence-Backed Goal (`/goal <objective>`)**: Tracks a single active objective requiring concrete verification evidence and blockers for terminal transitions. It does not provide wait, pause/resume, token-budget, or strong no-progress circuit-breaker states.
-- **Safe proactive compaction (`/harness-compact set <50-90>|status|disable`)**: Enabled by default at **70% of the active model's context window**. A whole-number threshold from 50% to 90% can override the default and is stored in the Pi session; `disable` is also persisted. Crossing it only queues a request; Harness waits for an idle `agent_settled` boundary with no active tools, TaskOrders, or Reviewer before calling Pi's compaction API. Goal continuation waits for compaction success or failure. After either outcome, Harness will not retry until usage first drops below the threshold. This is separate from Pi's `/autocompact`, which remains enabled and handles mid-run/emergency compaction. Session switches reset pending work but restore the saved threshold.
-- **Skills**: Pi Harness owns the skills checked into `skills/`. `skills/skills.lock.json` records SHA-256 checksums for every packaged skill file; verification is self-contained and does not require another repository, source commit, or upstream checkout. Public promotions become canonical here; adapted skills follow current Pi Harness behavior. The skill set includes reusable workflows for clarification, requirement checks, architecture/formal draw.io models, atomic commits, delegation, repository scouting, writing/review, and caveman/ponytail modes.
+- **Safe proactive compaction (`/harness-compact set <50-90>|status|disable`)**: Enabled by default at **70% of the active model's context window**. A whole-number threshold from 50% to 90% can override the default and is stored in the Pi session; `disable` is also persisted. Crossing it queues a request. Harness waits for an idle `agent_settled` boundary with no active tools, managed Operation, Task pipeline, or child review before calling Pi's compaction API. Goal continuation waits for compaction success or failure. After either outcome, Harness will not retry until usage first drops below the threshold. This is separate from Pi's `/autocompact`, which remains enabled and handles mid-run/emergency compaction. Session switches reset pending work but restore the saved threshold.
+- **Skills**: Pi Harness owns the skills checked into `skills/`. `skills/skills.lock.json` records SHA-256 checksums for every packaged skill file; verification is self-contained and does not require another repository, source commit, or upstream checkout. The set includes clarification, requirement checks, architecture and formal draw.io models, atomic commits, delegation, repository scouting, defensive security reasoning (`/skill:security`, explicit invocation only), writing/review, and caveman/ponytail modes.
 - **Managed Operations**: A separate Coordinator proposes TaskOrders and optional Domain Heads give bounded advice. The Harness TaskGraph checks Dependencies and retry budgets, claims ready Tasks, runs independent Task pipelines in bounded parallel waves, and persists each TaskResult separately. The Coordinator must explicitly accept verified TaskResults; Operation completion does not complete the Mission. The Commander receives a bounded OperationReport, not Worker transcripts.
 - **Isolated verification**: Harness runs deterministic Worker gates and commit checks before selected semantic criteria reach the general Reviewer or the packet-only security-reviewer. A TaskOrder routes security criteria only through an explicit `review_profile: { "exact criterion": "security" }`. The security reviewer requests Daybreak Blue only if the model is available in Pi; otherwise verification is blocked, with no silent fallback. `/skill:security` is explicit-only reasoning guidance and does not change the model or dispatch a reviewer. Worker branches remain separate; Harness never auto-integrates them. See `target-architecture.md` for the contracts and boundaries.
 - **ACP Stdio Bridge (`pi-harness-acp`)**: Connects Pi with Zed Editor or any ACP client over JSON-RPC stdio, advertises Harness commands, forwards Pi events, persists session mappings, relays cancellation, and passes pasted/dragged images plus text-file resources to Pi.
@@ -21,12 +21,7 @@ Other skill directories are ignored by Git and excluded from the package file li
 
 ## Clients
 
-Pi Harness is the shared Pi extension and ACP bridge. Clients stay separate:
-
-- **Zed** connects to `pi-harness-acp` as an editor client.
-- **WPi** is an independent terminal UI app that also connects to `pi-harness-acp`; see the WPi repository README for its setup.
-
-Each client starts its own ACP process and session. WPi is not packaged inside Pi Harness and does not import Harness source or private state files.
+Use Pi's native terminal interface directly, or connect an ACP-compatible editor such as Zed through `pi-harness-acp`. Each ACP client owns its process and session; the bridge does not provide a separate terminal application.
 
 In Pi's native terminal, use `Ctrl+V` (`Alt+V` on Windows/WSL) for clipboard images or text, drag images from the file manager into a supported terminal, and type `@` to attach text/code files. ACP clients can send standard text, image, embedded-resource, and local `resource_link` content blocks; the bridge forwards images and includes text-file contents in the Pi prompt.
 
@@ -111,7 +106,7 @@ The bootstrap script automatically:
 2. Installs the `pi-harness-acp` binary globally.
 3. Automatically configures Zed Editor (`~/.config/zed/settings.json`) with rollback backup and fingerprint protection.
 
-Use this when Zed integration is wanted too. It is not required to use WPi.
+Use this setup when you want the bootstrap script to configure Zed. For Pi CLI use without Zed, use the CLI-only setup below.
 
 ### Pi CLI Only
 
@@ -122,32 +117,18 @@ npm run bootstrap -- --cli
 npm run doctor
 ```
 
-### WPi Terminal Client
+### Configure another ACP client
 
-Install the Harness extension and expose the ACP bridge once:
+Install Pi Harness and expose its ACP bridge:
 
 ```bash
 cd ~/dev/pi-harness
 pi install .
-
 cd packages/pi-harness-acp
 npm link
 ```
 
-Then install and expose the separate WPi app:
-
-```bash
-cd ~/dev/pi-harness-tui
-npm install
-npm link
-pi-tui
-```
-
-`pi-tui` starts WPi and its ACP child process. Do not start `pi-harness-acp` separately for that terminal. If the ACP bridge is not on `PATH` during local development, start WPi with:
-
-```bash
-PI_HARNESS_ACP_BIN=~/dev/pi-harness/packages/pi-harness-acp/bin/pi-harness-acp.mjs npm start
-```
+Configure the ACP-compatible client to launch `pi-harness-acp`. Zed can be configured automatically with the full bootstrap command above, or configured manually for other clients. Use Pi's native terminal interface when you want a terminal workflow.
 
 ---
 
