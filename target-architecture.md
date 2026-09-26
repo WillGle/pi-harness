@@ -2,7 +2,7 @@
 
 ## Scope
 
-Pi Harness is a Pi package for Pi `0.85.1`; it does not replace Pi, select a provider/model, create a separate GUI, or train a model. Provider, model, and authentication remain machine-local Pi choices.
+Pi Harness is a Pi package for Pi `0.87.1`; it does not replace Pi, select a provider/model, create a separate GUI, or train a model. Provider, model, and authentication remain machine-local Pi choices.
 
 ## Package layout
 

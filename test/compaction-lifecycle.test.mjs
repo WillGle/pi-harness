@@ -65,7 +65,11 @@ test("context only marks pending; settled compaction completes before Goal conti
   const f = fixture();
   await f.command("harness-compact", "set 65");
   f.setPercent(66); f.setIdle(false);
-  f.emit("context"); f.emit("context");
+  const contextEvent = { type: "context", messages: [{ role: "user", content: "Keep this message." }] };
+  const originalMessages = structuredClone(contextEvent.messages);
+  assert.equal(f.emit("context", contextEvent), undefined);
+  assert.deepEqual(contextEvent.messages, originalMessages, "the observational context handler does not edit messages");
+  f.emit("context", contextEvent);
   await f.command("goal", "Finish this Mission.");
   assert.equal(f.pi.compactions.length, 0);
   assert.equal(f.pi.continuations.length, 0);

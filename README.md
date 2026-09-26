@@ -1,6 +1,6 @@
 # Pi Harness
 
-Pi-native harness and extension for **Pi 0.85.1**. Provides read-only planning (`/plan`), evidence-backed goal tracking (`/goal`), managed Operations with bounded parallel Task waves, curated skills, and an Agent Client Protocol (ACP) bridge for editors like Zed. Child execution uses `@tintinweb/pi-subagents@0.19.0`.
+Pi-native harness and extension for **Pi 0.87.1**. Provides read-only planning (`/plan`), evidence-backed goal tracking (`/goal`), managed Operations with bounded parallel Task waves, curated skills, and an Agent Client Protocol (ACP) bridge for editors like Zed. Child execution uses `@tintinweb/pi-subagents@0.19.0`.
 
 ---
 
@@ -28,7 +28,7 @@ In Pi's native terminal, use `Ctrl+V` (`Alt+V` on Windows/WSL) for clipboard ima
 ## Ownership
 
 ```text
-Pi 0.85.1
+Pi 0.87.1
 ├── provider, model, authentication, local runtime, session tree, compaction
 ├── Pi Harness
 │   ├── plan, goal, explicit project memory, precise editing

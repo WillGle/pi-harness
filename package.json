@@ -102,7 +102,7 @@
   ],
   "scripts": {
     "build": "node --experimental-strip-types --check extensions/pi-harness.ts",
-    "test": "node --test test/domain-head.test.mjs test/head-lifecycle.test.mjs test/communication.test.mjs test/semantic-verifier.test.mjs test/security-review.test.mjs test/parallel-operation.test.mjs test/parallel-review.test.mjs test/operation.test.mjs test/operation-tool.test.mjs test/task-graph.test.mjs test/operation-runner.test.mjs test/compaction-lifecycle.test.mjs test/evidence.test.mjs test/state.test.mjs test/coordinator.test.mjs test/skills.test.mjs test/web.test.mjs test/memory.test.mjs test/precise-edit.test.mjs test/code-intel.test.mjs",
+    "test": "node --test test/domain-head.test.mjs test/head-lifecycle.test.mjs test/communication.test.mjs test/semantic-verifier.test.mjs test/security-review.test.mjs test/parallel-operation.test.mjs test/parallel-review.test.mjs test/operation.test.mjs test/operation-tool.test.mjs test/task-graph.test.mjs test/operation-runner.test.mjs test/compaction-lifecycle.test.mjs test/pi-runtime-compat.test.mjs test/evidence.test.mjs test/state.test.mjs test/coordinator.test.mjs test/skills.test.mjs test/web.test.mjs test/memory.test.mjs test/precise-edit.test.mjs test/code-intel.test.mjs",
     "test:daybreak": "node --test test/daybreak-live.test.mjs",
     "test:integration": "node --test test/parallel-package-integration.test.mjs test/integration.test.mjs test/acp-acceptance.test.mjs test/pi-rpc-integration.test.mjs test/pi-plan-lifecycle.test.mjs test/zed-smoke.test.mjs test/disposable-install.test.mjs",
     "test:all": "npm run build && npm run test && npm run test:integration",
@@ -114,7 +114,7 @@
     "node": ">=22.19.0"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "0.85.1"
+    "@earendil-works/pi-coding-agent": "0.87.1"
   },
   "dependencies": {
     "@tintinweb/pi-subagents": "0.19.0",

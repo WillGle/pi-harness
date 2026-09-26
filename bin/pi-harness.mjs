@@ -74,7 +74,7 @@ else {
   const resources = { extension: existsSync(resolve(root, "extensions/pi-harness.ts")), skills: existsSync(resolve(root, "skills/skills.lock.json")) };
   const toolCalling = checkToolCallingReadiness(pi.ready, resources.extension);
   const failures = [];
-  if (pi.version !== "0.85.1") failures.push(`Pi 0.85.1 required; found ${pi.version}`);
+  if (pi.version !== "0.87.1") failures.push(`Pi 0.87.1 required; found ${pi.version}`);
   if (!resources.extension || !resources.skills) failures.push("package resources missing");
   if (!skills.ok) failures.push(...skills.errors);
   if (!toolCalling) failures.push("Pi tool-calling extension readiness check failed");

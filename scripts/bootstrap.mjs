@@ -17,7 +17,7 @@ function sha(text) { return createHash("sha256").update(text).digest("hex"); }
 function command(command, args, options = {}) { return spawnSync(command, args, { encoding: "utf8", ...options }); }
 function requirePi() {
   const pi = command("pi", ["--version"]); const version = `${pi.stdout}${pi.stderr}`.trim();
-  if (pi.status !== 0 || version !== "0.85.1") throw new Error(`Pi 0.85.1 required; found ${version || "unavailable"}`);
+  if (pi.status !== 0 || version !== "0.87.1") throw new Error(`Pi 0.87.1 required; found ${version || "unavailable"}`);
 }
 function matchingBrace(text, open) {
   let depth = 0; let quote = false; let escaped = false;

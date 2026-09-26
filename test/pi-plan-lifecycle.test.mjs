@@ -585,7 +585,7 @@ test("Pi plan mode survives real compaction and still blocks built-in and Harnes
   }
 });
 
-test("Pi 0.85.1 proactive compaction waits for a settled Task tool call", async () => {
+test("Pi 0.87.1 proactive compaction waits for a settled Task tool call", async () => {
   const fixture = await createFixture();
   let pi;
   try {
