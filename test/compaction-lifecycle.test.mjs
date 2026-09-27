@@ -1,3 +1,6 @@
+import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { stablePromptSections } from "../lib/context-economics.mjs";
+import { mockSettlement } from "./helpers/mock-settlement.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -8,115 +11,81 @@ import harness from "../extensions/pi-harness.ts";
 import { PROACTIVE_COMPACT_ENTRY, setProactiveThreshold } from "../lib/compaction-policy.mjs";
 
 function fixture(entries = []) {
+  const session = SessionManager.inMemory("/tmp/pi-maintenance-fixture");
+  for(const entry of entries)session.appendCustomEntry(entry.customType,entry.data);
   const handlers = new Map(), commands = new Map(), tools = new Map(), notices = [], compactions = [], continuations = [];
   let percent = 0, idle = true;
   const bus = new Map();
-  const pi = { entries, commands, tools, compactions, continuations, notices,
+  const pi = { get entries(){return session.getEntries();}, commands, tools, compactions, continuations, notices,
     events: { on(name, handler) { const listeners = bus.get(name) ?? new Set(); listeners.add(handler); bus.set(name, listeners); return () => listeners.delete(handler); },
-      emit(name, payload) { for (const handler of [...(bus.get(name) ?? [])]) handler(payload); } },
+      emit(name, payload) { if (this.mockSettlement !== false) mockSettlement(name, payload); for (const handler of [...(bus.get(name) ?? [])]) handler(payload); } },
     on(name, handler) { handlers.set(name, handler); },
     registerCommand(name, command) { commands.set(name, command); },
     registerTool(tool) { tools.set(tool.name, tool); },
-    appendEntry(customType, data) { entries.push({ customType, data }); },
+    appendEntry(customType, data) { session.appendCustomEntry(customType, data); },
     sendUserMessage(text) { continuations.push(text); },
   };
   harness(pi);
-  const ctx = { mode: "rpc", sessionManager: { getEntries: () => entries }, ui: { notify: (message, type) => notices.push({ message, type }) },
+  const ctx = { mode: "rpc", cwd:"/tmp/pi-maintenance-fixture", sessionManager: session, ui: { notify: (message, type) => notices.push({ message, type }) },
     isIdle: () => idle, getContextUsage: () => ({ percent }), compact: (options) => { compactions.push(options); } };
-  const emit = (name, event = {}) => handlers.get(name)?.(event, ctx);
+  const boundary = () => {
+    const result=handlers.get("agent_before_settle")?.({entries:[],context:{contextEntries:session.buildSessionProjection().entries,pendingMessages:[]}},ctx);
+    for(const draft of result?.entries??[]) {
+      if(draft.type === "context_edit")session.appendContextEdit(draft.targetId,draft.replacement);
+      else if(draft.type === "custom")session.appendCustomEntry(draft.customType,draft.data);
+    }
+    return result;
+  };
+  const emit = (name, event = {}) => {if(name === "agent_settled" && idle)boundary();return handlers.get(name)?.(event, ctx);};
   emit("session_start");
-  return { pi, ctx, emit, setPercent: (value) => { percent = value; }, setIdle: (value) => { idle = value; },
+  return { pi, ctx, emit, session, boundary, maintenance:()=>session.getEntries().filter(e=>e.customType === "pi-harness-context-maintenance"), setPercent: (value) => { percent = value; }, setIdle: (value) => { idle = value; },
     command: (name, args) => commands.get(name).handler(args, ctx),
-    latest: (name) => entries.filter((entry) => entry.customType === name).at(-1)?.data };
+    latest: (name) => session.getEntries().filter((entry) => entry.customType === name).at(-1)?.data };
 }
 
-test("threshold defaults to 70% of the active model context window and remains configurable", async () => {
-  const f = fixture();
-  await f.command("harness-compact", "status");
-  assert.match(f.pi.notices.at(-1).message, /enabled at 70%/);
-  f.setPercent(69); f.emit("context"); f.emit("agent_settled");
-  assert.equal(f.pi.compactions.length, 0);
-  f.setPercent(70); f.emit("context"); f.emit("agent_settled");
-  assert.equal(f.pi.compactions.length, 1);
-  f.pi.compactions[0].onComplete({ summary: "DONE" });
-  f.setPercent(60); f.emit("context");
-  await f.command("harness-compact", "set 73");
-  assert.deepEqual(f.latest(PROACTIVE_COMPACT_ENTRY), { enabled: true, threshold_percent: 73 });
-  f.setPercent(72); f.emit("context"); f.emit("agent_settled");
-  assert.equal(f.pi.compactions.length, 1);
-  for (const invalid of ["49", "91", "73.5", "abc", "80%", "set", "set  77abc"]) {
-    if (invalid.startsWith("set")) await f.command("harness-compact", invalid);
-    else assert.throws(() => setProactiveThreshold(invalid));
-  }
-  assert.equal(f.latest(PROACTIVE_COMPACT_ENTRY).threshold_percent, 73);
-  const restored = fixture(f.pi.entries);
-  await restored.command("harness-compact", "status");
-  assert.match(restored.pi.notices.at(-1).message, /enabled at 73%/);
-  await restored.command("harness-compact", "disable");
-  assert.deepEqual(restored.latest(PROACTIVE_COMPACT_ENTRY), { enabled: false, threshold_percent: 73 });
-  restored.setPercent(95); restored.emit("context"); restored.emit("agent_settled");
-  assert.equal(restored.pi.compactions.length, 0);
-  const legacyDisabled = fixture([{ customType: PROACTIVE_COMPACT_ENTRY, data: { enabled: false, threshold_percent: null } }]);
-  await legacyDisabled.command("harness-compact", "status");
-  assert.match(legacyDisabled.pi.notices.at(-1).message, /disabled/);
+test("70% is a configurable soft GC trigger, never a Harness compaction threshold",async()=>{
+  const f=fixture();await f.command("harness-compact","status");assert.match(f.pi.notices.at(-1).message,/enabled at 70%/);
+  f.setPercent(69);f.emit("context");f.emit("agent_settled");assert.equal(f.maintenance().length,0);
+  f.setPercent(70);f.emit("context");f.emit("agent_settled");assert.equal(f.maintenance().length,1);assert.equal(f.pi.compactions.length,0);
+  await f.command("harness-compact","set 73");assert.deepEqual(f.latest(PROACTIVE_COMPACT_ENTRY),{enabled:true,threshold_percent:73});
+  for(const value of ["49","91","73.5","abc"])assert.throws(()=>setProactiveThreshold(value));
+  const restored=fixture(f.pi.entries);await restored.command("harness-compact","status");assert.match(restored.pi.notices.at(-1).message,/enabled at 73%/);
+  await restored.command("harness-compact","disable");restored.setPercent(95);restored.emit("context");restored.emit("agent_settled");assert.equal(restored.maintenance().length,1);assert.equal(restored.pi.compactions.length,0);
 });
 
-test("context only marks pending; settled compaction completes before Goal continuation", async () => {
-  const f = fixture();
-  await f.command("harness-compact", "set 65");
-  f.setPercent(66); f.setIdle(false);
-  const contextEvent = { type: "context", messages: [{ role: "user", content: "Keep this message." }] };
-  const originalMessages = structuredClone(contextEvent.messages);
-  assert.equal(f.emit("context", contextEvent), undefined);
-  assert.deepEqual(contextEvent.messages, originalMessages, "the observational context handler does not edit messages");
-  f.emit("context", contextEvent);
-  await f.command("goal", "Finish this Mission.");
-  assert.equal(f.pi.compactions.length, 0);
-  assert.equal(f.pi.continuations.length, 0);
-  f.emit("agent_settled");
-  assert.equal(f.pi.compactions.length, 0);
-  f.setIdle(true);
-  f.emit("agent_settled"); f.emit("agent_settled"); f.emit("context");
-  assert.equal(f.pi.compactions.length, 1);
-  assert.equal(f.pi.continuations.length, 0);
-  assert.equal(f.latest("pi-harness-compact-state").mission.status, "active");
-  assert.equal(f.latest("pi-harness-goal-state").status, "active");
-  f.pi.compactions[0].onComplete({ summary: "DONE" });
-  assert.equal(f.pi.continuations.length, 1);
-  assert.equal(f.latest("pi-harness-goal-state").status, "active");
-  f.emit("context"); f.emit("agent_settled");
-  assert.equal(f.pi.compactions.length, 1, "high usage after compaction must not cause a loop");
-  f.setPercent(40); f.emit("context");
-  f.setPercent(67); f.emit("context"); f.emit("agent_settled");
-  assert.equal(f.pi.compactions.length, 2, "only a later below-to-above crossing re-arms");
+test("92.5% long active turn waits for safe boundary, GC shrinks context, native Pi owns reserve",async()=>{
+  const f=fixture();f.session.appendMessage({role:"user",content:"Old request.",timestamp:1});
+  const old=f.session.appendCustomMessageEntry("pi-harness-context",stablePromptSections().pi_harness_contract,false);
+  f.session.appendMessage({role:"user",content:"Current request must remain.",timestamp:2});
+  const before=JSON.stringify(f.session.buildSessionProjection().messages);
+  f.setIdle(false);f.setPercent(92.5);f.emit("tool_execution_start",{toolCallId:"active"});f.emit("context");
+  await f.command("goal","Preserve this Mission.");
+  assert.equal(f.pi.continuations.length,0);assert.equal(f.boundary(),undefined);
+  assert.equal(JSON.stringify(f.session.buildSessionProjection().messages),before);
+  f.emit("tool_execution_end",{toolCallId:"active"});assert.equal(f.maintenance().length,0);
+  f.boundary();assert.equal(f.maintenance().length,1);
+  assert.ok(JSON.stringify(f.session.buildSessionProjection().messages).length<before.length);
+  assert.ok(f.session.getEntry(old).content.includes("COMMUNICATION CONTRACT"));
+  assert.equal(f.latest("pi-harness-goal-state").status,"active");
+  f.setIdle(true);f.emit("agent_settled");assert.equal(f.pi.continuations.length,1);
+  assert.equal(f.pi.compactions.length,0);assert.equal(f.latest("pi-harness-context-maintenance").context_edits,1);
 });
 
-test("compaction errors do not transition Goal or retry at the same high-water mark", async () => {
-  const f = fixture();
-  await f.command("harness-compact", "set 70");
-  f.setPercent(71); f.emit("context");
-  await f.command("goal", "Keep the Mission active.");
-  f.emit("agent_settled");
-  assert.equal(f.pi.compactions.length, 1);
-  f.pi.compactions[0].onError(new Error("Nothing to compact"));
-  assert.equal(f.latest("pi-harness-goal-state").status, "active");
-  assert.equal(f.pi.continuations.length, 1);
-  f.emit("context"); f.emit("agent_settled");
-  assert.equal(f.pi.compactions.length, 1);
+test("GC does not loop at the same high-water mark; native failure does not decide Mission",async()=>{
+  const f=fixture();f.setPercent(80);f.emit("context");f.emit("agent_settled");
+  for(let i=0;i<3;i++){f.emit("context");f.emit("agent_settled");}assert.equal(f.maintenance().length,1);
+  f.emit("session_compact_failed");f.emit("context");f.emit("agent_settled");assert.equal(f.maintenance().length,1);
+  f.setPercent(40);f.emit("context");f.setPercent(80);f.emit("context");f.emit("agent_settled");assert.equal(f.maintenance().length,2);
+  assert.equal(f.pi.compactions.length,0);
 });
 
-test("direct Task/Reviewer tool activity holds compaction until it finishes", async () => {
-  const f = fixture();
-  await f.command("harness-compact", "set 58");
-  f.setPercent(59);
-  f.emit("tool_execution_start", { toolCallId: "reviewer", toolName: "pi_harness_coordinate" });
-  f.emit("context"); f.emit("agent_settled");
-  assert.equal(f.pi.compactions.length, 0);
-  f.emit("tool_execution_end", { toolCallId: "reviewer" });
-  assert.equal(f.pi.compactions.length, 1);
+test("active tool structure prevents GC until an explicit safe boundary",async()=>{
+  const f=fixture();f.setPercent(80);f.emit("tool_execution_start",{toolCallId:"reviewer"});f.emit("context");f.boundary();assert.equal(f.maintenance().length,0);
+  f.emit("tool_execution_end",{toolCallId:"reviewer"});assert.equal(f.maintenance().length,0);
+  f.boundary();assert.equal(f.maintenance().length,1);assert.equal(f.pi.compactions.length,0);
 });
 
-test("active direct TaskOrder and semantic Reviewer are never aborted by proactive compaction", async () => {
+test("active direct TaskOrder and semantic Reviewer are never aborted by context maintenance", async () => {
   const f = fixture();
   const cwd = mkdtempSync(join(tmpdir(), "pi-compact-review-"));
   const before = process.env.PI_HARNESS_EVIDENCE_DIR;
@@ -138,10 +107,11 @@ test("active direct TaskOrder and semantic Reviewer are never aborted by proacti
     assert.equal(f.pi.compactions.length, 0);
     assert.equal(review.request.options.signal.aborted, false);
     const packet = JSON.parse(review.request.prompt.slice(review.request.prompt.indexOf('{"version"')));
-    f.pi.events.emit("subagents:completed", { id: review.id, status: "completed", result: JSON.stringify({ version: 1, task_id: "T-1", status: "verified", summary: "Checked.", criteria: [{ criterion: "The report identifies a source.", status: "passed", finding: "The report identifies a source.", evidence_refs: [packet.evidence[0].reference] }] }) });
+    f.pi.events.emit("subagents:completed", { id: review.id, status: "completed", result: JSON.stringify({ version: 1, task_id: "T-1", status: "verified", summary: "Checked.", criteria: [{ criterion: "The report identifies a source.", status: "passed", finding: "The report names its source.", evidence_refs: [packet.evidence[0].reference] }] }) });
     assert.equal((await task).taskResult.verification_status, "verified");
     f.emit("agent_settled");
-    assert.equal(f.pi.compactions.length, 1);
+    assert.equal(f.maintenance().length, 1);
+    assert.equal(f.pi.compactions.length, 0);
     assert.equal(review.request.options.signal.aborted, false);
   } finally {
     if (before === undefined) delete process.env.PI_HARNESS_EVIDENCE_DIR; else process.env.PI_HARNESS_EVIDENCE_DIR = before;
@@ -149,7 +119,7 @@ test("active direct TaskOrder and semantic Reviewer are never aborted by proacti
   }
 });
 
-test("proactive compaction waits until both parallel Task pipelines settle", async () => {
+test("context maintenance waits until both parallel Task pipelines settle", async () => {
   const f = fixture();
   const cwd = mkdtempSync(join(tmpdir(), "pi-compact-wave-"));
   const before = process.env.PI_HARNESS_EVIDENCE_DIR;
@@ -177,7 +147,8 @@ test("proactive compaction waits until both parallel Task pipelines settle", asy
     f.pi.events.emit("subagents:completed", { id: children[1].id, status: "completed", result: "Second report." });
     await second;
     f.emit("agent_settled");
-    assert.equal(f.pi.compactions.length, 1);
+    assert.equal(f.maintenance().length, 1);
+    assert.equal(f.pi.compactions.length, 0);
   } finally {
     if (before === undefined) delete process.env.PI_HARNESS_EVIDENCE_DIR; else process.env.PI_HARNESS_EVIDENCE_DIR = before;
     rmSync(cwd, { force: true, recursive: true });
@@ -202,4 +173,19 @@ test("native compaction satisfies pending request without a second Harness compa
   f.emit("agent_settled");
   assert.equal(f.pi.compactions.length, 0);
   assert.equal(f.latest("pi-harness-task-graph-state").task_graphs["O-1"].nodes["T-1"].scheduler_status, "ready");
+});
+
+test("Pi-owned warming stops only for prefix changes, pending GC, native compaction or shutdown",async()=>{
+  const f=fixture();const decision={action:"warm",warmCost:0,missCost:1,continuationProbability:1};
+  assert.deepEqual(f.emit("cache_warming_decision",decision),{action:"stop"});
+  f.emit("before_agent_start",{systemPromptOptions:{sections:{}}});
+  assert.equal(f.emit("cache_warming_decision",decision),undefined);
+  await f.command("plan","on");assert.deepEqual(f.emit("cache_warming_decision",decision),{action:"stop"});
+  f.emit("before_agent_start",{systemPromptOptions:{sections:{}}});assert.equal(f.emit("cache_warming_decision",decision),undefined);
+  f.setPercent(80);f.emit("context");assert.deepEqual(f.emit("cache_warming_decision",decision),{action:"stop"});
+  f.boundary();assert.equal(f.emit("cache_warming_decision",decision),undefined);
+  f.emit("session_before_compact");assert.deepEqual(f.emit("cache_warming_decision",decision),{action:"stop"});
+  f.emit("session_compact");assert.equal(f.emit("cache_warming_decision",decision),undefined);
+  f.emit("session_shutdown");assert.deepEqual(f.emit("cache_warming_decision",decision),{action:"stop"});
+  assert.equal(f.pi.continuations.length,0);assert.equal(f.pi.compactions.length,0);
 });

@@ -1,3 +1,4 @@
+import { mockSettlement } from "./helpers/mock-settlement.mjs";
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -14,7 +15,7 @@ after(() => { if (previous === undefined) delete process.env.PI_HARNESS_EVIDENCE
 class Bus {
   handlers = new Map();
   on(name, handler) { const set = this.handlers.get(name) ?? new Set(); set.add(handler); this.handlers.set(name, set); return () => set.delete(handler); }
-  emit(name, event) { for (const handler of [...(this.handlers.get(name) ?? [])]) handler(event); }
+  emit(name, event) { if (this.mockSettlement !== false) mockSettlement(name, event); for (const handler of [...(this.handlers.get(name) ?? [])]) handler(event); }
 }
 const modelRegistry = { getAvailable: () => [{ provider: "openai", id: "gpt-daybreak-blue-latest" }] };
 const criteria = ["The API rejects unauthorized access.", "The response matches the contract."];

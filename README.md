@@ -77,7 +77,7 @@ See [target-architecture.md](target-architecture.md) for authority, lifecycle, s
 
 ## Status and limitations
 
-Managed Operations, bounded parallel Task waves, Evidence-backed verification, and session-safe cancellation are shipped. Dynamic TaskGraph expansion, automatic branch integration, automatic Mission completion, and persistent project intelligence are not shipped. Stable Prompt, Context GC, and cache-economics features are not yet shipped. An Operation completing does not complete the Mission.
+Managed Operations, bounded parallel Task waves, Evidence-backed verification, and session-safe cancellation are shipped. Dynamic TaskGraph expansion, automatic branch integration, automatic Mission completion, and persistent project intelligence are not shipped. The working implementation uses native stable prompts, deterministic Context GC, and availability-aware context telemetry; release closure and broader live scenario proof remain pending. An Operation completing does not complete the Mission.
 
 ## Development and testing
 

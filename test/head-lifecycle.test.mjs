@@ -1,7 +1,9 @@
+import { mockSettlement } from "./helpers/mock-settlement.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import harness from "../extensions/pi-harness.ts";
 import { executeCoordinatorTurn } from "../lib/coordinator.mjs";
+import { OPERATION_ENTRY } from "../lib/operation.mjs";
 
 function fakePi(entries = []) {
   const tools = new Map(), events = new Map(), lifecycle = new Map(), commands = new Map();
@@ -9,7 +11,7 @@ function fakePi(entries = []) {
     registerTool(tool) { tools.set(tool.name, tool); }, registerCommand(name, value) { commands.set(name, value); },
     appendEntry(customType, data) { pi.entries.push({ customType, data }); },
     on(name, handler) { lifecycle.set(name, handler); },
-    events: { on(name, handler) { const set = events.get(name) ?? new Set(); set.add(handler); events.set(name, set); return () => set.delete(handler); }, emit(name, value) { for (const handler of events.get(name) ?? []) handler(value); } },
+    events: { on(name, handler) { const set = events.get(name) ?? new Set(); set.add(handler); events.set(name, set); return () => set.delete(handler); }, emit(name, value) { if (this.mockSettlement !== false) mockSettlement(name, value); for (const handler of events.get(name) ?? []) handler(value); } },
     start(next) { pi.entries = next; lifecycle.get("session_start")({}, { mode: "rpc", sessionManager: { getEntries: () => next } }); },
     checkpoint() { lifecycle.get("session_before_compact")({}); },
   };
@@ -24,7 +26,10 @@ const wait = async (condition) => { for (let i = 0; i < 100 && !condition(); i++
 
 test("Operation setup persists bounded Task intents and shared constraints for Head context", async () => {
   const pi = fakePi();
-  const op = await call(pi, "pi_harness_operation", { ...create, constraints: ["Do not integrate."], task_intents: { "T-A": "Inspect architecture.", "T-B": "Unrelated task." } });
+  const result = await call(pi, "pi_harness_operation", { ...create, constraints: ["Do not integrate."], task_intents: { "T-A": "Inspect architecture.", "T-B": "Unrelated task." } });
+  assert.equal(result.status, "open");
+  assert.equal(result.constraints, undefined);
+  const op = latest(pi, OPERATION_ENTRY)["O-G"];
   assert.deepEqual(op.constraints, ["Do not integrate."]);
   assert.equal(op.task_intents["T-A"], "Inspect architecture.");
   await assert.rejects(() => call(pi, "pi_harness_operation", { ...create, operation_id: "O-BAD", task_intents: { "T-UNKNOWN": "Invented task." } }), /Task intents/);

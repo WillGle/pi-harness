@@ -83,10 +83,16 @@ test("spawn rollback, explicit Blocker, restore reconciliation and Operation cri
   assert.equal(status(graph, "T-1"), "ready");
   graph = reconcileTaskGraph(claimTask(graph, op, "T-1"), op);
   assert.equal(status(graph, "T-1"), "blocked");
-  assert.deepEqual(graph.nodes["T-1"].blocker, { task_id: "T-1", blocked_action: "resume an interrupted TaskOrder", required_condition: "the Commander replans after the child outcome is checked" });
+  assert.deepEqual(graph.nodes["T-1"].blocker, { task_id: "T-1", failure_code: "HARNESS_SESSION_INTERRUPTED", blocked_action: "resume an interrupted TaskOrder", required_condition: "the Commander replans after the child outcome is checked" });
   assert.deepEqual(readyTaskIds(graph, op), []);
   assert.throws(() => claimTask(graph, op, "T-1"));
   assert.throws(() => blockGraphTask(graph, op, "T-1", "run", "approval"));
+  const coded = blockGraphTask(createTaskGraph(op), op, "T-1", "resolve timeout", "check child disposition", "HARNESS_RPC_TIMEOUT", { branch_status: "preserved", branch: "pi-agent-partial", commit_sha: "a".repeat(40), commit_count: 2, worktree_status: "unknown" });
+  assert.equal(coded.nodes["T-1"].blocker.failure_code, "HARNESS_RPC_TIMEOUT");
+  assert.deepEqual(coded.nodes["T-1"].blocker.child_disposition, { branch_status: "preserved", branch: "pi-agent-partial", commit_sha: "a".repeat(40), commit_count: 2, worktree_status: "unknown" });
+  assert.throws(() => blockGraphTask(createTaskGraph(op), op, "T-1", "resolve failure", "check outcome", "HARNESS_UNKNOWN", { branch_status: "unknown", worktree_status: "unknown", worktree_path: "/tmp/private" }));
+  assert.throws(() => blockGraphTask(createTaskGraph(op), op, "T-1", "resolve failure", "check outcome", "PRIVATE_ERROR"));
+  assert.throws(() => validateTaskGraph({ ...coded, nodes: { ...coded.nodes, "T-1": { ...coded.nodes["T-1"], blocker: { ...coded.nodes["T-1"].blocker, failure_code: "PRIVATE_ERROR" } } } }, op));
   const migrated = migrateTaskGraph(op);
   assert.equal(status(migrated, "T-1"), "ready");
   assert.throws(() => acceptOperationCriterion(op, "The Coordinator checked the results.", []), /Evidence/);

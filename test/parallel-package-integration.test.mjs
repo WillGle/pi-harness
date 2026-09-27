@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createWorktree, cleanupWorktree } from "../node_modules/@tintinweb/pi-subagents/dist/worktree.js";
@@ -11,6 +11,36 @@ import { AgentManager } from "../node_modules/@tintinweb/pi-subagents/dist/agent
 
 const exec = promisify(execFile);
 const git = (cwd, ...args) => exec("git", args, { cwd });
+
+test("pi-subagents post-abort cleanup preserves partial work on an unintegrated branch", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "pi-h-abort-worktree-"));
+  const pi = { exec: async (_command, args, options) => {
+    try { const { stdout, stderr } = await exec("git", args, { cwd: options.cwd }); return { stdout, stderr, code: 0, killed: false }; }
+    catch (error) { return { stdout: error.stdout ?? "", stderr: error.stderr ?? "", code: error.code ?? 1, killed: false }; }
+  } };
+  let worktree;
+  try {
+    await git(cwd, "init", "-q");
+    await git(cwd, "config", "user.name", "Pi test");
+    await git(cwd, "config", "user.email", "pi@example.invalid");
+    writeFileSync(join(cwd, "partial.txt"), "base\n");
+    await git(cwd, "add", "partial.txt");
+    await git(cwd, "commit", "-qm", "base");
+    worktree = await createWorktree(pi, cwd, "abort-disposition");
+    assert.ok(worktree);
+    // AgentManager calls this cleanup after an aborted run. Keep the partial diff as its input.
+    writeFileSync(join(worktree.path, "partial.txt"), "partial work before abort\n");
+    const disposition = await cleanupWorktree(pi, cwd, worktree, "aborted Worker");
+    assert.equal(disposition.hasChanges, true);
+    assert.equal(disposition.branch, "pi-agent-abort-disposition");
+    assert.equal(readFileSync(join(cwd, "partial.txt"), "utf8"), "base\n", "pi-subagents must not integrate the branch");
+    assert.equal((await git(cwd, "show", `${disposition.branch}:partial.txt`)).stdout.trim(), "partial work before abort");
+    assert.equal(existsSync(worktree.path), false, "pi-subagents removes the completed worktree");
+  } finally {
+    if (worktree?.path && existsSync(worktree.path)) await git(cwd, "worktree", "remove", "--force", worktree.path).catch(() => {});
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
 
 test("installed pi-subagents applies project capacity and isolates two concurrent Worker worktrees", async () => {
   const settings = loadSettings(process.cwd());

@@ -1,3 +1,5 @@
+import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { stablePromptSections } from "../lib/context-economics.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
@@ -522,7 +524,7 @@ test("Pi plan mode survives real compaction and still blocks built-in and Harnes
     assert.equal(compactStart.reason, "manual");
     assert.equal(compactEnd.aborted, false);
     assert.equal(compactEnd.errorMessage, undefined);
-    assert.equal(compact.data.summary, "DONE");
+    assert.match(compact.data.summary, /^DONE(?:\n\n---\n\n\*\*Turn Context \(split turn\):\*\*\n\nDONE)?$/);
 
     const compactEntries = (await pi.send({ type: "get_entries" })).data.entries;
     assert.ok(compactEntries.some((entry) => entry.type === "compaction"), "a real compaction entry must be persisted");
@@ -585,35 +587,28 @@ test("Pi plan mode survives real compaction and still blocks built-in and Harnes
   }
 });
 
-test("Pi 0.87.1 proactive compaction waits for a settled Task tool call", async () => {
-  const fixture = await createFixture();
-  let pi;
+test("Pi 0.87.1 runs ContextEdit GC after a settled tool, retaining history and native compaction ownership",async()=>{
+  const fixture=await createFixture();let pi;
   try {
-    const modelsPath = join(fixture.root, "home", ".pi", "agent", "models.json");
-    const models = JSON.parse(readFileSync(modelsPath, "utf8"));
-    models.providers.fake.models[0].contextWindow = 80000;
-    writeFileSync(modelsPath, JSON.stringify(models));
-    pi = fixture.spawn();
-    await pi.prompt("proactive-prefix-a");
-    await pi.prompt("proactive-prefix-b");
-    await pi.prompt("/harness-compact set 50");
-    const start = pi.events.length;
-    await pi.prompt("CALL_HASHLINES");
-    const compactStart = await pi.waitFor((event) => event.type === "compaction_start" && pi.events.indexOf(event) >= start, 30000);
-    const compactEnd = await pi.waitFor((event) => event.type === "compaction_end" && pi.events.indexOf(event) >= start, 30000);
-    const toolEndIndex = pi.events.findIndex((event, index) => index >= start && event.type === "tool_execution_end" && event.toolName === "pi_harness_hashlines");
-    assert.ok(toolEndIndex >= 0);
-    assert.equal(pi.events[toolEndIndex].isError, false);
-    assert.ok(toolEndIndex < pi.events.indexOf(compactStart), "Harness compacted before the Task tool completed");
-    assert.equal(compactStart.reason, "manual");
-    assert.equal(compactEnd.aborted, false, JSON.stringify(compactEnd));
-    assert.equal(pi.events.slice(start).filter((event) => event.type === "compaction_start").length, 1);
-    assert.deepEqual(latestCustom((await pi.send({ type: "get_entries" })).data.entries, PROACTIVE_COMPACT_ENTRY)?.data,
-      { enabled: true, threshold_percent: 50 });
-  } finally {
-    if (pi) await pi.close();
-    await fixture.close();
-  }
+    const modelsPath=join(fixture.root,"home",".pi","agent","models.json");
+    const models=JSON.parse(readFileSync(modelsPath,"utf8"));models.providers.fake.models[0].contextWindow=80000;writeFileSync(modelsPath,JSON.stringify(models));
+    const seed=SessionManager.create(fixture.project,join(fixture.root,"seeded"));
+    seed.appendMessage({role:"user",content:"Previous request.",timestamp:1});
+    const legacy=seed.appendCustomMessageEntry("pi-harness-context",stablePromptSections().pi_harness_contract,false);
+    seed.appendMessage({role:"assistant",content:[{type:"text",text:"Seed complete."}],api:"openai-completions",provider:"fake",model:"dummy",usage:{input:1,output:1,cacheRead:0,cacheWrite:0,totalTokens:2,cost:{total:0}},stopReason:"stop",timestamp:2});
+    pi=fixture.spawn(seed.getSessionFile());
+    await pi.prompt("maintenance-prefix-a");await pi.prompt("maintenance-prefix-b");await pi.prompt("/harness-compact set 50");
+    const start=pi.events.length;await pi.prompt("CALL_HASHLINES");
+    const entries=(await pi.send({type:"get_entries"})).data.entries;
+    assert.ok(entries.some(entry=>entry.type === "context_edit" && entry.targetId === legacy));
+    assert.ok(entries.find(entry=>entry.id === legacy).content.includes("COMMUNICATION CONTRACT"));
+    const toolEnd=pi.events.findIndex((event,index)=>index>=start&&event.type === "tool_execution_end"&&event.toolName === "pi_harness_hashlines");
+    assert.ok(toolEnd>=0);assert.equal(pi.events[toolEnd].isError,false);
+    assert.equal(pi.events.slice(start).filter(event=>event.type === "compaction_start").length,0,"Harness must not request lossy manual compaction");
+    const after=fixture.provider.requests.find(request=>request.trigger === "CALL_HASHLINES"&&request.hasToolResultAfterMarker);
+    assert.ok(after);assert.equal(after.body.messages.filter(message=>message.role!=="system"&&messageText(message).includes("[PI HARNESS COMMUNICATION CONTRACT]")).length,0);
+    assert.deepEqual(latestCustom(entries,PROACTIVE_COMPACT_ENTRY).data,{enabled:true,threshold_percent:50});
+  } finally {if(pi)await pi.close();await fixture.close();}
 });
 
 test("Pi plan mode is independent across real fork and switch_session operations", async () => {

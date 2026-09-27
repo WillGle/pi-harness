@@ -25,6 +25,10 @@ function createAcpClient(envOverrides = {}) {
   const pending = new Map();
   const notifications = [];
   let buffer = "";
+  let stderrTail = "";
+  let childExit;
+  child.stderr.on("data", (chunk) => { stderrTail = (stderrTail + chunk.toString("utf8")).slice(-2048); });
+  child.once("exit", (code, signal) => { childExit = { code, signal }; });
 
   child.stdout.on("data", (chunk) => {
     buffer += chunk.toString("utf8");
@@ -51,7 +55,9 @@ function createAcpClient(envOverrides = {}) {
     return new Promise((resolvePromise, rejectPromise) => {
       const timer = setTimeout(() => {
         pending.delete(id);
-        rejectPromise(new Error(`Timeout waiting for response to ${method}`));
+        const diagnostic = stderrTail.trim().replace(/(api[_-]?key|token|secret)\s*[:=]\s*\S+/gi, "$1=[redacted]");
+        const childState = childExit ? `exited ${childExit.code ?? childExit.signal}` : "still running";
+        rejectPromise(new Error(`Timeout waiting for response to ${method} (ACP child ${childState}${diagnostic ? `; stderr: ${diagnostic}` : "; stderr empty"})`));
       }, 15000);
 
       pending.set(id, (res) => {

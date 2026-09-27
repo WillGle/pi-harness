@@ -1,3 +1,4 @@
+import { mockSettlement } from "./helpers/mock-settlement.mjs";
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -15,7 +16,7 @@ const model = "openai/gpt-daybreak-blue-latest";
 class Bus {
   handlers = new Map();
   on(name, handler) { const set = this.handlers.get(name) ?? new Set(); set.add(handler); this.handlers.set(name, set); return () => set.delete(handler); }
-  emit(name, event) { for (const handler of [...(this.handlers.get(name) ?? [])]) handler(event); }
+  emit(name, event) { if (this.mockSettlement !== false) mockSettlement(name, event); for (const handler of [...(this.handlers.get(name) ?? [])]) handler(event); }
 }
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 
@@ -36,7 +37,7 @@ test("cancellation aborts both active Reviewers without a ghost-running Task", a
       req.options.signal.addEventListener("abort", () => events.emit("subagents:failed", { id, status: "stopped" }), { once: true });
     }
   });
-  const operation = createOperation({ operation_id: "O-P", objective: "Review reports.", required_task_ids: ["T-1", "T-2"] });
+  const operation = createOperation({ operation_id: "O-P", objective: "Review reports.", task_specs: Object.fromEntries(tasks.map(({task_id,scope,...spec})=>[task_id,spec])), required_task_ids: ["T-1", "T-2"], task_intents: { "T-1": "Review T-1", "T-2": "Review T-2" } });
   const run = runOperation(operation, {
     turn: async () => JSON.stringify({ version: 1, operation_id: "O-P", action: "dispatch_batch", reason: "Both Tasks are ready.", tasks }),
     dispatch: (task) => executeCoordinateTask({ events }, task, { cwd: process.cwd(), groupId: "O-P", signal: controller.signal, timeout: 1500, rpcTimeout: 1000 }).then((record) => record.taskResult),
@@ -62,11 +63,11 @@ test("parallel default/security Reviewers see only their own Task Evidence and m
     if (req.type === "research") queueMicrotask(() => events.emit("subagents:completed", { id, status: "completed", result: `PRIVATE-${req.prompt.includes("T-1") ? "T-1" : "T-2"}` }));
     else reviews.push({ req, id });
   });
-  const op = createOperation({ operation_id: "O-P", objective: "Review reports.", required_task_ids: ["T-1", "T-2"] });
   const tasks = [
     { task_id: "T-1", owner: "research", permission: "read", scope: "Review T-1.", verification: "Check T-1 report.", acceptance_criteria: ["T-1 report is valid."] },
     { task_id: "T-2", owner: "research", permission: "read", scope: "Review T-2.", verification: "Check T-2 report.", acceptance_criteria: ["T-2 report is valid."], review_profile: { "T-2 report is valid.": "security" } },
   ];
+  const op = createOperation({ operation_id: "O-P", objective: "Review reports.", task_specs: Object.fromEntries(tasks.map(({task_id,scope,...spec})=>[task_id,spec])), required_task_ids: ["T-1", "T-2"], task_intents: { "T-1": "Review T-1.", "T-2": "Review T-2." } });
   try {
     const run = runOperation(op, {
       turn: async (_prompt) => requested.length === 0 ? JSON.stringify({ version: 1, operation_id: "O-P", action: "dispatch_batch", reason: "Both Tasks are ready.", tasks })

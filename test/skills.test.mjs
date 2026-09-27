@@ -75,14 +75,16 @@ test("Pi exposes only contextual skills to model selection and keeps policy mode
 test("scouting has one packaged execution path and doctrine describes the supported TaskOrder subset", () => {
   const scouting = readFileSync("skills/project-scouting/SKILL.md", "utf8");
   const coordinator = readFileSync("skills/pi-coordinator/SKILL.md", "utf8");
-  assert.match(scouting, /pi_harness_coordinate/);
+  assert.match(scouting, /pi_harness_run_operation/);
+  assert.match(scouting, /pi_harness_coordinate` tool is disabled/);
   assert.doesNotMatch(scouting, /scripts\/scout\.py|\.scout_report\.md.*exists/);
-  assert.match(coordinator, /current `pi_harness_coordinate` API accepts/);
+  assert.match(coordinator, /Only the Harness Coordinator can dispatch, accept, reject, or judge TaskResults/);
+  assert.match(coordinator, /read-only TaskOrder must include at least one specific Acceptance Criterion/);
   const cavecrew = readFileSync("skills/cavecrew/SKILL.md", "utf8");
   assert.match(cavecrew, /Do not register or spawn named cavecrew agents/);
   assert.match(cavecrew, /Never treat a receipt as a TaskResult/);
   assert.match(readFileSync("skills/caveman/SKILL.md", "utf8"), /Never format or rewrite a Mission/);
-  assert.match(coordinator, /Do not interpret it as Definition of Done/);
+  assert.match(coordinator, /not acceptance/);
   const lock = JSON.parse(readFileSync("skills/skills.lock.json", "utf8"));
   assert.equal(Object.hasOwn(lock.skills, "skill-hub"), false);
 });

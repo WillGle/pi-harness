@@ -1,3 +1,4 @@
+import { mockSettlement } from "./helpers/mock-settlement.mjs";
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -58,12 +59,20 @@ test("malformed, unresolved, truncated or tampered Evidence fails closed", async
   assert.throws(() => validateSemanticReview(task, packet, JSON.stringify({ ...JSON.parse(reviewerReply(packet)), criteria: [] })));
   const malformed = await reviewTask(task, input, cwd, async () => ({ status: "completed", result: "verified" }));
   assert.equal(malformed.status, "blocked");
+  const copiedEvidence = JSON.parse(reviewerReply(packet));
+  copiedEvidence.criteria[0].finding = "Research observation.";
+  assert.throws(() => validateSemanticReview(task, packet, JSON.stringify(copiedEvidence)), /invalid criterion result/);
+  const copiedResult = await reviewTask(task, input, cwd, async () => ({ status: "completed", result: JSON.stringify(copiedEvidence) }));
+  assert.equal(copiedResult.status, "blocked");
+  assert.ok(!JSON.stringify(copiedResult).includes("Research observation."));
   const failed = await reviewTask(task, input, cwd, async () => ({ status: "completed", result: reviewerReply(packet, "failed") }));
   assert.equal(failed.status, "failed");
   assert.equal(taskResult(task, { status: "completed" }, { semanticVerification: failed }).verification_status, "failed");
+  assert.equal(taskResult(task, { status: "completed" }, { semanticVerification: failed }).failure_code, "HARNESS_VERIFIER_FAILED");
   const unresolved = await reviewTask(task, input, cwd, async () => ({ status: "completed", result: reviewerReply(packet, "not_checked") }));
   assert.equal(unresolved.status, "blocked");
   assert.equal(taskResult(task, { status: "completed" }, { semanticVerification: unresolved }).verification_status, "blocked");
+  assert.equal(taskResult(task, { status: "completed" }, { semanticVerification: unresolved }).failure_code, "HARNESS_VERIFIER_FAILED");
   const bad = storeEvidence({ cwd, taskId: task.task_id, kind: "report", content: "truncated", truncated: true });
   assert.equal((await reviewTask(task, resultFor(task, [bad.reference]), cwd, async () => { throw Error("must not spawn"); })).status, "blocked");
   assert.deepEqual(acceptedFindings({ findings: [{ statement: "unverified", verification_status: "not_verified", evidence_refs: [report.reference] }] }), []);
@@ -72,7 +81,7 @@ test("malformed, unresolved, truncated or tampered Evidence fails closed", async
 class Bus {
   handlers = new Map();
   on(name, handler) { const handlers = this.handlers.get(name) ?? new Set(); handlers.add(handler); this.handlers.set(name, handlers); return () => handlers.delete(handler); }
-  emit(name, event) { for (const handler of [...(this.handlers.get(name) ?? [])]) handler(event); }
+  emit(name, event) { if (this.mockSettlement !== false) mockSettlement(name, event); for (const handler of [...(this.handlers.get(name) ?? [])]) handler(event); }
 }
 
 test("Harness-owned read-only reviewer returns verified Finding, not raw reviewer context", async () => {
@@ -95,6 +104,7 @@ test("Harness-owned read-only reviewer returns verified Finding, not raw reviewe
   assert.deepEqual(spawns.map((req) => req.type), ["research", "reviewer"]);
   assert.equal(spawns[1].options.isolation, "off");
   assert.equal(result.taskResult.verification_status, "verified");
+  assert.match(result.taskResult.summary, /The research ExecutionUnit satisfied 1 verified Acceptance Criteria\./);
   assert.equal(acceptedFindings(result.taskResult)[0].source_role, "research");
   assert.equal(acceptedFindings(result.taskResult)[0].verification_status, "verified");
   assert.ok(!JSON.stringify(promoteTaskResult(result)).includes("Research observation."));
@@ -105,31 +115,51 @@ test("Harness-owned read-only reviewer returns verified Finding, not raw reviewe
 });
 
 test("semantic and security Reviewer timeouts abort the owned child and reject late verification", async () => {
-  for (const profile of ["default", "security"]) {
-    const events = new Bus();
-    let reviewer;
-    events.on("subagents:rpc:spawn", (req) => {
-      const id = req.type === "research" ? `research-${profile}` : `reviewer-${profile}`;
-      events.emit(`subagents:rpc:spawn:reply:${req.requestId}`, { success: true, data: { id } });
-      if (req.type === "research") queueMicrotask(() => events.emit("subagents:completed", { id, status: "completed", result: "Inspection report." }));
-      else {
-        reviewer = { id, req };
-        req.options.signal.addEventListener("abort", () => events.emit("subagents:failed", { id, status: "stopped" }), { once: true });
-      }
-    });
-    const criterion = "The report identifies a source.";
-    const result = await executeCoordinateTask({ events }, {
-      owner: "research", task_id: `T-${profile}`, operation_id: "O-timeout", scope: "Inspect report.", verification: "inspect", permission: "read",
-      acceptance_criteria: [criterion], review_profile: { [criterion]: profile },
-    }, { cwd, timeout: 40, rpcTimeout: 1000, modelRegistry: { getAvailable: () => { const [provider, id] = securityReviewModel().split("/"); return [{ provider, id }]; } } });
-    assert.ok(reviewer);
-    assert.equal(reviewer.req.options.signal.aborted, true);
-    assert.equal(result.taskResult.verification_status, "blocked");
-    assert.equal(hasActiveCoordinateTasks(), false);
-    assert.equal(events.handlers.get("subagents:completed")?.size ?? 0, 0);
-    assert.equal(events.handlers.get("subagents:failed")?.size ?? 0, 0);
-    events.emit("subagents:completed", { id: reviewer.id, status: "completed", result: "LATE VERIFIED" });
-    assert.equal(result.taskResult.verification_status, "blocked");
+  const key = Symbol.for("pi-subagents:manager");
+  const previousManager = globalThis[key];
+  const records = new Map();
+  globalThis[key] = { getRecord: (id) => records.get(id) };
+  try {
+    for (const profile of ["default", "security"]) {
+      const events = new Bus();
+      let reviewer;
+      events.on("subagents:rpc:spawn", (req) => {
+        const id = req.type === "research" ? `research-${profile}` : `reviewer-${profile}`;
+        let settle;
+        const record = { status: "running", promise: new Promise((resolve) => { settle = resolve; }) };
+        records.set(id, record);
+        req.options.onSpawned(id);
+        events.emit(`subagents:rpc:spawn:reply:${req.requestId}`, { success: true, data: { id } });
+        if (req.type === "research") queueMicrotask(() => {
+          record.status = "completed"; settle();
+          events.emit("subagents:completed", { id, status: "completed", result: "Inspection report." });
+        });
+        else {
+          reviewer = { id, req };
+          req.options.signal.addEventListener("abort", () => {
+            record.status = "stopped"; settle();
+            events.emit("subagents:failed", { id, status: "stopped" });
+          }, { once: true });
+        }
+      });
+      const criterion = "The report identifies a source.";
+      const result = await executeCoordinateTask({ events }, {
+        owner: "research", task_id: `T-${profile}`, operation_id: "O-timeout", scope: "Inspect report.", verification: "inspect", permission: "read",
+        acceptance_criteria: [criterion], review_profile: { [criterion]: profile },
+      }, { cwd, timeout: 40, reviewerTimeout: 40, rpcTimeout: 1000, modelRegistry: { getAvailable: () => { const [provider, id] = securityReviewModel().split("/"); return [{ provider, id }]; } } });
+      assert.ok(reviewer);
+      assert.equal(reviewer.req.options.signal.aborted, true);
+      assert.equal(result.taskResult.verification_status, "blocked");
+      assert.equal(result.taskResult.failure_code, "HARNESS_CHILD_TERMINAL_TIMEOUT");
+      assert.equal(hasActiveCoordinateTasks(), false);
+      assert.equal(events.handlers.get("subagents:completed")?.size ?? 0, 0);
+      assert.equal(events.handlers.get("subagents:failed")?.size ?? 0, 0);
+      events.emit("subagents:completed", { id: reviewer.id, status: "completed", result: "LATE VERIFIED" });
+      assert.equal(result.taskResult.verification_status, "blocked");
+    }
+  } finally {
+    if (previousManager === undefined) delete globalThis[key];
+    else globalThis[key] = previousManager;
   }
 });
 

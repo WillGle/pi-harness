@@ -27,6 +27,10 @@ function spawnPiRpc(options = {}) {
   const pending = new Map();
   const events = [];
   let buffer = "";
+  let stderrTail = "";
+  let childExit;
+  child.stderr.on("data", (chunk) => { stderrTail = (stderrTail + chunk.toString("utf8")).slice(-2048); });
+  child.once("exit", (code, signal) => { childExit = { code, signal }; });
 
   child.stdout.on("data", (chunk) => {
     buffer += chunk.toString("utf8");
@@ -56,7 +60,11 @@ function spawnPiRpc(options = {}) {
     return new Promise((resolvePromise, rejectPromise) => {
       const timer = setTimeout(() => {
         pending.delete(id);
-        rejectPromise(new Error(`Timeout waiting for RPC command: ${command.type}`));
+        const diagnostic = stderrTail.trim().replace(/(api[_-]?key|token|secret)\s*[:=]\s*\S+/gi, "$1=[redacted]");
+        const childState = childExit ? `exited ${childExit.code ?? childExit.signal}` : "still running";
+        const label = command.type === "prompt" ? `prompt ${String(command.message ?? "").slice(0, 100)}` : command.type;
+        const eventTypes = events.slice(-12).map((event) => event.type ?? event.method ?? "unknown").join(",");
+        rejectPromise(new Error(`Timeout waiting for RPC command: ${label} (Pi child ${childState}; recent events: ${eventTypes || "none"}${diagnostic ? `; stderr: ${diagnostic}` : "; stderr empty"})`));
       }, 10000);
 
       pending.set(id, (res) => {

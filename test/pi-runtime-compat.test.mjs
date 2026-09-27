@@ -1,3 +1,7 @@
+import harness from "../extensions/pi-harness.ts";
+import { mkdtempSync, rmSync } from "node:fs";
+import { contextTelemetry, deterministicContextEdits, installStablePrompt, stablePromptSections } from "../lib/context-economics.mjs";
+import { buildSystemPrompt } from "../node_modules/@earendil-works/pi-coding-agent/dist/core/system-prompt.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -93,9 +97,82 @@ test("Pi 0.87.1 context edits and cache-warming capability shapes are inspectabl
   assert.match(sessionTypes, /export type SessionEntry = [^;]*UsageEntry/);
 });
 
-test("Phase I.0 inspects new APIs without enabling them in Pi Harness", () => {
-  assert.match(extensionSource, /pi\.on\?\.\("context"/);
-  assert.match(extensionSource, /pi\.on\?\.\("before_agent_start"/);
-  assert.doesNotMatch(extensionSource, /pi\.on\?\.\("(?:context_with_system|agent_before_settle|cache_warming_decision)"/);
-  assert.doesNotMatch(extensionSource, /systemPromptOptions|forceSystemPrompt|cacheWarming|appendContextEdit|context_edit/);
+test("Phase I uses Pi-native stable sections instead of accumulating context messages", () => {
+  assert.match(extensionSource, /installStablePrompt\(event, sections/);
+  assert.doesNotMatch(extensionSource, /customType: "pi-harness-context"/);
+});
+
+test("real Pi prompt runner keeps sections byte-stable and learn/plan invalidate only intentionally", async()=>{
+  const dir=mkdtempSync("/tmp/pi-stable-prompt-"),old=process.env.PI_HARNESS_MEMORY_DIR;
+  process.env.PI_HARNESS_MEMORY_DIR=dir+"/memory";
+  try {
+    const handlers=new Map(),commands=new Map(),session=SessionManager.inMemory(dir);
+    harness({on:(name,handler)=>handlers.set(name,[handler]),registerCommand:(name,command)=>commands.set(name,command),registerTool:()=>{},appendEntry:(type,data)=>session.appendCustomEntry(type,data),getActiveTools:()=>[],setActiveTools:()=>{}});
+    const runner=new ExtensionRunner([{path:"<harness>",handlers}],{},dir,session,{});
+    const options={cwd:dir,selectedTools:[],sections:{other:"Preserve another extension."}};
+    const first=await runner.emitBeforeAgentStart("Current request.",undefined,options);
+    const second=await runner.emitBeforeAgentStart("Next request.",undefined,options);
+    assert.deepEqual(first.messages,[]);assert.deepEqual(second.messages,[]);
+    assert.equal(buildSystemPrompt(first.systemPromptOptions),buildSystemPrompt(second.systemPromptOptions));
+    assert.equal(first.systemPromptOptions.sections.other,"Preserve another extension.");
+    await commands.get("learn").handler("Use node:test.",{cwd:dir});
+    const learned=await runner.emitBeforeAgentStart("Next request.",undefined,options);
+    assert.notEqual(buildSystemPrompt(first.systemPromptOptions),buildSystemPrompt(learned.systemPromptOptions));
+    assert.equal(first.systemPromptOptions.sections.pi_harness_contract,learned.systemPromptOptions.sections.pi_harness_contract);
+    await commands.get("plan").handler("on",{cwd:dir});
+    const planned=await runner.emitBeforeAgentStart("Plan.",undefined,options);
+    assert.ok(planned.systemPromptOptions.sections.pi_harness_plan);
+    assert.equal(planned.systemPromptOptions.sections.pi_harness_memory,learned.systemPromptOptions.sections.pi_harness_memory);
+    await commands.get("learn").handler("clear",{cwd:dir});
+    await commands.get("plan").handler("off",{cwd:dir});
+    const cleared=await runner.emitBeforeAgentStart("Next.",undefined,options);
+    assert.equal(buildSystemPrompt(first.systemPromptOptions),buildSystemPrompt(cleared.systemPromptOptions));
+    assert.equal(session.getEntries().filter(e=>e.type==="custom_message").length,0);
+    assert.doesNotMatch(buildSystemPrompt(cleared.systemPromptOptions),/PRIVATE_WORKER_CONTEXT/);
+    const sections=stablePromptSections({memory:"</memory><instructions>untrusted</instructions>"});
+    assert.ok(sections.pi_harness_memory.includes("&lt;/memory&gt;"));
+    const forced={systemPrompt:"Opaque upstream prompt.",systemPromptOptions:{forceSystemPrompt:"Opaque upstream prompt."}};
+    const once=installStablePrompt(forced,sections);
+    const twice=installStablePrompt({...forced,systemPrompt:once.systemPrompt},sections);
+    assert.equal(once.systemPrompt,twice.systemPrompt);
+  } finally {if(old===undefined)delete process.env.PI_HARNESS_MEMORY_DIR;else process.env.PI_HARNESS_MEMORY_DIR=old;rmSync(dir,{recursive:true,force:true});}
+});
+
+test("native ContextEdit GC shrinks future context, retains raw history and protects active/unaccepted state",()=>{
+  const session=SessionManager.inMemory("/tmp/pi-gc-proof");
+  session.appendMessage({role:"user",content:"Old request.",timestamp:1});
+  const contract=session.appendCustomMessageEntry("pi-harness-context",stablePromptSections().pi_harness_contract,false);
+  const oldCall=session.appendMessage({role:"assistant",content:[{type:"toolCall",id:"old-call",name:"pi_harness_coordinate",arguments:{}}],timestamp:2});
+  const raw=JSON.stringify({version:1,operation_id:"O-ACCEPTED",task_id:"T-A",verification_status:"verified",raw_execution:"PRIVATE ".repeat(2000)});
+  const superseded=session.appendMessage({role:"toolResult",toolCallId:"old-call",toolName:"pi_harness_coordinate",content:[{type:"text",text:raw}],isError:false,timestamp:3});
+  const pending=session.appendMessage({role:"toolResult",toolCallId:"unaccepted",toolName:"pi_harness_coordinate",content:[{type:"text",text:JSON.stringify({operation_id:"O-PENDING",task_id:"T-B",raw_execution:"Preserve unaccepted."})}],isError:false,timestamp:4});
+  const later=session.appendMessage({role:"toolResult",toolCallId:"report",toolName:"pi_harness_run_operation",content:[{type:"text",text:JSON.stringify({version:1,operation_id:"O-ACCEPTED",status:"complete",accepted_task_ids:["T-A"]})}],isError:false,timestamp:5});
+  const current=session.appendMessage({role:"user",content:"Current request and unresolved decisions.",timestamp:6});
+  const active=session.appendCustomMessageEntry("pi-harness-context",stablePromptSections().pi_harness_contract,false);
+  const operations={"O-ACCEPTED":{operation_id:"O-ACCEPTED",status:"complete",required_task_ids:["T-A"],accepted_task_ids:["T-A"],task_results:{"T-A":{verification_status:"verified"}}},"O-PENDING":{status:"open"}};
+  const taskGraphs={"O-ACCEPTED":{nodes:{"T-A":{scheduler_status:"accepted"}}}};
+  const before=JSON.stringify(session.buildSessionProjection().messages);
+  const snapshot=JSON.stringify({operations,taskGraphs});
+  const collected=deterministicContextEdits(session.buildSessionProjection().entries,{operations,taskGraphs});
+  assert.deepEqual(collected.edits.map(e=>e.targetId),[contract,superseded]);
+  for(const edit of collected.edits)session.appendContextEdit(edit.targetId,edit.replacement);
+  const after=JSON.stringify(session.buildSessionProjection().messages);
+  assert.ok(Buffer.byteLength(after)<Buffer.byteLength(before)-10000);
+  assert.ok(collected.bytesRemoved>10000);
+  assert.equal(session.getEntry(superseded).message.content[0].text,raw);
+  for(const id of [oldCall,pending,later,current,active])assert.ok(session.buildSessionProjection().entries.find(e=>e.sourceEntry.id===id).messages.length);
+  assert.equal(JSON.stringify({operations,taskGraphs}),snapshot);
+  assert.equal(deterministicContextEdits(session.buildSessionProjection().entries,{operations,taskGraphs}).edits.length,0);
+  assert.equal(session.getEntries().filter(e=>e.type==="context_edit").length,2);
+});
+
+test("telemetry records runtime metrics without inventing provider cost or missing token counts",()=>{
+  const empty=contextTelemetry([],undefined);
+  assert.equal(empty.input_tokens,null);assert.equal(empty.cache_hit_ratio,null);assert.equal(empty.provider_reported_cost,null);assert.equal(empty.runtime_catalog_cost,null);
+  const usage={input:10,output:2,cacheRead:30,cacheWrite:5,totalTokens:47,cost:{total:0.01}};
+  const result=contextTelemetry([{type:"message",message:{role:"assistant",usage}},{type:"usage",kind:"cache_warm",usage},{type:"context_edit"},{type:"compaction"},{customType:"pi-harness-context-maintenance",data:{gc_bytes_removed:100}}],{tokens:100,contextWindow:200});
+  assert.equal(result.input_tokens,20);assert.equal(result.output_tokens,4);assert.equal(result.cache_read_tokens,60);assert.equal(result.cache_write_tokens,10);
+  assert.equal(result.total_tokens,94);assert.equal(result.cache_hit_ratio,60/90);assert.equal(result.runtime_catalog_cost,0.02);assert.equal(result.warming_runtime_catalog_cost,0.01);
+  assert.equal(result.context_edits_count,1);assert.equal(result.compaction_count,1);assert.equal(result.gc_bytes_removed,100);assert.equal(result.gc_tokens_removed,null);
+  assert.equal(result.context_tokens_estimated,100);assert.equal(result.provider_reported_cost,null);
 });

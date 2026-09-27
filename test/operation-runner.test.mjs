@@ -1,20 +1,24 @@
+import { mockSettlement } from "./helpers/mock-settlement.mjs";
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import harness from "../extensions/pi-harness.ts";
-import { createOperation } from "../lib/operation.mjs";
-import { coordinatorPrompt, coordinatorState, operationBrief, operationReport, parseCoordinatorDecision, runOperation } from "../lib/operation-runner.mjs";
+import { createOperation as registerOperation } from "../lib/operation.mjs";
+import { coordinatorPrompt, coordinatorState, MAX_COORDINATOR_TURNS, operationBrief, operationReport, parseCoordinatorDecision, runOperation } from "../lib/operation-runner.mjs";
 import { cancelCoordinateTasks, executeCoordinateTask, executeCoordinatorTurn, hasActiveCoordinateTasks } from "../lib/coordinator.mjs";
-import { blockGraphTask, createTaskGraph, TASK_GRAPH_ENTRY } from "../lib/task-graph.mjs";
+import { blockGraphTask, createTaskGraph, TASK_GRAPH_ENTRY, validateTaskGraph } from "../lib/task-graph.mjs";
 import { readEvidence } from "../lib/evidence.mjs";
 
 const dir = mkdtempSync(join(tmpdir(), "pi-phasee-test-"));
 const prior = process.env.PI_HARNESS_EVIDENCE_DIR;
 process.env.PI_HARNESS_EVIDENCE_DIR = dir;
 after(() => { if (prior === undefined) delete process.env.PI_HARNESS_EVIDENCE_DIR; else process.env.PI_HARNESS_EVIDENCE_DIR = prior; rmSync(dir, { recursive: true, force: true }); });
-const op = () => createOperation({ operation_id: "O-1", objective: "Check reports.", required_task_ids: ["T-1", "T-2"], dependencies: { "T-2": ["T-1"] }, acceptance_criteria: ["The Coordinator checked the result."] });
+// Test fixtures register trusted fields explicitly; production has no defaults.
+const fixtureSpecs = input => Object.fromEntries(Object.entries(input.task_intents ?? {}).map(([id]) => [id, { owner: "research", permission: "read", verification: "Inspect report.", acceptance_criteria: ["The report identifies \u0060lib/coordinator.mjs\u0060."] }]));
+const createOperation = input => registerOperation({ ...input, task_specs: input.task_specs ?? fixtureSpecs(input) });
+const op = () => createOperation({ operation_id: "O-1", objective: "Check reports.", required_task_ids: ["T-1", "T-2"], dependencies: { "T-2": ["T-1"] }, acceptance_criteria: ["The Coordinator checked the result."], task_intents: { "T-1": "Inspect `lib/coordinator.mjs`.", "T-2": "Inspect `lib/coordinator.mjs`." } });
 const decision = (action, fields = {}) => JSON.stringify({ version: 1, operation_id: "O-1", action, reason: "The Coordinator checked the Operation state.", ...fields });
 const task = (id) => ({ task_id: id, owner: "research", scope: "Inspect `lib/coordinator.mjs`.", permission: "read", verification: "Inspect report.", acceptance_criteria: ["The report identifies `lib/coordinator.mjs`."] });
 
@@ -25,15 +29,18 @@ test("Coordinator packet contains bounded semantic state, not transcripts", () =
   assert.deepEqual(packet.OperationBrief.ready_task_ids, ["T-1"]);
   assert.deepEqual(packet.OperationBrief.pending_task_ids, ["T-2"]);
   assert.match(coordinatorPrompt(packet), /Every decision must include version, operation_id, action, and a nonempty reason/);
-  assert.match(coordinatorPrompt(packet), /Use each exact OperationBrief\.task_intents value as the scope input/);
-  assert.match(coordinatorPrompt(packet), /owner value must be exactly scout, research, or worker/);
-  assert.match(coordinatorPrompt(packet), /A write Worker uses owner worker and permission write/);
+  assert.match(coordinatorPrompt(packet), /Harness uses each exact OperationBrief\.task_intents value as the scope/);
+  assert.match(coordinatorPrompt(packet), /ASD-STE100-derived Agent English/);
+  assert.match(coordinatorPrompt(packet), /Put a condition before the action that depends on it/);
+  assert.match(coordinatorPrompt(packet), /Harness resolves trusted registered TaskSpecs/);
   assert.ok(!coordinatorPrompt(packet).includes("raw Worker transcript"));
   const profile = readFileSync(".pi/agents/coordinator.md", "utf8");
   assert.match(profile, /tools: read/);
   assert.match(profile, /extensions: false/);
   assert.match(profile, /skills: false/);
   assert.doesNotMatch(profile, /tools:.*\b(?:bash|write|edit|Agent)\b/);
+  assert.match(profile, /ASD-STE100-derived Agent English/);
+  assert.match(profile, /Only the Coordinator may accept a verified TaskResult/);
 });
 
 test("operationBrief exposes validated Operation constraints and Task intents unchanged", () => {
@@ -82,9 +89,77 @@ test("pi-subagents 0.19.0 RPC cannot safely resume a completed Coordinator sessi
 });
 
 test("malformed or unauthorized CoordinatorDecision fails closed", () => {
-  for (const raw of ["not JSON", decision("dispatch", { task: task("UNKNOWN") }), decision("dispatch", { task: { ...task("T-1"), owner: "write Worker", permission: "write" } }), decision("accept_task", { task_id: "UNKNOWN" }), decision("report", { mission_complete: true }), decision("accept_task", { task_id: "T-1", task: task("T-1") }), JSON.stringify({ version: 1, operation_id: "O-1", action: "block", blocked_action: "dispatch", required_condition: "the registered Task intent is available" }), JSON.stringify({ ...JSON.parse(decision("report")), operation_id: "O-foreign" })]) assert.throws(() => parseCoordinatorDecision(raw, op()));
+  for (const raw of ["not JSON", decision("dispatch", { task: task("UNKNOWN") }), decision("dispatch", { task: { ...task("T-1"), owner: "write Worker", permission: "write" } }), decision("dispatch", { task: { task_id: "T-1", owner: "research", scope: "Inspect.", permission: "read", verification: "Check." } }), decision("accept_task", { task_id: "UNKNOWN" }), decision("report", { mission_complete: true }), decision("accept_task", { task_id: "T-1", task: task("T-1") }), JSON.stringify({ version: 1, operation_id: "O-1", action: "block", blocked_action: "dispatch", required_condition: "the registered Task intent is available" }), JSON.stringify({ ...JSON.parse(decision("report")), operation_id: "O-foreign" })]) assert.throws(() => parseCoordinatorDecision(raw, op()));
   const state = coordinatorState(op());
   assert.deepEqual(Object.keys(state).sort(), ["blocker", "decisions", "operation_id", "turns", "version"]);
+});
+
+test("Coordinator decision repair is bounded; dispatch uses the registered intent and shared Constraints", async () => {
+  const operation = createOperation({ operation_id: "O-1", objective: "Inspect the registered source.", required_task_ids: ["T-1"], task_specs: { "T-1": { owner: "research", permission: "read", verification: "Check the report.", acceptance_criteria: ["The report identifies the source."] } }, constraints: ["Do not run shell commands."], task_intents: { "T-1": "Inspect the exact registered source." } });
+  const validTask = { task_id: "T-1", owner: "research", scope: "Inspect the exact registered source.", permission: "read", verification: "Check the report.", acceptance_criteria: ["The report identifies the source."] };
+  assert.throws(() => parseCoordinatorDecision(decision("dispatch", { task: { ...validTask, scope: "Coordinator changed the exact scope." } }), operation), /registered Task intent/);
+  assert.throws(() => parseCoordinatorDecision(decision("dispatch", { task: { ...validTask, constraints: ["Coordinator added a Constraint."] } }), operation), /shared Operation Constraints/);
+  const unscoped = createOperation({ operation_id: "O-1", objective: "No registered intent.", required_task_ids: ["T-1"] });
+  assert.throws(() => parseCoordinatorDecision(decision("dispatch", { task: validTask }), unscoped), /registered Task intent/);
+
+  const prompts = [], snapshots = [];
+  let dispatched;
+  const report = await runOperation(operation, {
+    turn: async (prompt) => {
+      prompts.push(prompt);
+      if (prompts.length === 1) return decision("dispatch", { task: { ...validTask, scope: "Coordinator changed the exact scope." } });
+      if (prompts.length === 2) {
+        assert.match(prompt, /Repair Required:.*registered Task intent/);
+        assert.ok(!prompt.includes("Coordinator changed the exact scope."));
+        return decision("dispatch", { task: validTask });
+      }
+      return decision("accept_task", { task_id: "T-1" });
+    },
+    dispatch: async (taskOrder) => {
+      dispatched = taskOrder;
+      return { version: 1, operation_id: "O-1", task_id: "T-1", execution_status: "execution_complete", verification_status: "verified", evidence_refs: [] };
+    },
+    save: (_operation, state) => snapshots.push(state.turns),
+  });
+  assert.equal(report.status, "complete");
+  assert.deepEqual(dispatched.constraints, ["Do not run shell commands."]);
+  assert.equal(dispatched.scope, "Inspect the exact registered source.");
+  assert.ok(snapshots.includes(1) && snapshots.includes(2) && snapshots.includes(3));
+});
+
+test("Coordinator RPC failure exposes only a bounded failure code", async () => {
+  const report = await runOperation(op(), {
+    turn: async () => { throw Object.assign(new Error("private provider failure"), { code: "HARNESS_RPC_TIMEOUT" }); },
+  });
+  assert.equal(report.failure_code, "HARNESS_RPC_TIMEOUT");
+  assert.ok(!JSON.stringify(report).includes("private provider failure"));
+});
+
+test("invalid Coordinator output receives only one repair attempt", async () => {
+  let calls = 0;
+  let latestState;
+  const report = await runOperation(op(), {
+    turn: async () => { calls++; return "not JSON"; },
+    save: (_operation, state) => { latestState = state; },
+  });
+  assert.equal(calls, 2);
+  assert.equal(latestState.turns, 2);
+  assert.match(report.blocker, /valid CoordinatorDecision/);
+  assert.equal(report.failure_code, "HARNESS_COORDINATOR_DECISION_INVALID");
+});
+
+test("Coordinator repairs consume the same persisted turn limit", async () => {
+  let calls = 0;
+  let saved;
+  const operation = op();
+  const state = { ...coordinatorState(operation), turns: MAX_COORDINATOR_TURNS - 1 };
+  const report = await runOperation(operation, {
+    turn: async () => { calls++; return "not JSON"; },
+    save: (_operation, nextState) => { saved = nextState; },
+  }, { state });
+  assert.equal(calls, 1, "the final allowed call cannot be followed by a repair beyond the turn limit");
+  assert.equal(saved.turns, MAX_COORDINATOR_TURNS);
+  assert.equal(report.status, "blocked");
 });
 
 test("Coordinator cannot dispatch an unregistered TaskOrder", async () => {
@@ -110,6 +185,27 @@ test("Harness rejects Dependency bypass and unverified acceptance", async () => 
   assert.equal(reports[0].commander_action_required, true);
 });
 
+test("Verification Status enters verifying while Execution Status stays separate", async () => {
+  const operation = createOperation({ operation_id: "O-1", objective: "Verify the read-only report.", required_task_ids: ["T-1"], task_intents: { "T-1": "Inspect `lib/coordinator.mjs`." } });
+  const snapshots = [];
+  let turn = 0;
+  const report = await runOperation(operation, {
+    turn: async () => turn++ === 0 ? decision("dispatch", { task: task("T-1") }) : decision("accept_task", { task_id: "T-1" }),
+    dispatch: async (order, progress) => {
+      progress.onVerificationStart();
+      return { version: 1, operation_id: "O-1", task_id: order.task_id, execution_status: "execution_complete", verification_status: "verified", evidence_refs: [] };
+    },
+    save: (_operation, _state, graph) => snapshots.push(structuredClone(graph)),
+  });
+  assert.equal(report.status, "complete");
+  const checking = snapshots.find((graph) => graph.nodes["T-1"].verification_status === "verifying");
+  assert.ok(checking);
+  assert.equal(checking.nodes["T-1"].scheduler_status, "running");
+  assert.equal(checking.nodes["T-1"].verification_status, "verifying");
+  assert.equal(Object.hasOwn(checking.nodes["T-1"], "execution_status"), false);
+  assert.ok(snapshots.some((graph) => graph.nodes["T-1"].scheduler_status === "result_available" && !Object.hasOwn(graph.nodes["T-1"], "verification_status")));
+});
+
 test("strategic block escalates, but ordinary retry failure stays operational", async () => {
   const blocked = await runOperation(op(), { turn: async () => decision("block", { blocked_action: "change Mission scope", required_condition: "the Commander approves the scope change", question: "May the Coordinator change the Mission scope?" }) });
   assert.equal(blocked.status, "blocked");
@@ -119,13 +215,46 @@ test("strategic block escalates, but ordinary retry failure stays operational", 
 
 test("OperationReport promotes only bounded structured Scheduler Blockers", () => {
   const operation = op();
-  const graph = blockGraphTask(createTaskGraph(operation), operation, "T-1", "resolve an unknown child outcome", "the Commander checks the child outcome and creates a fresh TaskOrder for continuation");
+  const graph = blockGraphTask(createTaskGraph(operation), operation, "T-1", "resolve an unknown child outcome", "the Commander checks the child outcome and replans with a fresh Task ID", "HARNESS_UNKNOWN", undefined, "unknown");
   const report = operationReport(operation, coordinatorState(operation), "The TaskOrder outcome is unknown.", undefined, graph);
   assert.deepEqual(report.blocked_task_ids, ["T-1"]);
-  assert.deepEqual(report.scheduler_blockers, [{ task_id: "T-1", blocked_action: "resolve an unknown child outcome", required_condition: "the Commander checks the child outcome and creates a fresh TaskOrder for continuation" }]);
-  assert.deepEqual(Object.keys(report.scheduler_blockers[0]).sort(), ["blocked_action", "required_condition", "task_id"]);
+  assert.deepEqual(report.scheduler_blockers, [{ task_id: "T-1", blocked_action: "resolve an unknown child outcome", required_condition: "the Commander checks the child outcome and replans with a fresh Task ID", failure_code: "HARNESS_UNKNOWN", child_status: "unknown" }]);
+  assert.deepEqual(Object.keys(report.scheduler_blockers[0]).sort(), ["blocked_action", "child_status", "failure_code", "required_condition", "task_id"]);
   assert.equal(Buffer.byteLength(JSON.stringify(report)) <= 24_000, true);
   assert.equal(JSON.stringify(report).includes("raw_evidence"), false);
+});
+
+test("timed-out Worker disposition is bounded and carried into the OperationReport", async () => {
+  const operation = createOperation({ operation_id: "O-1", objective: "Report a partial Worker branch.", task_specs: { "T-1": { ...fixtureSpecs({task_intents:{"T-1":"Inspect."}})["T-1"], owner: "worker", permission: "write" } }, required_task_ids: ["T-1"], task_intents: { "T-1": "Inspect the partial Worker branch." } });
+  const child_disposition = { branch_status: "preserved", branch: "pi-agent-partial", commit_sha: "b".repeat(40), commit_count: 1, worktree_status: "unknown" };
+  const snapshots = [];
+  const report = await runOperation(operation, {
+    turn: async () => decision("dispatch", { task: { ...task("T-1"), owner: "worker", scope: operation.task_intents["T-1"], permission: "write" } }),
+    dispatch: async () => { throw Object.assign(new Error("private child details and /tmp/private/worktree"), { code: "HARNESS_CHILD_SETTLEMENT_TIMEOUT", child_disposition }); },
+    save: (_operation, _state, graph) => snapshots.push(JSON.parse(JSON.stringify(graph))),
+  });
+  assert.deepEqual(report.scheduler_blockers[0].child_disposition, child_disposition);
+  assert.equal(report.scheduler_blockers[0].child_status, "unknown");
+  assert.deepEqual(validateTaskGraph(snapshots.at(-1), operation).nodes["T-1"].blocker.child_disposition, child_disposition);
+  assert.ok(!JSON.stringify(report).includes("/tmp/private"));
+  assert.ok(!JSON.stringify(report).includes("private child details"));
+});
+
+test("cancelled Worker wave blocks promotion but retains the reported branch disposition", async () => {
+  const operation = createOperation({ operation_id: "O-1", objective: "Cancel a partial Worker result.", task_specs: { "T-1": { ...fixtureSpecs({task_intents:{"T-1":"Inspect."}})["T-1"], owner: "worker", permission: "write" } }, required_task_ids: ["T-1"], task_intents: { "T-1": "Inspect the partial Worker branch." } });
+  const controller = new AbortController();
+  const report = await runOperation(operation, {
+    turn: async () => decision("dispatch", { task: { ...task("T-1"), owner: "worker", scope: operation.task_intents["T-1"], permission: "write" } }),
+    dispatch: async () => {
+      controller.abort();
+      return { failure_code: "HARNESS_CANCELLED", artifact_refs: ["pi-agent-partial"] };
+    },
+  }, { signal: controller.signal });
+  assert.equal(report.status, "blocked");
+  assert.deepEqual(report.accepted_task_ids, []);
+  assert.equal(report.scheduler_blockers[0].failure_code, "HARNESS_CANCELLED");
+  assert.equal(report.scheduler_blockers[0].child_status, "cancelled");
+  assert.deepEqual(report.scheduler_blockers[0].child_disposition, { branch_status: "preserved", branch: "pi-agent-partial", worktree_status: "unknown" });
 });
 
 test("Scheduler Blocker projection stays within the existing report size bound", () => {
@@ -136,44 +265,74 @@ test("Scheduler Blocker projection stays within the existing report size bound",
   const report = operationReport(operation, coordinatorState(operation), "The TaskOrders are blocked.", undefined, graph);
   assert.deepEqual(report.blocked_task_ids, ids);
   assert.ok(report.scheduler_blockers.length < ids.length);
-  assert.ok(Buffer.byteLength(JSON.stringify(report)) <= 24_000);
+  const failedOperation = { ...operation, task_results: Object.fromEntries(ids.map((task_id) => [task_id, { task_id, failure_code: "HARNESS_UNKNOWN" }])) };
+  const withFailureCodes = operationReport(failedOperation, coordinatorState(operation), "The TaskOrders are blocked.", undefined, graph);
+  assert.ok(withFailureCodes.failure_codes.length <= 32);
+  assert.ok(Buffer.byteLength(JSON.stringify(withFailureCodes)) <= 24_000);
 });
 
 test("an unbound child completion cannot become a managed TaskResult", async () => {
-  const operation = createOperation({ operation_id: "O-1", objective: "Verify lineage.", required_task_ids: ["T-1"] });
+  const operation = createOperation({ operation_id: "O-1", objective: "Verify lineage.", required_task_ids: ["T-1"], task_intents: { "T-1": "Inspect `lib/coordinator.mjs`." } });
   const report = await runOperation(operation, {
     turn: async () => decision("dispatch", { task: task("T-1") }),
     dispatch: async () => ({ version: 1, operation_id: "O-foreign", task_id: "T-1", execution_status: "execution_complete", verification_status: "verified", evidence_refs: [] }),
   });
   assert.equal(report.status, "blocked");
   assert.deepEqual(report.accepted_task_ids, []);
-  assert.deepEqual(report.scheduler_blockers, [{ task_id: "T-1", blocked_action: "resolve an unknown child outcome", required_condition: "the Commander checks the child outcome and creates a fresh TaskOrder for continuation" }]);
+  assert.deepEqual(report.scheduler_blockers, [{ task_id: "T-1", blocked_action: "resolve an unknown child outcome", required_condition: "the Commander checks the child outcome and replans with a fresh Task ID", failure_code: "HARNESS_LINEAGE_MISMATCH", child_status: "unknown" }]);
+});
+
+test("a rejected spawn is blocked as a confirmed child startup failure", async () => {
+  const operation = createOperation({ operation_id: "O-1", objective: "Verify spawn failure.", required_task_ids: ["T-1"], task_intents: { "T-1": "Inspect `lib/coordinator.mjs`." } });
+  const report = await runOperation(operation, {
+    turn: async () => decision("dispatch", { task: task("T-1") }),
+    dispatch: async () => { throw Object.assign(new Error("private startup detail"), { childOutcome: "spawn_rejected" }); },
+  });
+  assert.deepEqual(report.accepted_task_ids, []);
+  assert.deepEqual(report.scheduler_blockers, [{ task_id: "T-1", blocked_action: "resolve the confirmed child spawn failure", required_condition: "the Commander resolves the bounded spawn failure and replans with a fresh Task ID", failure_code: "HARNESS_CHILD_SPAWN_FAILED" }]);
+  assert.ok(!JSON.stringify(report).includes("private startup detail"));
+});
+
+test("a child acknowledged after spawn timeout remains blocked without a TaskResult", async () => {
+  const operation = createOperation({ operation_id: "O-1", objective: "Verify late child outcome.", required_task_ids: ["T-1"], task_intents: { "T-1": "Inspect `lib/coordinator.mjs`." } });
+  let restoredGraph;
+  const report = await runOperation(operation, {
+    turn: async () => decision("dispatch", { task: task("T-1") }),
+    dispatch: async () => { throw Object.assign(new Error("bounded timeout"), { code: "HARNESS_RPC_TIMEOUT", childSettled: true, childStatus: "stopped" }); },
+    save: (_operation, _state, graph) => { restoredGraph = JSON.parse(JSON.stringify(graph)); },
+  });
+  assert.deepEqual(report.accepted_task_ids, []);
+  assert.deepEqual(report.scheduler_blockers, [{ task_id: "T-1", blocked_action: "resolve the settled child outcome", required_condition: "the child reached terminal status stopped; the Commander records this outcome without accepting a TaskResult and replans with a fresh Task ID", failure_code: "HARNESS_RPC_TIMEOUT", child_status: "stopped" }]);
+  assert.equal(restoredGraph.nodes["T-1"].blocker.failure_code, "HARNESS_RPC_TIMEOUT");
+  validateTaskGraph(restoredGraph, operation);
+  assert.ok(!JSON.stringify(report).includes("childStatus"));
 });
 
 test("a timed-out child remains blocked with bounded timeout provenance, not a TaskResult", async () => {
-  const operation = createOperation({ operation_id: "O-1", objective: "Verify timeout.", required_task_ids: ["T-1"] });
+  const operation = createOperation({ operation_id: "O-1", objective: "Verify timeout.", required_task_ids: ["T-1"], task_intents: { "T-1": "Inspect `lib/coordinator.mjs`." } });
   const report = await runOperation(operation, {
     turn: async () => decision("dispatch", { task: task("T-1") }),
     dispatch: async () => { throw Object.assign(new Error("private child output"), { code: "HARNESS_CHILD_TERMINAL_TIMEOUT" }); },
   });
   assert.deepEqual(report.accepted_task_ids, []);
-  assert.deepEqual(report.scheduler_blockers.map(({ task_id, blocked_action }) => ({ task_id, blocked_action })), [{ task_id: "T-1", blocked_action: "resolve an unknown child outcome" }]);
+  assert.deepEqual(report.scheduler_blockers.map(({ task_id, blocked_action, failure_code }) => ({ task_id, blocked_action, failure_code })), [{ task_id: "T-1", blocked_action: "resolve an unknown child outcome", failure_code: "HARNESS_CHILD_TERMINAL_TIMEOUT" }]);
   assert.match(report.scheduler_blockers[0].required_condition, /terminal wait timed out/);
   assert.ok(!JSON.stringify(report).includes("private child output"));
 });
 
 test("Harness bounds repeated failed TaskOrders without an infinite loop", async () => {
   let spawns = 0;
-  const report = await runOperation(createOperation({ operation_id: "O-1", objective: "Retry task.", required_task_ids: ["T-1"] }), {
+  const report = await runOperation(createOperation({ operation_id: "O-1", objective: "Retry task.", required_task_ids: ["T-1"], task_intents: { "T-1": "Inspect `lib/coordinator.mjs`." } }), {
     turn: async (prompt) => JSON.parse(prompt.slice(prompt.indexOf('{"OperationBrief"'))).OperationBrief.result_available_task_ids.includes("T-1")
       ? decision("reject_task", { task_id: "T-1" }) : decision("dispatch", { task: task("T-1") }),
-    dispatch: async () => { spawns++; return { task_id: "T-1", operation_id: "O-1", execution_status: "execution_complete", verification_status: "failed", evidence_refs: [] }; },
+    dispatch: async () => { spawns++; return { task_id: "T-1", operation_id: "O-1", execution_status: "execution_complete", verification_status: "failed", failure_code: "HARNESS_VERIFIER_FAILED", evidence_refs: [] }; },
   });
   assert.equal(spawns, 2);
   assert.equal(report.status, "blocked");
   assert.match(report.blocker, /retry limit/);
   assert.equal(report.escalation, undefined);
   assert.equal(report.accepted_task_ids.length, 0);
+  assert.deepEqual(report.failure_codes, [{ task_id: "T-1", failure_code: "HARNESS_VERIFIER_FAILED" }]);
 });
 
 function fakePi(entries = []) {
@@ -184,7 +343,7 @@ function fakePi(entries = []) {
     on(name, handler) { lifecycle.set(name, handler); },
     events: {
       on(name, handler) { const set = events.get(name) ?? new Set(); set.add(handler); events.set(name, set); return () => set.delete(handler); },
-      emit(name, payload) { for (const handler of [...(events.get(name) ?? [])]) handler(payload); },
+      emit(name, payload) { if (this.mockSettlement !== false) mockSettlement(name, payload); for (const handler of [...(events.get(name) ?? [])]) handler(payload); },
     },
   };
   harness(pi);
@@ -192,7 +351,10 @@ function fakePi(entries = []) {
   pi.sessionStart(entries);
   return pi;
 }
-const call = async (pi, tool, input, signal) => JSON.parse((await pi.tools.get(tool).execute("id", input, signal)).content[0].text);
+const call = async (pi, tool, input, signal) => {
+  if (tool === "pi_harness_operation" && input.action === "create") input = { ...input, task_specs: input.task_specs ?? fixtureSpecs(input) };
+  return JSON.parse((await pi.tools.get(tool).execute("id", input, signal)).content[0].text);
+};
 
 test("a legacy Operation entry migrates to TaskGraph without resetting accepted TaskResults", () => {
   const operation = op();
@@ -216,36 +378,52 @@ test("a legacy Operation entry migrates to TaskGraph without resetting accepted 
 
 test("timed-out parallel Task aborts only its child; late completion cannot change the TaskGraph", async () => {
   const pi = fakePi();
-  const operation = createOperation({ operation_id: "O-1", objective: "Check parallel timeout.", required_task_ids: ["T-1", "T-2"] });
+  const operation = createOperation({ operation_id: "O-1", objective: "Check parallel timeout.", required_task_ids: ["T-1", "T-2"], task_intents: { "T-1": "Inspect `lib/coordinator.mjs`.", "T-2": "Inspect `lib/coordinator.mjs`." } });
   let graphSnapshot, operationSnapshot;
-  const requests = new Map();
+  const requests = new Map(), records = new Map(), resolvers = new Map();
+  const managerKey = Symbol.for("pi-subagents:manager");
+  const previousManager = globalThis[managerKey];
+  globalThis[managerKey] = { getRecord: (id) => records.get(id) };
   pi.events.on("subagents:rpc:spawn", (req) => {
     const id = req.prompt.includes("TaskOrder T-1") ? "slow" : "fast";
+    const record = { status: "running", promise: new Promise((resolve) => resolvers.set(id, resolve)) };
+    records.set(id, record);
     requests.set(id, req);
     pi.events.emit(`subagents:rpc:spawn:reply:${req.requestId}`, { success: true, data: { id } });
-    if (id === "fast") setTimeout(() => pi.events.emit("subagents:completed", { id, status: "completed", result: "Verified only as execution." }), 5);
-    else req.options.signal.addEventListener("abort", () => pi.events.emit("subagents:failed", { id, status: "stopped" }), { once: true });
+    if (id === "fast") setTimeout(() => {
+      record.status = "completed"; resolvers.get(id)();
+      pi.events.emit("subagents:completed", { id, status: "completed", result: "Verified only as execution." });
+    }, 5);
+    else req.options.signal.addEventListener("abort", () => {
+      record.status = "stopped"; resolvers.get(id)();
+      pi.events.emit("subagents:failed", { id, status: "stopped" });
+    }, { once: true });
   });
-  const report = await runOperation(operation, {
-    turn: async (prompt) => {
-      const brief = JSON.parse(prompt.slice(prompt.indexOf('{"OperationBrief"'))).OperationBrief;
-      return brief.ready_task_ids.length === 2 ? decision("dispatch_batch", { tasks: [task("T-1"), task("T-2")] }) : decision("report");
-    },
-    dispatch: async (selected) => (await executeCoordinateTask(pi, selected, { timeout: 100, rpcTimeout: 1000 })).taskResult,
-    save: (nextOperation, _state, graph) => { operationSnapshot = nextOperation; graphSnapshot = graph; },
-  });
-  assert.equal(report.status, "blocked");
-  assert.equal(requests.get("slow").options.signal.aborted, true);
-  assert.equal(requests.get("fast").options.signal.aborted, false);
-  assert.equal(graphSnapshot.nodes["T-1"].scheduler_status, "blocked");
-  assert.equal(graphSnapshot.nodes["T-2"].scheduler_status, "result_available");
-  assert.equal(operationSnapshot.task_results["T-1"], undefined);
-  assert.deepEqual(report.scheduler_blockers.map((item) => item.task_id), ["T-1"]);
-  assert.equal(hasActiveCoordinateTasks(), false);
-  const before = JSON.stringify([operationSnapshot, graphSnapshot]);
-  pi.events.emit("subagents:completed", { id: "slow", status: "completed", result: "LATE PRIVATE RESULT" });
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(JSON.stringify([operationSnapshot, graphSnapshot]), before);
+  try {
+    const report = await runOperation(operation, {
+      turn: async (prompt) => {
+        const brief = JSON.parse(prompt.slice(prompt.indexOf('{"OperationBrief"'))).OperationBrief;
+        return brief.ready_task_ids.length === 2 ? decision("dispatch_batch", { tasks: [task("T-1"), task("T-2")] }) : decision("report");
+      },
+      dispatch: async (selected) => (await executeCoordinateTask(pi, selected, { timeout: 100, rpcTimeout: 1000 })).taskResult,
+      save: (nextOperation, _state, graph) => { operationSnapshot = nextOperation; graphSnapshot = graph; },
+    });
+    assert.equal(report.status, "blocked");
+    assert.equal(requests.get("slow").options.signal.aborted, true);
+    assert.equal(requests.get("fast").options.signal.aborted, false);
+    assert.equal(graphSnapshot.nodes["T-1"].scheduler_status, "blocked");
+    assert.equal(graphSnapshot.nodes["T-2"].scheduler_status, "result_available");
+    assert.equal(operationSnapshot.task_results["T-1"], undefined);
+    assert.deepEqual(report.scheduler_blockers.map((item) => item.task_id), ["T-1"]);
+    assert.equal(hasActiveCoordinateTasks(), false);
+    const before = JSON.stringify([operationSnapshot, graphSnapshot]);
+    pi.events.emit("subagents:completed", { id: "slow", status: "completed", result: "LATE PRIVATE RESULT" });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(JSON.stringify([operationSnapshot, graphSnapshot]), before);
+  } finally {
+    if (previousManager === undefined) delete globalThis[managerKey];
+    else globalThis[managerKey] = previousManager;
+  }
 });
 
 test("goal cancellation aborts the Coordinator turn; an unrelated turn is unaffected", async () => {
@@ -259,13 +437,13 @@ test("goal cancellation aborts the Coordinator turn; an unrelated turn is unaffe
     request.options.signal.addEventListener("abort", () => pi.events.emit("subagents:failed", { id, status: "stopped" }), { once: true });
   });
   await pi.commands.get("goal").handler("Mission objective.", {});
-  await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-1", objective: "Check reports.", required_task_ids: ["T-1"] });
+  await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-1", objective: "Check reports.", required_task_ids: ["T-1"], task_intents: { "T-1": "Inspect `lib/coordinator.mjs`." } });
   const managed = call(pi, "pi_harness_run_operation", { operation_id: "O-1" });
   const unrelated = executeCoordinatorTurn(pi, "Unrelated OperationBrief", { groupId: "other", timeout: 1000, rpcTimeout: 1000 });
   for (let i = 0; i < 20 && requests.size < 2; i++) await new Promise((resolve) => setTimeout(resolve, 5));
   assert.equal(requests.size, 2);
-  await assert.rejects(() => call(pi, "pi_harness_operation", { action: "status", operation_id: "O-1" }), /owns this Operation/);
-  await assert.rejects(() => call(pi, "pi_harness_operation", { action: "accept_task", operation_id: "O-1", task_id: "T-1" }), /owns this Operation/);
+  await assert.rejects(() => call(pi, "pi_harness_operation", { action: "status", operation_id: "O-1" }), /Operation is running/);
+  await assert.rejects(() => pi.tools.get("pi_harness_operation").execute("test", { action: "accept_task", operation_id: "O-1", task_id: "T-1" }), /Only the Harness Coordinator/);
   await pi.commands.get("goal").handler("cancel", {});
   assert.equal([...requests.values()].find((value) => value.request.prompt.includes("O-1")).request.options.signal.aborted, true);
   const other = [...requests.values()].find((value) => value.request.prompt === "Unrelated OperationBrief");
@@ -280,7 +458,7 @@ test("goal cancellation aborts the Coordinator turn; an unrelated turn is unaffe
 
 test("switching sessions aborts the run without writing old Coordinator state into the new session", async () => {
   const pi = fakePi();
-  await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-1", objective: "Check reports.", required_task_ids: ["T-1"] });
+  await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-1", objective: "Check reports.", required_task_ids: ["T-1"], task_intents: { "T-1": "Inspect `lib/coordinator.mjs`." } });
   let request;
   pi.events.on("subagents:rpc:spawn", (next) => {
     request = next;
@@ -300,7 +478,7 @@ test("switching sessions aborts the run without writing old Coordinator state in
 
 test("Scheduler attempt budget survives Coordinator replacement and session restore", async () => {
   const pi = fakePi();
-  await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-1", objective: "Inspect report.", required_task_ids: ["T-1"] });
+  await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-1", objective: "Inspect report.", required_task_ids: ["T-1"], task_intents: { "T-1": "Inspect `lib/coordinator.mjs`." } });
   let stage = 0, counter = 0;
   const steps = [
     decision("dispatch", { task: task("T-1") }), decision("reject_task", { task_id: "T-1" }),
@@ -327,23 +505,29 @@ test("Scheduler attempt budget survives Coordinator replacement and session rest
   assert.equal(snapshot.task_graphs["O-1"].nodes["T-1"].scheduler_status, "exhausted");
 });
 
-test("old-session direct TaskResult cannot mutate a new session's TaskGraph", async () => {
+test("old managed TaskResult cannot mutate a new session's TaskGraph", async () => {
   const pi = fakePi();
-  await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-1", objective: "Old session.", required_task_ids: ["T-1"] });
-  let request;
-  pi.events.on("subagents:rpc:spawn", (next) => {
-    request = next;
-    pi.events.emit(`subagents:rpc:spawn:reply:${next.requestId}`, { success: true, data: { id: "old-worker" } });
-    next.options.signal.addEventListener("abort", () => pi.events.emit("subagents:failed", { id: "old-worker", status: "stopped" }), { once: true });
+  await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-1", objective: "Old session.", task_specs: { "T-1": { owner: "research", permission: "read", verification: "Inspect report.", acceptance_criteria: ["The report identifies the requested source."] } }, required_task_ids: ["T-1"], task_intents: { "T-1": "Inspect old session." } });
+  let workerRequest;
+  pi.events.on("subagents:rpc:spawn", (request) => {
+    const id = request.type === "coordinator" ? "old-coordinator" : "old-worker";
+    pi.events.emit(`subagents:rpc:spawn:reply:${request.requestId}`, { success: true, data: { id } });
+    if (request.type === "coordinator") {
+      queueMicrotask(() => pi.events.emit("subagents:completed", { id, status: "completed", result: decision("dispatch", { task: { ...task("T-1"), scope: "Inspect old session.", acceptance_criteria: ["The report identifies the requested source."] } }) }));
+    } else {
+      workerRequest = request;
+      request.options.signal.addEventListener("abort", () => pi.events.emit("subagents:failed", { id, status: "stopped" }), { once: true });
+    }
   });
-  const old = call(pi, "pi_harness_coordinate", { operation_id: "O-1", task_id: "T-1", owner: "research", permission: "read", scope: "Inspect old session.", verification: "Check the result." });
-  for (let i = 0; i < 20 && !request; i++) await new Promise((resolve) => setTimeout(resolve, 5));
-  assert.ok(request);
+  const oldRun = call(pi, "pi_harness_run_operation", { operation_id: "O-1" });
+  for (let i = 0; i < 30 && !workerRequest; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.ok(workerRequest);
   const nextEntries = [];
   pi.sessionStart(nextEntries);
+  assert.equal(workerRequest.options.signal.aborted, true);
+  assert.equal((await oldRun).status, "blocked");
   await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-1", objective: "New session.", required_task_ids: ["T-1"] });
-  await assert.rejects(old, /Old-session TaskResult/);
-  const snapshot = nextEntries.filter((entry) => entry.customType === TASK_GRAPH_ENTRY).at(-1).data;
+  const snapshot = pi.entries.filter((entry) => entry.customType === TASK_GRAPH_ENTRY).at(-1).data;
   assert.equal(snapshot.operations["O-1"].objective, "New session.");
   assert.equal(snapshot.task_graphs["O-1"].nodes["T-1"].attempts, 0);
   assert.equal(snapshot.task_graphs["O-1"].nodes["T-1"].scheduler_status, "ready");
@@ -352,12 +536,12 @@ test("old-session direct TaskResult cannot mutate a new session's TaskGraph", as
 test("goal cancellation aborts the active managed ExecutionUnit", async () => {
   const pi = fakePi();
   await pi.commands.get("goal").handler("Mission objective.", {});
-  await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-1", objective: "Inspect report.", required_task_ids: ["T-1"] });
+  await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-1", objective: "Inspect report.", task_specs: { "T-1": { owner: "research", permission: "read", verification: "Inspect report.", acceptance_criteria: ["The report identifies the requested source."] } }, required_task_ids: ["T-1"], task_intents: { "T-1": "Inspect report." } });
   let workerSignal;
   pi.events.on("subagents:rpc:spawn", (request) => {
     const id = request.type === "coordinator" ? "coord-1" : "worker-1";
     pi.events.emit(`subagents:rpc:spawn:reply:${request.requestId}`, { success: true, data: { id } });
-    if (request.type === "coordinator") queueMicrotask(() => pi.events.emit("subagents:completed", { id, status: "completed", result: decision("dispatch", { task: { task_id: "T-1", owner: "research", scope: "Inspect report.", permission: "read", verification: "Inspect report." } }) }));
+    if (request.type === "coordinator") queueMicrotask(() => pi.events.emit("subagents:completed", { id, status: "completed", result: decision("dispatch", { task: { task_id: "T-1", owner: "research", scope: "Inspect report.", permission: "read", verification: "Inspect report.", acceptance_criteria: ["The report identifies the requested source."] } }) }));
     else { workerSignal = request.options.signal; workerSignal.addEventListener("abort", () => pi.events.emit("subagents:failed", { id, status: "stopped" }), { once: true }); }
   });
   const pending = call(pi, "pi_harness_run_operation", { operation_id: "O-1" });
@@ -372,7 +556,7 @@ test("goal cancellation aborts the active managed ExecutionUnit", async () => {
 
 test("managed Operation cancellation aborts all claimed wave Tasks and blocks ghost-running nodes", async () => {
   const pi = fakePi();
-  await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-1", objective: "Cancel wave.", required_task_ids: ["T-1", "T-2"] });
+  await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-1", objective: "Cancel wave.", required_task_ids: ["T-1", "T-2"], task_intents: { "T-1": "Inspect `lib/coordinator.mjs`.", "T-2": "Inspect `lib/coordinator.mjs`." } });
   const active = [];
   pi.events.on("subagents:rpc:spawn", (req) => {
     const id = `agent-${active.length}-${req.type}`;
@@ -397,7 +581,7 @@ test("managed Operation cancellation aborts all claimed wave Tasks and blocks gh
 
 test("late results from both old-session parallel Tasks cannot overwrite the new session", async () => {
   const pi = fakePi();
-  await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-OLD", objective: "Old wave.", required_task_ids: ["T-1", "T-2"] });
+  await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-OLD", objective: "Old wave.", required_task_ids: ["T-1", "T-2"], task_intents: { "T-1": "Inspect `lib/coordinator.mjs`.", "T-2": "Inspect `lib/coordinator.mjs`." } });
   const workers = [];
   pi.events.on("subagents:rpc:spawn", (req) => {
     const id = req.type === "coordinator" ? "old-coordinator" : `old-${workers.length + 1}`;
@@ -453,7 +637,7 @@ test("managed Coordinator receives Operation inputs and dispatches a registered 
   const task_intents = { "T-1": "Implement stable prompt and deterministic context maintenance." };
   await call(pi, "pi_harness_operation", {
     action: "create", operation_id: "O-1", objective: "Implement context economics.",
-    required_task_ids: ["T-1"], constraints, task_intents,
+    required_task_ids: ["T-1"], constraints, task_intents, task_specs: { "T-1": { owner: "worker", permission: "write", verification: "true" } },
   });
   let workerRequest;
   let sequence = 0;
@@ -469,7 +653,7 @@ test("managed Coordinator receives Operation inputs and dispatches a registered 
         pi.events.emit("subagents:completed", {
           id, status: "completed",
           result: decision("dispatch", { task: {
-            task_id: "T-1", owner: "worker", scope: "Implement stable prompt sections.",
+            task_id: "T-1", owner: "worker", scope: "Implement stable prompt and deterministic context maintenance.",
             permission: "write", verification: "true",
           } }),
         });
@@ -486,7 +670,7 @@ test("managed Coordinator receives Operation inputs and dispatches a registered 
   for (let i = 0; i < 40 && !workerRequest; i++) await new Promise((resolve) => setTimeout(resolve, 5));
   assert.ok(workerRequest, "the registered Worker TaskOrder must spawn");
   assert.equal(workerRequest.options.isolation, "worktree");
-  assert.match(workerRequest.prompt, /Implement stable prompt sections/);
+  assert.match(workerRequest.prompt, /Implement stable prompt and deterministic context maintenance/);
   assert.match(workerRequest.prompt, /Operation O-1/);
   const graph = pi.entries.filter((entry) => entry.customType === TASK_GRAPH_ENTRY).at(-1).data.task_graphs["O-1"];
   assert.equal(graph.nodes["T-1"].scheduler_status, "running");
@@ -505,6 +689,8 @@ test("serial Coordinator turns dispatch through Harness; Commander receives only
   pi.events.on("subagents:rpc:spawn", (request) => {
     types.push(request.type); prompts.push(request.prompt);
     if (request.type === "research") {
+      assert.match(request.prompt, /Constraint: Do not bypass Coordinator\./);
+      assert.match(request.prompt, /Constraint: Do not change Scheduler authority\./);
       const graph = pi.entries.filter((entry) => entry.customType === TASK_GRAPH_ENTRY).at(-1).data.task_graphs["O-1"];
       const currentTask = types.filter((type) => type === "research").length === 1 ? "T-1" : "T-2";
       assert.equal(graph.nodes[currentTask].scheduler_status, "running", "claim must persist before package spawn");
@@ -520,9 +706,9 @@ test("serial Coordinator turns dispatch through Harness; Commander receives only
         assert.ok(!request.prompt.includes("RAW PRIVATE REPORT"));
         assert.ok(!request.prompt.includes("RAW REVIEWER OUTPUT"));
         const steps = [
-          () => decision("dispatch", { task: task("T-1") }),
+          () => decision("dispatch", { task: { ...task("T-1"), scope: task_intents["T-1"] } }),
           () => decision("accept_task", { task_id: "T-1" }),
-          () => decision("dispatch", { task: task("T-2") }),
+          () => decision("dispatch", { task: { ...task("T-2"), scope: task_intents["T-2"] } }),
           () => decision("accept_task", { task_id: "T-2" }),
           () => decision("accept_criterion", { criterion: "The Coordinator checked the result.", evidence_refs: [packet.OperationBrief.task_results["T-1"].evidence_refs[0]] }),
         ];
@@ -559,5 +745,60 @@ test("serial Coordinator turns dispatch through Harness; Commander receives only
   assert.deepEqual(snapshot.operations["O-1"].accepted_task_ids, Object.keys(snapshot.task_graphs["O-1"].nodes).filter((id) => snapshot.task_graphs["O-1"].nodes[id].scheduler_status === "accepted"));
   assert.ok(!JSON.stringify(snapshot.task_graphs).includes("RAW PRIVATE REPORT"));
   assert.ok(!JSON.stringify(snapshot.task_graphs).includes("RAW REVIEWER OUTPUT"));
-  await assert.rejects(() => call(restored, "pi_harness_operation", { action: "status", operation_id: "O-1" }), /bounded OperationReport/);
+  const status = await call(restored, "pi_harness_operation", { action: "status", operation_id: "O-1" });
+  assert.equal(status.status, "complete");
+  assert.equal(Object.hasOwn(status, "task_results"), false);
+});
+
+test("trusted TaskSpec resolves ID-only dispatch and rejects mechanical substitution", async () => {
+  const operation=op();
+  let dispatched;
+  const report=await runOperation(operation, {
+    turn: async()=>dispatched ? decision("report") : decision("dispatch", {task_id:"T-1"}),
+    dispatch: async task=>{dispatched=task;return {version:1,operation_id:"O-1",task_id:"T-1",execution_status:"execution_complete",verification_status:"verified",evidence_refs:[]};}
+  });
+  assert.equal(report.status,"blocked");
+  assert.equal(dispatched.verification,"Inspect report.");
+  assert.equal(dispatched.permission,"read");
+  for (const mutation of [{verification:"printenv"},{owner:"worker",permission:"write"},{review_profile:{"The report identifies \u0060lib/coordinator.mjs\u0060.":"security"}}]) {
+    assert.throws(()=>parseCoordinatorDecision(decision("dispatch",{task:{...task("T-1"),...mutation}}),operation),/trusted TaskSpec/);
+  }
+  const legacy=registerOperation({operation_id:"O-1",objective:"Legacy",required_task_ids:["T-1"],task_intents:{"T-1":"Inspect."}});
+  assert.throws(()=>parseCoordinatorDecision(decision("dispatch",{task_id:"T-1"}),legacy),/trusted registered TaskSpec/);
+  assert.throws(()=>registerOperation({...operation,task_specs:{"FOREIGN":operation.task_specs["T-1"]}}),/unregistered/);
+  assert.throws(()=>registerOperation({...operation,task_specs:{"T-1":{...operation.task_specs["T-1"],permission:"unlimited"}}}),/permission/);
+  assert.throws(()=>parseCoordinatorDecision(decision("dispatch_batch",{task_ids:["T-1","T-1"]}),operation),/invalid TaskOrder batch/);
+  const copy=structuredClone(operation.task_specs);copy["T-1"].verification="changed";
+  assert.equal(operation.task_specs["T-1"].verification,"Inspect report.");
+});
+
+test("failure projection is bounded across transport, execution, persistence and restore", async () => {
+  const codes=["HARNESS_RPC_TIMEOUT","HARNESS_CHILD_SPAWN_FAILED","HARNESS_CHILD_TERMINAL_TIMEOUT","HARNESS_CANCELLED","HARNESS_LINEAGE_MISMATCH","HARNESS_WORKTREE_FAILED","HARNESS_EVIDENCE_FAILED","HARNESS_VERIFIER_FAILED","HARNESS_GATE_TIMEOUT","HARNESS_SECURITY_REVIEW_UNAVAILABLE","HARNESS_SEMANTIC_REVIEW_FAILED"];
+  for(const code of codes) {
+    let snapshot;
+    const report=await runOperation(op(),{
+      turn:async()=>decision("dispatch",{task_id:"T-1"}),
+      dispatch:async()=>{throw Object.assign(new Error("PRIVATE_STDOUT PRIVATE_STDERR /tmp/private-worktree"),{code});},
+      save:(operation,state,graph)=>{snapshot={operation,state,graph};}
+    });
+    assert.equal(report.scheduler_blockers[0].failure_code,code);
+    assert.doesNotMatch(JSON.stringify(report),/PRIVATE|private-worktree/);
+    assert.deepEqual(operationReport(snapshot.operation,snapshot.state,undefined,undefined,snapshot.graph).scheduler_blockers,report.scheduler_blockers);
+  }
+  let spawned=false;
+  const failed=await runOperation(op(),{
+    turn:async()=>decision("dispatch",{task_id:"T-1"}),
+    dispatch:async()=>{spawned=true;},
+    save:()=>{throw new Error("PRIVATE_PERSISTENCE_PASSWORD");}
+  });
+  assert.equal(spawned,false);
+  assert.equal(failed.failure_code,"HARNESS_SCHEDULER_PERSISTENCE_FAILED");
+  assert.doesNotMatch(JSON.stringify(failed),/PRIVATE_PERSISTENCE/);
+});
+
+test("Commander findings omit model-authored execution bytes and Evidence references",()=>{
+  const operation={...op(),accepted_task_ids:["T-1"],task_results:{"T-1":{findings:[{statement:"Registered criterion.",criterion:"Registered criterion.",verification_status:"verified",source_role:"research",verifier:"semantic",finding:"PRIVATE_WORKER_STDOUT",evidence_refs:["PRIVATE_RAW_EVIDENCE"]}]}}};
+  const report=operationReport(operation,coordinatorState(operation));
+  assert.equal(report.major_findings[0].statement,"Registered criterion.");
+  assert.doesNotMatch(JSON.stringify(report),/PRIVATE/);
 });

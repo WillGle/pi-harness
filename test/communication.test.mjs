@@ -40,6 +40,15 @@ test("the Harness Verifier, not Worker prose or legacy success, controls accepta
   assert.equal(taskResult(order, record, { evidenceError: true }).verification_status, "failed");
 });
 
+test("failed TaskResults carry bounded failure codes without child error text", () => {
+  const worker = taskOrder({ owner: "worker", scope: "edit", verification: "npm test", permission: "write" });
+  assert.equal(taskResult(worker, { status: "completed" }).failure_code, "HARNESS_WORKTREE_FAILED");
+  const research = taskOrder({ owner: "research", scope: "inspect", verification: "check", permission: "read" });
+  assert.equal(taskResult(research, { status: "error", error: "private provider detail" }).failure_code, "HARNESS_CHILD_FAILED");
+  assert.equal(taskResult(research, { status: "stopped" }).failure_code, "HARNESS_CANCELLED");
+  assert.equal(JSON.stringify(taskResult(research, { status: "error", error: "private provider detail" })).includes("private provider detail"), false);
+});
+
 test("Execution Status, Verification Status, and Operation acceptance are distinct", () => {
   assert.ok(EXECUTION_STATUSES.includes("execution_complete"));
   assert.ok(!VERIFICATION_STATUSES.includes("execution_complete"));

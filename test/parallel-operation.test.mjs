@@ -8,8 +8,8 @@ import { availableSlots, claimTasks, createTaskGraph, dispatchableTaskIds, ready
 import { loadSettings, applySettings } from "../node_modules/@tintinweb/pi-subagents/dist/settings.js";
 import { AgentManager } from "../node_modules/@tintinweb/pi-subagents/dist/agent-manager.js";
 
-const op = (deps = {}) => createOperation({ operation_id: "O-H", objective: "Check independent tasks.", required_task_ids: ["T-1", "T-2", "T-3"], dependencies: deps });
-const task = (task_id) => ({ task_id, owner: "research", scope: `Review ${task_id}.`, permission: "read", verification: "Check report." });
+const op = (deps = {}) => createOperation({ operation_id: "O-H", objective: "Check independent tasks.", required_task_ids: ["T-1", "T-2", "T-3"], dependencies: deps, task_specs: Object.fromEntries(["T-1", "T-2", "T-3"].map(id => { const {task_id,scope,...spec}=task(id); return [id,spec]; })), task_intents: Object.fromEntries(["T-1", "T-2", "T-3"].map((id) => [id, `Review ${id}.`])) });
+const task = (task_id) => ({ task_id, owner: "research", scope: `Review ${task_id}.`, permission: "read", verification: "Check report.", acceptance_criteria: ["The report provides evidence for the TaskOrder objective."] });
 const decision = (action, more = {}) => JSON.stringify({ version: 1, operation_id: "O-H", action, reason: "The selected Tasks are ready.", ...more });
 const result = (task_id, verification_status = "verified") => ({ version: 1, operation_id: "O-H", task_id, execution_status: "execution_complete", verification_status, evidence_refs: [`evidence-${task_id}`] });
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
@@ -172,7 +172,7 @@ test("a failed atomic claim persistence starts no Task", async () => {
   const report = await runOperation(op(), {
     turn: async () => decision("dispatch_batch", { tasks: [task("T-1"), task("T-2")] }),
     dispatch: async () => { starts++; },
-    save: () => { if (++saves === 1) throw Error("store unavailable"); },
+    save: () => { if (++saves === 2) throw Error("store unavailable"); },
   });
   assert.equal(starts, 0);
   assert.equal(report.status, "blocked");

@@ -1,3 +1,5 @@
+import { runWorkerVerification } from "../lib/worker-gate.mjs";
+import { mockSettlement } from "./helpers/mock-settlement.mjs";
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -6,6 +8,9 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { readEvidence } from "../lib/evidence.mjs";
 import { promoteTaskResult } from "../lib/communication.mjs";
+import { registerRpcHandlers } from "../node_modules/@tintinweb/pi-subagents/dist/cross-extension-rpc.js";
+import { AgentManager } from "../node_modules/@tintinweb/pi-subagents/dist/agent-manager.js";
+import { isWorktreeIsolationEnabled, setWorktreeIsolationEnabled } from "../node_modules/@tintinweb/pi-subagents/dist/worktree.js";
 import {
   cancelCoordinateTasks,
   executeCoordinateTask,
@@ -37,7 +42,7 @@ class EventBus {
     return () => handlers.delete(handler);
   }
 
-  emit(name, payload) {
+  emit(name, payload) { if (this.mockSettlement !== false) mockSettlement(name, payload);
     for (const handler of [...(this.#handlers.get(name) ?? [])]) handler(payload);
   }
   listenerCount(name) { return this.#handlers.get(name)?.size ?? 0; }
@@ -60,6 +65,23 @@ function head(repo) {
   return spawnSync("git", ["-C", repo, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
 }
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => { resolve = resolvePromise; reject = rejectPromise; });
+  return { promise, resolve, reject };
+}
+
+function installManagerRecords(records) {
+  const key = Symbol.for("pi-subagents:manager");
+  const previous = globalThis[key];
+  globalThis[key] = { getRecord: (id) => records.get(id) };
+  return () => {
+    if (previous === undefined) delete globalThis[key];
+    else globalThis[key] = previous;
+  };
+}
+
 function packageManagerFor(events, repo, mode = "read") {
   const calls = [];
   const records = new Map();
@@ -79,7 +101,7 @@ function packageManagerFor(events, repo, mode = "read") {
           events.emit("subagents:completed", { id, status: "completed", result: JSON.stringify({ version: 1, task_id: packet.task_id, status: "verified", summary: "The semantic Verifier checked the criterion.", criteria: packet.acceptance_criteria.map((criterion) => ({ criterion, status: "passed", finding: "The semantic Verifier checked the selected diff.", evidence_refs: [packet.evidence[0].reference] })) }) });
           return;
         }
-        if (mode === "worker" || mode === "worker-reviewed") {
+        if (mode === "worker" || mode === "worker-reviewed" || mode === "worker-delayed-cleanup") {
           const worktree = mkdtempSync(join(tmpdir(), "pi-package-worktree-"));
           rmSync(worktree, { recursive: true, force: true });
           spawnSync("git", ["-C", repo, "worktree", "add", "--detach", worktree, "HEAD"]);
@@ -93,6 +115,7 @@ function packageManagerFor(events, repo, mode = "read") {
             "Worker update\n\nScope: file.txt\nReason: package smoke",
           ]);
           await request.options.onBeforeWorktreeCleanup(worktree);
+          if (mode === "worker-delayed-cleanup") await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
           const branch = "pi-agent-smoke";
           spawnSync("git", ["-C", worktree, "branch", branch]);
           spawnSync("git", ["-C", repo, "worktree", "remove", "--force", worktree]);
@@ -126,40 +149,578 @@ function packageManagerFor(events, repo, mode = "read") {
   };
 }
 
-test("terminal timeout aborts only the owned ExecutionUnit and ignores late completion", async () => {
-  for (const owner of ["worker", "scout", "research"]) {
+for (const role of ["worker", "scout", "research", "coordinator", "head", "reviewer", "security-reviewer"]) {
+  test(`${role}: failed spawn ACK drains an existing child before releasing ownership`, async () => {
     const events = new EventBus();
-    let request;
-    events.on("subagents:rpc:spawn", (next) => {
-      request = next;
-      events.emit(`subagents:rpc:spawn:reply:${next.requestId}`, { success: true, data: { id: `timed-${owner}` } });
-      next.options.signal.addEventListener("abort", () => events.emit("subagents:failed", { id: `timed-${owner}`, status: "stopped" }), { once: true });
+    const child = deferred();
+    const records = new Map();
+    const restoreManager = installManagerRecords(records);
+    const repo = makeRepo("pi-harness-failed-ack-");
+    const reviewing = ["reviewer", "security-reviewer"].includes(role);
+    let signal;
+    events.on("subagents:rpc:spawn", (request) => {
+      const id = `ack-${request.type}`;
+      if (reviewing && request.type === "research") {
+        records.set(id, { status: "completed", promise: Promise.resolve() });
+        request.options.onSpawned(id);
+        events.emit(`subagents:rpc:spawn:reply:${request.requestId}`, { success: true, data: { id } });
+        queueMicrotask(() => events.emit("subagents:completed", { id, status: "completed", result: "Selected report." }));
+        return;
+      }
+      assert.equal(request.type, role);
+      signal = request.options.signal;
+      records.set(id, { status: "stopped", promise: child.promise });
+      request.options.onSpawned(id);
+      events.emit(`subagents:rpc:spawn:reply:${request.requestId}`, { success: false, error: "PRIVATE STARTUP ERROR" });
     });
-    await assert.rejects(executeCoordinateTask({ events }, { owner, task_id: `T-${owner}`, operation_id: "O-timeout", scope: "Inspect timeout.", permission: owner === "worker" ? "write" : "read", verification: "true" }, { timeout: 30, rpcTimeout: 1000 }), (error) => error.code === "HARNESS_CHILD_TERMINAL_TIMEOUT");
-    assert.equal(request.options.signal.aborted, true, `${owner} child signal must reach pi-subagents`);
+    try {
+      const pending = ["coordinator", "head"].includes(role)
+        ? executeCoordinatorTurn({ events }, "Inspect.", { cwd: repo, role })
+        : executeCoordinateTask({ events }, {
+          owner: reviewing ? "research" : role, permission: role === "worker" ? "write" : "read", scope: "Inspect.", verification: "true",
+          ...(reviewing ? { acceptance_criteria: ["The report establishes the finding."],
+            review_profile: { "The report establishes the finding.": role === "security-reviewer" ? "security" : "default" } } : {}),
+        }, { cwd: repo, modelRegistry: { getAvailable: () => [{ provider: "openai", id: "gpt-daybreak-blue-latest" }] } });
+      const outcome = pending.then((value) => ({ value }), (error) => ({ error }));
+      while (!signal) await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(signal.aborted, true);
+      assert.equal(hasActiveCoordinateTasks(), true, "failed ACK must retain exact child ownership");
+      child.resolve();
+      const { value, error } = await outcome;
+      if (reviewing) {
+        assert.equal(value.taskResult.verification_status, "blocked");
+        assert.equal(JSON.stringify(value.taskResult).includes("PRIVATE STARTUP ERROR"), false);
+      } else {
+        assert.equal(error.code, "HARNESS_CHILD_SPAWN_FAILED");
+        assert.equal(error.childOutcome, undefined, "an existing child is not a confirmed no-child outcome");
+        assert.equal(error.childSettled, true);
+      }
+      assert.equal(hasActiveCoordinateTasks(), false);
+      assert.equal(events.listenerCount("subagents:completed"), 0);
+      assert.equal(events.listenerCount("subagents:failed"), 0);
+    } finally {
+      child.resolve();
+      restoreManager();
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+}
+
+test("RPC spawn timeout aborts the exact child signal and waits for late startup acknowledgment", async () => {
+  const events = new EventBus();
+  const startup = deferred();
+  const settled = deferred();
+  const records = new Map();
+  const managerKey = Symbol.for("pi-subagents:manager");
+  const previousManager = globalThis[managerKey];
+  globalThis[managerKey] = { getRecord: (id) => records.get(id) };
+  let childSignal;
+  const manager = {
+    spawn(_pi, _ctx, _type, _prompt, options) {
+      childSignal = options.signal;
+      records.set("child-late", { promise: settled.promise });
+      options.onSpawned("child-late");
+      return "child-late";
+    },
+    awaitStartup: () => startup.promise,
+  };
+  const handlers = registerRpcHandlers({ events, pi: {}, getCtx: () => ({ cwd: process.cwd() }), manager });
+  try {
+    const pending = executeCoordinateTask({ events }, { owner: "research", scope: "lib", verification: "inspect", permission: "read" }, { rpcTimeout: 20, rpcLateReplyGrace: 200, timeout: 1000, groupId: "G-late" });
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 40));
+    assert.equal(childSignal.aborted, true, "the Harness must abort the signal before it releases task ownership");
+    assert.equal(hasActiveCoordinateTasks(), true, "ownership stays active until the exact child settles");
+    startup.resolve();
+    settled.resolve();
+    await assert.rejects(pending, (error) => error.code === "HARNESS_RPC_TIMEOUT");
     assert.equal(hasActiveCoordinateTasks(), false);
-    assert.equal(events.listenerCount("subagents:completed"), 0);
-    assert.equal(events.listenerCount("subagents:failed"), 0);
-    events.emit("subagents:completed", { id: `timed-${owner}`, status: "completed", result: "LATE PRIVATE RESULT" });
-    assert.equal(hasActiveCoordinateTasks(), false);
+  } finally {
+    for (const unsubscribe of Object.values(handlers)) unsubscribe?.();
+    if (previousManager === undefined) delete globalThis[managerKey];
+    else globalThis[managerKey] = previousManager;
   }
 });
 
-test("Coordinator terminal timeout aborts its own signal and releases ownership", async () => {
+test("pi-subagents 0.19.0 late Worker startup aborts its real worktree child", async () => {
+  const repo = makeRepo("pi-harness-slow-spawn-");
+  const parentHead = head(repo);
   const events = new EventBus();
+  const manager = new AgentManager(() => {}, 1);
+  const managerKey = Symbol.for("pi-subagents:manager");
+  const previousManager = globalThis[managerKey];
+  const previousIsolation = isWorktreeIsolationEnabled();
+  globalThis[managerKey] = { getRecord: (id) => manager.getRecord(id) };
+  setWorktreeIsolationEnabled(true);
+  let childSignal;
+  let childId;
+  const originalSpawn = manager.spawn.bind(manager);
+  manager.spawn = (...args) => {
+    childSignal = args[4].signal;
+    childId = originalSpawn(...args);
+    return childId;
+  };
+  const pi = {
+    async exec(command, args, options) {
+      if (args[0] === "worktree" && args[1] === "add") await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+      const result = spawnSync(command, args, { cwd: options.cwd, encoding: "utf8", timeout: options.timeout });
+      return { stdout: result.stdout ?? "", stderr: result.stderr ?? "", code: result.status ?? 1, killed: Boolean(result.error?.killed) };
+    },
+  };
+  const context = { cwd: repo, getSystemPrompt: () => { throw new Error("test stops before model startup"); } };
+  const handlers = registerRpcHandlers({ events, pi, getCtx: () => context, manager });
+  try {
+    let failure;
+    try {
+      await executeCoordinateTask({ events }, { owner: "worker", scope: "file.txt", verification: "true", permission: "write" }, { cwd: repo, rpcTimeout: 20, rpcLateReplyGrace: 2000, timeout: 2000 });
+    } catch (error) { failure = error; }
+    assert.equal(failure?.code, "HARNESS_RPC_TIMEOUT");
+    assert.equal(failure?.childSettled, true);
+    assert.equal(failure?.childStatus, "stopped");
+    assert.equal(childSignal.aborted, true);
+    const record = manager.getRecord(childId);
+    assert.equal(record.status, "stopped");
+    assert.equal(record.worktreeResult?.hasChanges, false);
+    assert.equal(existsSync(record.worktree.path), false, "pi-subagents removes the unchanged worktree after abort");
+    assert.equal(head(repo), parentHead);
+  } finally {
+    for (const unsubscribe of Object.values(handlers)) unsubscribe?.();
+    await manager.dispose();
+    setWorktreeIsolationEnabled(previousIsolation);
+    if (previousManager === undefined) delete globalThis[managerKey];
+    else globalThis[managerKey] = previousManager;
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("one RPC spawn timeout does not abort its sibling ExecutionUnit", async () => {
+  const events = new EventBus();
+  const startup = deferred();
+  const firstSettlement = deferred();
+  const siblingSettlement = deferred();
+  const timedAborted = deferred();
+  const records = new Map();
+  const managerKey = Symbol.for("pi-subagents:manager");
+  const previousManager = globalThis[managerKey];
+  globalThis[managerKey] = { getRecord: (id) => records.get(id) };
+  const signals = new Map();
+  const manager = {
+    spawn(_pi, _ctx, _type, _prompt, options) {
+      const id = options.description.includes("timeout") ? "spawn-timeout" : "spawn-sibling";
+      signals.set(id, options.signal);
+      if (id === "spawn-timeout") options.signal.addEventListener("abort", timedAborted.resolve, { once: true });
+      const settlement = id === "spawn-timeout" ? firstSettlement : siblingSettlement;
+      records.set(id, { promise: settlement.promise });
+      options.onSpawned(id);
+      if (id === "spawn-sibling") queueMicrotask(() => {
+        settlement.resolve();
+        events.emit("subagents:completed", { id, status: "completed", result: "sibling completed" });
+      });
+      return id;
+    },
+    awaitStartup(id) { return id === "spawn-timeout" ? startup.promise : Promise.resolve(); },
+    consumeResult() { return true; },
+  };
+  const handlers = registerRpcHandlers({ events, pi: {}, getCtx: () => ({ cwd: process.cwd() }), manager });
+  try {
+    const timed = executeCoordinateTask({ events }, { owner: "research", scope: "timeout", verification: "inspect", permission: "read" }, { rpcTimeout: 20, rpcLateReplyGrace: 200, timeout: 1000 });
+    const sibling = executeCoordinateTask({ events }, { owner: "research", scope: "sibling", verification: "inspect", permission: "read" }, { rpcTimeout: 200, rpcLateReplyGrace: 200, timeout: 1000 });
+    const siblingResult = await sibling;
+    assert.equal(siblingResult.success, true);
+    await Promise.race([timedAborted.promise, new Promise((resolvePromise) => setTimeout(resolvePromise, 1000))]);
+    assert.equal(signals.get("spawn-sibling").aborted, false);
+    assert.equal(signals.get("spawn-timeout").aborted, true);
+    startup.resolve();
+    firstSettlement.resolve();
+    await assert.rejects(timed, (error) => error.code === "HARNESS_RPC_TIMEOUT");
+    assert.equal(hasActiveCoordinateTasks(), false);
+  } finally {
+    for (const unsubscribe of Object.values(handlers)) unsubscribe?.();
+    if (previousManager === undefined) delete globalThis[managerKey];
+    else globalThis[managerKey] = previousManager;
+  }
+});
+
+test("RPC startup rejection reports a confirmed no-child outcome", async () => {
+  const events = new EventBus();
+  const startup = deferred();
+  const manager = {
+    spawn() { return "child-startup-failed"; },
+    awaitStartup: () => startup.promise,
+  };
+  const handlers = registerRpcHandlers({ events, pi: {}, getCtx: () => ({ cwd: process.cwd() }), manager });
+  try {
+    const pending = executeCoordinateTask({ events }, { owner: "research", scope: "lib", verification: "inspect", permission: "read" }, { rpcTimeout: 20, rpcLateReplyGrace: 200, timeout: 1000 });
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 40));
+    startup.reject(new Error("private startup details"));
+    await assert.rejects(pending, (error) => error.code === "HARNESS_RPC_TIMEOUT" && error.childOutcome === "spawn_rejected");
+    assert.equal(hasActiveCoordinateTasks(), false);
+  } finally {
+    for (const unsubscribe of Object.values(handlers)) unsubscribe?.();
+  }
+});
+
+test("RPC timeout before manager spawn lets the aborted request resolve as no child", async () => {
+  const events = new EventBus();
+  let childSignal;
+  let spawned = false;
+  events.on("subagents:rpc:spawn", (request) => {
+    childSignal = request.options.signal;
+    setTimeout(() => {
+      if (childSignal.aborted) events.emit(`subagents:rpc:spawn:reply:${request.requestId}`, { success: false, error: "cancelled before spawn" });
+      else {
+        spawned = true;
+        events.emit(`subagents:rpc:spawn:reply:${request.requestId}`, { success: true, data: { id: "too-late" } });
+      }
+    }, 50);
+  });
+  await assert.rejects(executeCoordinateTask({ events }, { owner: "research", scope: "lib", verification: "inspect", permission: "read" }, { rpcTimeout: 20, rpcLateReplyGrace: 200, timeout: 1000 }), (error) => error.childOutcome === "spawn_rejected");
+  assert.equal(childSignal.aborted, true);
+  assert.equal(spawned, false);
+  assert.equal(hasActiveCoordinateTasks(), false);
+});
+
+test("Coordinator RPC timeout aborts the exact child and drains its acknowledgment", async () => {
+  const events = new EventBus();
+  const startup = deferred();
+  const settled = deferred();
+  const records = new Map();
+  const managerKey = Symbol.for("pi-subagents:manager");
+  const previousManager = globalThis[managerKey];
+  globalThis[managerKey] = { getRecord: (id) => records.get(id) };
+  let childSignal;
+  const manager = {
+    spawn(_pi, _ctx, _type, _prompt, options) {
+      childSignal = options.signal;
+      records.set("coordinator-late", { promise: settled.promise });
+      options.onSpawned("coordinator-late");
+      return "coordinator-late";
+    },
+    awaitStartup: () => startup.promise,
+  };
+  const handlers = registerRpcHandlers({ events, pi: {}, getCtx: () => ({ cwd: process.cwd() }), manager });
+  try {
+    const pending = executeCoordinatorTurn({ events }, "bounded brief", { rpcTimeout: 20, rpcLateReplyGrace: 200, timeout: 1000, groupId: "G-coordinator" });
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 40));
+    assert.equal(childSignal.aborted, true);
+    assert.equal(hasActiveCoordinateTasks(), true);
+    startup.resolve();
+    settled.resolve();
+    await assert.rejects(pending, (error) => error.code === "HARNESS_RPC_TIMEOUT");
+    assert.equal(hasActiveCoordinateTasks(), false);
+  } finally {
+    for (const unsubscribe of Object.values(handlers)) unsubscribe?.();
+    if (previousManager === undefined) delete globalThis[managerKey];
+    else globalThis[managerKey] = previousManager;
+  }
+});
+
+test("Reviewer RPC timeout aborts the Reviewer and returns blocked verification", async () => {
+  const events = new EventBus();
+  const reviewerStartup = deferred();
+  const reviewerSettled = deferred();
+  const records = new Map();
+  const managerKey = Symbol.for("pi-subagents:manager");
+  const previousManager = globalThis[managerKey];
+  globalThis[managerKey] = { getRecord: (id) => records.get(id) };
+  let reviewerSignal;
+  let resolveReviewerAbort;
+  const reviewerAborted = new Promise((resolvePromise) => { resolveReviewerAbort = resolvePromise; });
+  const manager = {
+    spawn(_pi, _ctx, type, _prompt, options) {
+      const id = type === "research" ? "research-complete" : "reviewer-late";
+      const settled = type === "research" ? deferred() : reviewerSettled;
+      records.set(id, { promise: settled.promise });
+      options.onSpawned(id);
+      if (type === "reviewer") {
+        reviewerSignal = options.signal;
+        reviewerSignal.addEventListener("abort", resolveReviewerAbort, { once: true });
+      } else queueMicrotask(() => {
+        settled.resolve();
+        events.emit("subagents:completed", { id, status: "completed", result: "bounded report" });
+      });
+      return id;
+    },
+    awaitStartup(id) { return id === "reviewer-late" ? reviewerStartup.promise : Promise.resolve(); },
+    consumeResult() { return true; },
+  };
+  const handlers = registerRpcHandlers({ events, pi: {}, getCtx: () => ({ cwd: process.cwd() }), manager });
+  try {
+    const pending = executeCoordinateTask({ events }, { owner: "research", task_id: "T-reviewer-timeout", scope: "lib", verification: "inspect", permission: "read", acceptance_criteria: ["The report identifies the source."] }, { rpcTimeout: 20, rpcLateReplyGrace: 200, timeout: 1000 });
+    await Promise.race([reviewerAborted, new Promise((resolvePromise) => setTimeout(resolvePromise, 1000))]);
+    assert.equal(reviewerSignal.aborted, true);
+    assert.equal(hasActiveCoordinateTasks(), true);
+    reviewerStartup.resolve();
+    reviewerSettled.resolve();
+    const result = await pending;
+    assert.equal(result.taskResult.execution_status, "execution_complete");
+    assert.equal(result.taskResult.verification_status, "blocked");
+    assert.equal(hasActiveCoordinateTasks(), false);
+  } finally {
+    for (const unsubscribe of Object.values(handlers)) unsubscribe?.();
+    if (previousManager === undefined) delete globalThis[managerKey];
+    else globalThis[managerKey] = previousManager;
+  }
+});
+
+test("terminal timeout aborts only the owned ExecutionUnit and drains its exact child", async () => {
+  const records = new Map();
+  const restoreManager = installManagerRecords(records);
+  try {
+    for (const owner of ["worker", "scout", "research"]) {
+      const events = new EventBus();
+      const id = `timed-${owner}`;
+      const child = deferred();
+      const record = { status: "running", promise: child.promise };
+      records.set(id, record);
+      let request;
+      events.on("subagents:rpc:spawn", (next) => {
+        request = next;
+        next.options.onSpawned(id);
+        events.emit(`subagents:rpc:spawn:reply:${next.requestId}`, { success: true, data: { id } });
+        next.options.signal.addEventListener("abort", () => {
+          record.status = "stopped";
+          events.emit("subagents:failed", { id, status: "stopped" });
+          child.resolve();
+        }, { once: true });
+      });
+      await assert.rejects(executeCoordinateTask({ events }, { owner, task_id: `T-${owner}`, operation_id: "O-timeout", scope: "Inspect timeout.", permission: owner === "worker" ? "write" : "read", verification: "true", ...(owner === "worker" ? {} : { acceptance_criteria: ["The report identifies the requested evidence."] }) }, { timeout: 30, rpcTimeout: 1000 }), (error) => error.code === "HARNESS_CHILD_TERMINAL_TIMEOUT" && error.childSettled === true);
+      assert.equal(request.options.signal.aborted, true, `${owner} child signal must reach pi-subagents`);
+      assert.equal(hasActiveCoordinateTasks(), false);
+      assert.equal(events.listenerCount("subagents:completed"), 0);
+      assert.equal(events.listenerCount("subagents:failed"), 0);
+      events.emit("subagents:completed", { id, status: "completed", result: "LATE PRIVATE RESULT" });
+      assert.equal(hasActiveCoordinateTasks(), false);
+    }
+  } finally { restoreManager(); }
+});
+
+test("timed-out Worker records package-confirmed branch and commit disposition without a TaskResult", async () => {
+  const repo = makeRepo("pi-harness-timeout-disposition-");
+  const base = head(repo);
+  const worktree = mkdtempSync(join(tmpdir(), "pi-harness-partial-worker-"));
+  rmSync(worktree, { recursive: true, force: true });
+  assert.equal(spawnSync("git", ["-C", repo, "worktree", "add", "--detach", worktree, base]).status, 0);
+  writeFileSync(join(worktree, "partial.txt"), "partial Worker output\n");
+  spawnSync("git", ["-C", worktree, "add", "partial.txt"]);
+  assert.equal(spawnSync("git", ["-C", worktree, "commit", "-qm", "Partial Worker output"]).status, 0);
+  assert.equal(spawnSync("git", ["-C", worktree, "branch", "pi-agent-partial"]).status, 0);
+  assert.equal(spawnSync("git", ["-C", repo, "worktree", "remove", "--force", worktree]).status, 0);
+  const commitSha = spawnSync("git", ["-C", repo, "rev-parse", "pi-agent-partial"], { encoding: "utf8" }).stdout.trim();
+  const events = new EventBus();
+  const child = deferred();
+  const record = { status: "running", promise: child.promise, worktreeResult: { hasChanges: true, branch: "pi-agent-partial" } };
+  const restoreManager = installManagerRecords(new Map([["partial-worker", record]]));
+  events.on("subagents:rpc:spawn", (request) => {
+    request.options.onSpawned("partial-worker");
+    events.emit(`subagents:rpc:spawn:reply:${request.requestId}`, { success: true, data: { id: "partial-worker" } });
+    request.options.signal.addEventListener("abort", () => {
+      record.status = "stopped";
+      events.emit("subagents:failed", { id: "partial-worker", status: "stopped" });
+      child.resolve();
+    }, { once: true });
+  });
+  try {
+    await assert.rejects(executeCoordinateTask({ events }, { owner: "worker", task_id: "T-partial", operation_id: "O-partial", scope: "Write partial output.", permission: "write", verification: "Run the required gate." }, { cwd: repo, timeout: 30, rpcTimeout: 1000 }), (error) => {
+      assert.equal(error.code, "HARNESS_CHILD_TERMINAL_TIMEOUT");
+      assert.equal(error.childSettled, true);
+      assert.deepEqual(error.child_disposition, { branch_status: "preserved", branch: "pi-agent-partial", commit_sha: commitSha, commit_count: 1, worktree_status: "unknown" });
+      assert.equal(Object.hasOwn(error, "taskResult"), false);
+      return true;
+    });
+    assert.equal(head(repo), base, "the partial branch is not integrated into the base branch");
+    assert.equal(hasActiveCoordinateTasks(), false);
+  } finally {
+    restoreManager();
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("a terminal event does not release ownership before the exact package child settles", async () => {
+  const events = new EventBus();
+  const child = deferred();
+  const records = new Map();
+  const restoreManager = installManagerRecords(records);
+  let returned = false;
+  events.on("subagents:rpc:spawn", (request) => {
+    const id = "terminal-before-settlement";
+    records.set(id, { status: "completed", promise: child.promise });
+    request.options.onSpawned(id);
+    events.emit(`subagents:rpc:spawn:reply:${request.requestId}`, { success: true, data: { id } });
+    queueMicrotask(() => events.emit("subagents:completed", { id, status: "completed", result: "The report is ready." }));
+  });
+  try {
+    const pending = executeCoordinateTask({ events }, { owner: "research", scope: "Inspect.", verification: "inspect", permission: "read" }, { timeout: 1000, rpcTimeout: 1000 }).then((result) => {
+      returned = true;
+      return result;
+    });
+    await new Promise((resolvePromise) => setImmediate(resolvePromise));
+    assert.equal(returned, false, "TaskResult waits for package settlement after the terminal event");
+    assert.equal(hasActiveCoordinateTasks(), true, "Harness ownership remains until the package promise settles");
+    child.resolve();
+    const result = await pending;
+    assert.equal(result.taskResult.execution_status, "execution_complete");
+    assert.equal(hasActiveCoordinateTasks(), false);
+  } finally { restoreManager(); }
+});
+
+test("a terminal notification without package settlement times out without promoting a TaskResult", async () => {
+  const events = new EventBus();
+  const child = deferred();
+  const records = new Map();
+  const restoreManager = installManagerRecords(records);
+  events.on("subagents:rpc:spawn", (request) => {
+    const id = "terminal-no-settlement";
+    records.set(id, { status: "completed", promise: child.promise });
+    request.options.onSpawned(id);
+    events.emit(`subagents:rpc:spawn:reply:${request.requestId}`, { success: true, data: { id } });
+    queueMicrotask(() => events.emit("subagents:completed", { id, status: "completed", result: "The report is ready." }));
+  });
+  try {
+    await assert.rejects(executeCoordinateTask({ events }, { owner: "research", scope: "Inspect.", verification: "inspect", permission: "read" }, { timeout: 1000, rpcTimeout: 1000 }), (error) => error.code === "HARNESS_CHILD_SETTLEMENT_TIMEOUT" && error.childSettled === false);
+    assert.equal(hasActiveCoordinateTasks(), true, "unsettled package ownership remains tracked");
+    child.resolve();
+    await new Promise((resolvePromise) => setImmediate(resolvePromise));
+    assert.equal(hasActiveCoordinateTasks(), false, "late settlement releases exact ownership");
+  } finally { restoreManager(); }
+});
+
+test("terminal timeout retains ownership until the exact child settles", async () => {
+  const events = new EventBus();
+  const records = new Map();
+  const restoreManager = installManagerRecords(records);
+  const child = deferred();
+  const aborted = deferred();
+  const id = "slow-cleanup";
+  const record = { status: "running", promise: child.promise };
+  records.set(id, record);
   let request;
   events.on("subagents:rpc:spawn", (next) => {
     request = next;
-    events.emit(`subagents:rpc:spawn:reply:${next.requestId}`, { success: true, data: { id: "timed-coordinator" } });
-    next.options.signal.addEventListener("abort", () => events.emit("subagents:failed", { id: "timed-coordinator", status: "stopped" }), { once: true });
+    next.options.onSpawned(id);
+    events.emit(`subagents:rpc:spawn:reply:${next.requestId}`, { success: true, data: { id } });
+    next.options.signal.addEventListener("abort", () => { record.status = "stopped"; aborted.resolve(); }, { once: true });
   });
-  await assert.rejects(executeCoordinatorTurn({ events }, "Bounded OperationBrief", { timeout: 30, rpcTimeout: 1000 }), (error) => error.code === "HARNESS_CHILD_TERMINAL_TIMEOUT");
-  assert.equal(request.options.signal.aborted, true);
-  assert.equal(hasActiveCoordinateTasks(), false);
-  assert.equal(events.listenerCount("subagents:completed"), 0);
-  assert.equal(events.listenerCount("subagents:failed"), 0);
-  events.emit("subagents:completed", { id: "timed-coordinator", status: "completed", result: "late decision" });
-  assert.equal(hasActiveCoordinateTasks(), false);
+  try {
+    const pending = executeCoordinateTask({ events }, { owner: "research", scope: "Inspect timeout.", permission: "read", verification: "Inspect report." }, { timeout: 30, rpcTimeout: 1000 });
+    await aborted.promise;
+    assert.equal(request.options.signal.aborted, true);
+    assert.equal(hasActiveCoordinateTasks(), true, "Harness must retain ownership during the bounded drain");
+    await assert.rejects(pending, (error) => error.code === "HARNESS_CHILD_TERMINAL_TIMEOUT" && error.childSettled !== true);
+    assert.equal(hasActiveCoordinateTasks(), true, "Harness must retain ownership after the drain expires");
+    events.emit("subagents:completed", { id, status: "completed", result: "LATE PRIVATE RESULT" });
+    assert.equal(hasActiveCoordinateTasks(), true);
+    child.resolve();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(hasActiveCoordinateTasks(), false, "Harness releases ownership only after package settlement");
+  } finally { restoreManager(); }
+});
+
+test("Coordinator terminal timeout aborts its own signal and drains its child", async () => {
+  const events = new EventBus();
+  const records = new Map();
+  const restoreManager = installManagerRecords(records);
+  const child = deferred();
+  const id = "timed-coordinator";
+  const record = { status: "running", promise: child.promise };
+  records.set(id, record);
+  let request;
+  events.on("subagents:rpc:spawn", (next) => {
+    request = next;
+    next.options.onSpawned(id);
+    events.emit(`subagents:rpc:spawn:reply:${next.requestId}`, { success: true, data: { id } });
+    next.options.signal.addEventListener("abort", () => {
+      record.status = "stopped";
+      events.emit("subagents:failed", { id, status: "stopped" });
+      child.resolve();
+    }, { once: true });
+  });
+  try {
+    await assert.rejects(executeCoordinatorTurn({ events }, "Bounded OperationBrief", { timeout: 30, rpcTimeout: 1000 }), (error) => error.code === "HARNESS_CHILD_TERMINAL_TIMEOUT" && error.childSettled === true);
+    assert.equal(request.options.signal.aborted, true);
+    assert.equal(hasActiveCoordinateTasks(), false);
+    assert.equal(events.listenerCount("subagents:completed"), 0);
+    assert.equal(events.listenerCount("subagents:failed"), 0);
+    events.emit("subagents:completed", { id, status: "completed", result: "late decision" });
+    assert.equal(hasActiveCoordinateTasks(), false);
+  } finally { restoreManager(); }
+});
+
+test("Reviewer terminal timeout drains its own child and blocks verification", async () => {
+  const events = new EventBus();
+  const records = new Map();
+  const restoreManager = installManagerRecords(records);
+  const reviewer = deferred();
+  const idByType = { research: "report-child", reviewer: "reviewer-child" };
+  let reviewerSignal;
+  events.on("subagents:rpc:spawn", (request) => {
+    const id = idByType[request.type];
+    const settled = request.type === "research" ? deferred() : reviewer;
+    const record = { status: "running", promise: settled.promise };
+    records.set(id, record);
+    request.options.onSpawned(id);
+    events.emit(`subagents:rpc:spawn:reply:${request.requestId}`, { success: true, data: { id } });
+    if (request.type === "research") queueMicrotask(() => {
+      record.status = "completed";
+      settled.resolve();
+      events.emit("subagents:completed", { id, status: "completed", result: "The report identifies the source." });
+    });
+    else {
+      reviewerSignal = request.options.signal;
+      reviewerSignal.addEventListener("abort", () => { record.status = "stopped"; settled.resolve(); }, { once: true });
+    }
+  });
+  try {
+    const result = await executeCoordinateTask({ events }, { owner: "research", task_id: "T-review-timeout", scope: "Inspect the source.", permission: "read", verification: "Inspect report.", acceptance_criteria: ["The report identifies the source."] }, { timeout: 1000, reviewerTimeout: 30, rpcTimeout: 1000 });
+    assert.equal(reviewerSignal.aborted, true);
+    assert.equal(result.taskResult.verification_status, "blocked");
+    assert.equal(hasActiveCoordinateTasks(), false);
+    assert.equal(events.listenerCount("subagents:completed"), 0);
+    assert.equal(events.listenerCount("subagents:failed"), 0);
+  } finally { restoreManager(); }
+});
+
+test("execution budgets start after RPC acknowledgement and Worker gate has a separate cleanup phase", async () => {
+  const records = new Map();
+  const restoreManager = installManagerRecords(records);
+  try {
+    const events = new EventBus();
+    const child = deferred();
+    const id = "delayed-ack";
+    let acknowledgedAt;
+    let abortedAt;
+    records.set(id, { promise: child.promise });
+    events.on("subagents:rpc:spawn", (request) => {
+      request.options.signal.addEventListener("abort", () => {
+        abortedAt = Date.now();
+        child.resolve();
+        events.emit("subagents:failed", { id, status: "stopped" });
+      }, { once: true });
+      setTimeout(() => {
+        acknowledgedAt = Date.now();
+        request.options.onSpawned(id);
+        events.emit(`subagents:rpc:spawn:reply:${request.requestId}`, { success: true, data: { id } });
+      }, 60);
+    });
+    await assert.rejects(executeCoordinateTask({ events }, { owner: "research", scope: "Inspect.", verification: "inspect", permission: "read" }, { timeout: 40, rpcTimeout: 500 }), (error) => error.code === "HARNESS_CHILD_TERMINAL_TIMEOUT");
+    assert.ok(abortedAt - acknowledgedAt >= 30, `child timeout began before acknowledgement: ${abortedAt - acknowledgedAt}ms`);
+  } finally { restoreManager(); }
+
+  const repo = makeRepo("pi-harness-worker-gate-budget-");
+  const events = new EventBus();
+  const fakePackage = packageManagerFor(events, repo, "worker-delayed-cleanup");
+  try {
+    const startedAt = Date.now();
+    const result = await executeCoordinateTask({ events }, {
+      owner: "worker", scope: "file.txt", verification: "sleep 0.8; test -f file.txt", permission: "write",
+    }, { cwd: repo, timeout: 500, rpcTimeout: 1000 });
+    assert.equal(result.taskResult.execution_status, "execution_complete");
+    assert.equal(result.taskResult.verification_status, "verified");
+    assert.ok(Date.now() - startedAt >= 750, "the independent Worker gate must complete beyond the Worker execution budget");
+  } finally {
+    fakePackage.restore();
+    rmSync(repo, { recursive: true, force: true });
+  }
 });
 
 test("managed Worker receives a bounded terminal budget; other roles retain the default", async () => {
@@ -176,6 +737,10 @@ test("managed Worker receives a bounded terminal budget; other roles retain the 
     await assert.rejects(executeCoordinatorTurn({}, "brief", { timeout }), /terminal budget/);
   }
   await assert.rejects(executeCoordinateTask({}, task, { reviewerTimeout: MAX_TERMINAL_TIMEOUT_MS + 1 }), /terminal budget/);
+  for (const rpcTimeout of [0, -1, 60_001, 1.5, Infinity]) {
+    await assert.rejects(executeCoordinateTask({}, task, { rpcTimeout }), /RPC timeout/);
+    await assert.rejects(executeCoordinatorTurn({}, "brief", { rpcTimeout }), /RPC timeout/);
+  }
   assert.equal(hasActiveCoordinateTasks(), false);
 });
 
@@ -305,6 +870,7 @@ test("deterministic Verifier defers semantic criteria and rejects a failed gate"
     }, { cwd: repo, rpcTimeout: 1000, timeout: 1000 });
     assert.equal(failed.taskResult.execution_status, "execution_complete");
     assert.equal(failed.taskResult.verification_status, "failed");
+    assert.equal(failed.taskResult.failure_code, "HARNESS_VERIFIER_FAILED");
     assert.ok(failed.taskResult.evidence_refs.some((ref) => readEvidence(ref, repo).metadata.kind === "gate"));
   } finally { fakePackage.restore(); rmSync(repo, { recursive: true, force: true }); }
 });
@@ -330,6 +896,7 @@ test("Evidence Store failure never gives a fake reference or verified status", a
   try {
     const result = await executeCoordinateTask({ events }, { owner: "scout", scope: "lib", verification: "inspect", permission: "read" }, { timeout: 1000, rpcTimeout: 1000 });
     assert.equal(result.taskResult.verification_status, "failed");
+    assert.equal(result.taskResult.failure_code, "HARNESS_EVIDENCE_FAILED");
     assert.deepEqual(result.taskResult.evidence_refs, []);
     assert.match(result.taskResult.evidence_error, /could not persist/);
   } finally {
@@ -360,12 +927,190 @@ test("goal-scoped cancellation aborts only the package task owned by that goal",
   await new Promise((resolvePromise) => setImmediate(resolvePromise));
   assert.equal(cancelCoordinateTasks("other-goal"), 0);
   assert.equal(cancelCoordinateTasks("goal-1"), 1);
-  const result = await pending;
+  await assert.rejects(pending, error => error.code === "HARNESS_CANCELLED");
   assert.equal(request.options.signal.aborted, true);
-  assert.equal(result.success, false);
-  assert.equal(result.status, "stopped");
-  assert.equal(result.taskResult.execution_status, "blocked");
-  assert.match(result.taskResult.blocker, /cannot continue until/);
-  assert.equal(result.taskResult.verification_status, "blocked");
-  assert.deepEqual(result.taskResult.evidence_refs, []);
+  assert.equal(hasActiveCoordinateTasks(), false);
+});
+
+test("missing package settlement fails closed; a later exact promise releases retained ownership", async () => {
+  const events = new EventBus();
+  events.mockSettlement = false;
+  const child = deferred();
+  const record = { status: "completed" };
+  const restoreManager = installManagerRecords(new Map([["missing-promise", record]]));
+  let request;
+  events.on("subagents:rpc:spawn", req => {
+    request = req;
+    req.options.onSpawned("missing-promise");
+    events.emit(`subagents:rpc:spawn:reply:${req.requestId}`, {success:true,data:{id:"missing-promise"}});
+    queueMicrotask(() => events.emit("subagents:completed", {id:"missing-promise",status:"completed",result:"PRIVATE"}));
+  });
+  try {
+    await assert.rejects(executeCoordinatorTurn({events}, "Inspect."), error => error.code === "HARNESS_CHILD_SETTLEMENT_TIMEOUT");
+    assert.equal(request.options.signal.aborted, true);
+    assert.equal(hasActiveCoordinateTasks(), true);
+    record.promise = child.promise;
+    request.options.onSpawned("missing-promise");
+    child.resolve();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(hasActiveCoordinateTasks(), false);
+  } finally { child.resolve(); restoreManager(); }
+});
+
+test("queued cancellation waits for startup gate and never promotes late completion", async () => {
+  const events = new EventBus();
+  events.mockSettlement = false;
+  const gate = deferred(), child = deferred();
+  const record = {status:"queued",startGate:gate.promise};
+  const key = Symbol.for("pi-subagents:manager"), previous = globalThis[key];
+  globalThis[key] = {getRecord: () => record, awaitStartup: () => Promise.resolve()};
+  const parent = new AbortController();
+  let request;
+  events.on("subagents:rpc:spawn", req => {
+    request = req;
+    req.options.onQueued("queued-child");
+    events.emit(`subagents:rpc:spawn:reply:${req.requestId}`, {success:true,data:{id:"queued-child"}});
+  });
+  try {
+    const pending = executeCoordinatorTurn({events}, "Inspect.", {signal:parent.signal});
+    const rejection = assert.rejects(pending, error => error.code === "HARNESS_CANCELLED" && error.childSettled === true);
+    await new Promise(resolve => setImmediate(resolve));
+    parent.abort();
+    assert.equal(request.options.signal.aborted, true);
+    assert.equal(hasActiveCoordinateTasks(), true);
+    record.status = "stopped";
+    gate.resolve();
+    await rejection;
+    events.emit("subagents:completed", {id:"queued-child",status:"completed",result:"LATE PRIVATE"});
+    assert.equal(hasActiveCoordinateTasks(), false);
+    assert.equal(events.listenerCount("subagents:completed"), 0);
+  } finally { child.resolve(); gate.resolve(); if(previous === undefined) delete globalThis[key]; else globalThis[key] = previous; }
+});
+
+test("cancellation during spawn ACK retains ownership and cleans the late RPC listener", async () => {
+  const events = new EventBus(), child = deferred();
+  const restoreManager = installManagerRecords(new Map([["cancel-ack",{status:"stopped",promise:child.promise}]]));
+  const parent = new AbortController();
+  let request;
+  events.on("subagents:rpc:spawn", req => { request = req; req.options.onSpawned("cancel-ack"); });
+  try {
+    const pending = executeCoordinatorTurn({events}, "Inspect.", {signal:parent.signal,rpcTimeout:1000});
+    const rejection = assert.rejects(pending, error => error.code === "HARNESS_CANCELLED" && error.childSettled === true);
+    parent.abort();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(hasActiveCoordinateTasks(), true);
+    child.resolve();
+    await rejection;
+    assert.equal(events.listenerCount(`subagents:rpc:spawn:reply:${request.requestId}`), 0);
+    assert.equal(hasActiveCoordinateTasks(), false);
+  } finally { child.resolve(); restoreManager(); }
+});
+
+test("pi-subagents real queued child cancels without starting while its sibling owns startup", async () => {
+  const repo = makeRepo("pi-harness-queue-real-");
+  const events = new EventBus(); events.mockSettlement = false;
+  const manager = new AgentManager(() => {}, 1);
+  const key = Symbol.for("pi-subagents:manager"), previous = globalThis[key];
+  const previousIsolation = isWorktreeIsolationEnabled();
+  globalThis[key] = manager;
+  setWorktreeIsolationEnabled(true);
+  const startup = deferred();
+  const pi = {async exec(command, args, options) {
+    if(args[0] === "worktree" && args[1] === "add") await startup.promise;
+    const result = spawnSync(command, args, {cwd:options.cwd,encoding:"utf8",timeout:options.timeout});
+    return {stdout:result.stdout??"",stderr:result.stderr??"",code:result.status??1,killed:false};
+  }};
+  const ctx = {cwd:repo,getSystemPrompt:()=>{throw Error("No provider request permitted in this test");}};
+  const handlers = registerRpcHandlers({events,pi,getCtx:()=>ctx,manager});
+  const siblingSignal = new AbortController(), queuedSignal = new AbortController();
+  const siblingId = manager.spawn(pi,ctx,"worker","Inspect.",{cwd:repo,isBackground:true,isolation:"worktree",signal:siblingSignal.signal});
+  try {
+    const pending = executeCoordinatorTurn({events},"Inspect.",{cwd:repo,signal:queuedSignal.signal,rpcTimeout:1000});
+    const rejection = assert.rejects(pending,error=>error.code === "HARNESS_CANCELLED" && error.childSettled === true);
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(manager.queue.length,1);
+    const queued = manager.getRecord(manager.queue[0].id);
+    assert.equal(queued.status,"queued");
+    queuedSignal.abort();
+    await rejection;
+    assert.equal(queued.status,"stopped");
+    assert.equal(queued.promise,undefined,"queued child never runs");
+    assert.equal(siblingSignal.signal.aborted,false);
+    assert.equal(manager.getRecord(siblingId).status,"running");
+    assert.equal(hasActiveCoordinateTasks(),false);
+  } finally {
+    siblingSignal.abort(); startup.resolve();
+    await manager.awaitStartup(siblingId).catch(()=>{});
+    for(const unsubscribe of Object.values(handlers)) unsubscribe?.();
+    await manager.dispose(); setWorktreeIsolationEnabled(previousIsolation);
+    if(previous===undefined) delete globalThis[key]; else globalThis[key]=previous;
+    rmSync(repo,{recursive:true,force:true});
+  }
+});
+
+test("fake-clock terminal deadline aborts only at its exact boundary", async t => {
+  const events = new EventBus(), child = deferred();
+  const record = {status:"running",promise:child.promise};
+  const restoreManager = installManagerRecords(new Map([["clock-child",record]]));
+  let signal;
+  events.on("subagents:rpc:spawn",req=>{
+    signal=req.options.signal; req.options.onSpawned("clock-child");
+    events.emit(`subagents:rpc:spawn:reply:${req.requestId}`,{success:true,data:{id:"clock-child"}});
+    signal.addEventListener("abort",()=>{record.status="stopped";child.resolve();},{once:true});
+  });
+  t.mock.timers.enable({apis:["setTimeout"]});
+  try {
+    const pending=executeCoordinatorTurn({events},"Inspect.",{timeout:100,rpcTimeout:1000});
+    const rejected=assert.rejects(pending,error=>error.code === "HARNESS_CHILD_TERMINAL_TIMEOUT");
+    await new Promise(resolve=>setImmediate(resolve));
+    t.mock.timers.tick(99); assert.equal(signal.aborted,false);
+    t.mock.timers.tick(1); assert.equal(signal.aborted,true);
+    await rejected; assert.equal(hasActiveCoordinateTasks(),false);
+  } finally {t.mock.timers.reset();child.resolve();restoreManager();}
+});
+
+test("verification timeout and parent cancellation terminate shell descendants with bounded output", async () => {
+  const repo=makeRepo("pi-harness-gate-cancel-");
+  try {
+    const timed=await runWorkerVerification(repo,{verification:"sleep 30 & echo $!; wait"},{timeout:40,projectRoot:repo});
+    assert.equal(timed.gatePassed,false); assert.equal(timed.failure_code,"HARNESS_GATE_TIMEOUT");
+    const pid=Number(timed.gateEvidence.trim());
+    assert.ok(pid>0);
+    let alive; try { process.kill(pid,0); alive=true; } catch {alive=false;}
+    // A killed descendant can briefly remain a zombie until its parent reaps it.
+    if(alive) assert.match(readFileSync(`/proc/${pid}/stat`,"utf8"),/\) Z /);
+    const controller=new AbortController();
+    const pending=runWorkerVerification(repo,{verification:"sleep 30"},{timeout:1000,projectRoot:repo,signal:controller.signal});
+    controller.abort();
+    const cancelled=await pending;
+    assert.equal(cancelled.failure_code,"HARNESS_CANCELLED"); assert.equal(cancelled.gatePassed,false);
+    const large=await runWorkerVerification(repo,{verification:`node -e 'process.stdout.write("x".repeat(100000))'`},{projectRoot:repo});
+    assert.equal(large.gatePassed,true); assert.equal(large.gateEvidenceTruncated,true);
+    assert.ok(Buffer.byteLength(large.gateEvidence)<=8000);
+    await assert.rejects(runWorkerVerification(repo,{verification:"true"},{timeout:Infinity}));
+  } finally {rmSync(repo,{recursive:true,force:true});}
+});
+
+test("fake-clock Reviewer retains its 120s default when execution budget is 300s",async t=>{
+  const events=new EventBus(), reviewer=deferred(), records=new Map();
+  const restoreManager=installManagerRecords(records);
+  let reviewerSignal;
+  events.on("subagents:rpc:spawn",req=>{
+    const id=req.type;
+    records.set(id,{promise:req.type === "research" ? Promise.resolve() : reviewer.promise});
+    req.options.onSpawned(id);
+    events.emit(`subagents:rpc:spawn:reply:${req.requestId}`,{success:true,data:{id}});
+    if(req.type === "research") queueMicrotask(()=>events.emit("subagents:completed",{id,status:"completed",result:"Selected report."}));
+    else {reviewerSignal=req.options.signal;reviewerSignal.addEventListener("abort",reviewer.resolve,{once:true});}
+  });
+  t.mock.timers.enable({apis:["setTimeout"]});
+  try {
+    const pending=executeCoordinateTask({events},{owner:"research",scope:"Inspect.",verification:"Inspect report.",permission:"read",acceptance_criteria:["The report is sufficient."]},{timeout:300000});
+    while(!reviewerSignal) await new Promise(resolve=>setImmediate(resolve));
+    await new Promise(resolve=>setImmediate(resolve));
+    t.mock.timers.tick(119999);assert.equal(reviewerSignal.aborted,false);
+    t.mock.timers.tick(1);assert.equal(reviewerSignal.aborted,true);
+    assert.equal((await pending).taskResult.verification_status,"blocked");
+    assert.equal(hasActiveCoordinateTasks(),false);
+  } finally {t.mock.timers.reset();reviewer.resolve();restoreManager();}
 });
