@@ -8,7 +8,10 @@ catalog-lock work is still pending. The patch tracks that work, aborts the RPC
 background catalog refresh on native runtime disposal, and drains provider work,
 publication chains and physical catalog storage operations before disposal exits.
 Ordinary refresh cancellation semantics, model/provider selection and existing
-deadlines are unchanged. Forced KILL cannot guarantee graceful lock release.
+deadlines are unchanged. The drain has no internal deadline. A provider or storage
+operation that never settles can hold native disposal indefinitely. ACP EOF grace,
+TERM and KILL deadlines still bound bridge shutdown, but forced KILL cannot
+guarantee graceful lock release.
 
 Apply to a disposable upstream **0.87.1 monorepo build tree** after its normal
 build and before packaging/installing:

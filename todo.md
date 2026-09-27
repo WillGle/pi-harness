@@ -327,9 +327,9 @@ DoD / acceptance:
 - [x] Cancel during startup/outstanding prompt; short independent abort budget; bounded TERM/KILL fallback; controlled child PID absent after settle.
 - [x] Pi acceptance != terminal completion; current client/protocol contract inspected and unchanged.
 - [x] Repeated historical/full integration executed; failures retained rather than hidden by a green rerun.
-- [ ] Serialized reproducer repeatedly green with zero initial-command timeout.
-- [ ] Full integration repeatedly green; real ACP forwarding stable across cold restarts.
-- [ ] Runtime catalog refresh drained before shutdown; no stranded catalog lock remains.
+- [x] Serialized reproducer repeatedly green with zero initial-command timeout after canonical package deployment.
+- [x] Full integration repeatedly green; real ACP forwarding stable across cold restarts.
+- [x] Runtime catalog refresh drained before shutdown; catalog-drain markers verified in the installed bundle.
 - [ ] Full official ACP conformance/live Zed-client proof (not claimed by this scoped patch).
 
 Runtime patch checkpoint (2026-09-28):
@@ -338,12 +338,20 @@ Runtime patch checkpoint (2026-09-28):
 - Disposable actual Pi0.87.1 source runtime /tmp/t11-runtime-VM3xax, same installed Node24.20.0 and dependencies: historical serialized reproducer3 consecutive11/11 PASS, zero skips (/tmp/t11-drained-serialized-1.log through -3.log).
 - Full integration with explicit disposable runtime selection3 consecutive31/31 PASS, zero skips (/tmp/t11-drained-full-1.log through -3.log). Command: npm run test:integration --script-shell=/tmp/t11-patched-script-shell. All command and readiness deadlines unchanged. Native goal/compaction and ACP forwarding/reconnect pass.
 - A preceding npm run test:integration still27/31 because npm prepends node_modules/.bin/pi (unpatched local Pi0.87.1), overriding the disposable PATH prefix. That failure is retained in /tmp/t11-drained-integration-1.log; it is NOT evidence against the patched runtime and NOT hidden as a default-runtime success.
-- Version/source-guarded apply-catalog-drain.mjs provided for an upstream monorepo build tree; it patches compiled modules and invokes the upstream bundle rebuild. This packaging hook has NOT yet been exercised in a canonical Nix/upstream build. No immutable Nix store, system links, installed npm dependency, credentials or real catalog lock were modified/deleted. Runtime README distinguishes candidate validation from deployment.
-- T11 remains PARTIAL: repeated stability demonstrated only with the disposable patched runtime, not the default installed paths. T14 unchanged; no release claim or commit.
+- Canonical Nix package owner: `/etc/nixos/hosts/think14gryzen/system/packages.nix` now extends `pkgsUnstable.pi-coding-agent` with a `postBuild` call to the version/source-guarded patcher from pinned Pi Harness commit `be0f4524cadf2839db4f9dbbada453ee8c025a92`. `nix flake check --no-build --no-write-lock-file /etc/nixos` PASS. The Pi 0.87.1 derivation build PASS; it ran the normal build, applied the patch, rebuilt the coding-agent bundle, and packaged `/nix/store/g1hn6gr52qwpmh1w1cvfsa2qrx1j428r-pi-coding-agent-0.87.1`. Patched symbols exist in bundled chunks; aggregate bundle fingerprint is `bfc4efa014e5d74637ab627973bc352deb1424cbc7215df2021212ef612ba817` across56 files. The full NixOS build PASS at `/nix/store/jn2h1pc3xyn9zdy4wfcf4n8d7kad1fpf-nixos-system-think14gryzen-25.11.20260630.b6018f8`.
+- `test/helpers/default-pi.mjs` removes npm-injected ancestor `node_modules/.bin` entries only from Pi child environments. It ignores inherited `PI_BIN`, resolves the shell's default Pi, logs the bundle fingerprint, and fails unless all catalog-drain markers exist in the executable bundle.
+- `npm run build && npm run test && npm run test:runtime` PASS: build,159/159 unit tests,2/2 runtime tests; zero skips.
+- System activation was initially blocked because sudo required a terminal. The user later activated the build. `/run/current-system/sw/bin/pi` now resolves to `/nix/store/g1hn6gr52qwpmh1w1cvfsa2qrx1j428r-pi-coding-agent-0.87.1/bin/pi`; `pi --version` returns `0.87.1`. The previous system generation remains available for rollback. The pre-existing `/etc/nixos/flake.lock` change was preserved.
+- Normal `npm run test:integration` passed three consecutive runs:31/31 each, zero skips (`/tmp/t11-canonical-integration-1.log` through `-3.log`). Each test log identifies the default Pi package and patched bundle fingerprint. No `PI_BIN`, shell override, or caller PATH override was used.
+- Historical serialized reproducer `node --test --test-concurrency=1 test/acp-acceptance.test.mjs test/pi-rpc-integration.test.mjs` passed three consecutive runs:11/11 each, zero skips (`/tmp/t11-canonical-serialized-1.log` through `-3.log`).
+- `npm run test:all` PASS: build,159/159 unit tests,2/2 runtime tests,31/31 integration tests; zero skips (`/tmp/t11-canonical-all.log`).
+- Installed default bundle fingerprint: `bfc4efa014e5d74637ab627973bc352deb1424cbc7215df2021212ef612ba817` across56 files. The test helper confirms `drainRefresh`, `refreshOperations`, and `storageOperations` markers in that bundle.
+- The drain has no internal deadline. A provider or storage operation that never settles can hold native disposal indefinitely. ACP EOF grace, TERM and KILL still bound bridge shutdown. Forced KILL cannot guarantee graceful lock release; README documents this limitation.
+- T11 remains PARTIAL only for full official ACP conformance and live Zed-client proof. These items remain outside this scoped legacy-contract patch. T14 unchanged.
 
 Remaining blocker:
-- Deploy and verify the version-gated catalog patch through the canonical Pi build/package owner, rebuild the actual bundle, then repeat default-path regressions. Both Nix Pi and npm-installed Pi remain unpatched; build hook not yet exercised. Do not raise deadlines, force offline mode or delete shared locks. Official ACP conformance/live Zed remains outside this scoped legacy-contract change.
-Commit: none; HEAD35dc2ad803c0d8c8f9438f0a507997fadf72134e.
+- No blocker remains for the requested runtime patch, canonical package deployment, or repeated regressions. Full official ACP conformance/live Zed remains a separate scope. Do not raise deadlines, force offline mode, or delete shared locks.
+Checkpoint baseline: no commit at HEAD35dc2ad803c0d8c8f9438f0a507997fadf72134e.
 
 ## Task: T12 — Security / Verification Trust Boundary Audit
 Status: PARTIAL
