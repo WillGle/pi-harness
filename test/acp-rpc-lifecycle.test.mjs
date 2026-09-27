@@ -67,6 +67,22 @@ test("cancel with an outstanding prompt rejects it and acknowledges abort indepe
   assert.equal(f.commands.at(-1).type, "abort"); assert.equal(f.rpc.pending.size, 0); assert.equal(f.rpc.exited, true);
 });
 
+test("an AbortSignal cancels one RPC request without stopping its Pi session", async () => {
+  const f = fixture(); await f.rpc.ready;
+  const controller = new AbortController();
+  const prompt = f.rpc.request({ type: "prompt" }, { signal: controller.signal });
+  controller.abort();
+  await assert.rejects(prompt, { code: "PI_RPC_CANCELLED" });
+  assert.equal(f.rpc.exited, false);
+  assert.equal(f.rpc.pending.size, 0);
+  f.reply(f.commands.at(-1));
+  assert.equal(f.events.length, 0, "a late prompt response is discarded");
+  const next = f.rpc.request({ type: "get_commands" });
+  f.reply(f.commands.at(-1));
+  assert.equal((await next).success, true);
+  await f.rpc.stop();
+});
+
 test("ignored abort/EOF/TERM still reaches bounded exact-child KILL fallback", async () => {
   const f = fixture({ replyAbort: false, eofExit: false, ignoreTerm: true }); await f.rpc.ready;
   const stop = f.rpc.stop(); assert.equal(f.rpc.stop(), stop); await stop;

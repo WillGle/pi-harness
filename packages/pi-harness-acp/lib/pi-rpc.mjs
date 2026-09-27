@@ -43,19 +43,22 @@ export function createPiRpc(child, { readinessTimeout = 10_000, requestTimeout =
   child.once("error", onError);
   child.once("exit", finishExit);
 
-  function request(command, { timeout = requestTimeout, timeoutCode = "PI_RPC_TIMEOUT", duringStop = false, acceptFailure = false } = {}) {
+  function request(command, { timeout = requestTimeout, timeoutCode = "PI_RPC_TIMEOUT", duringStop = false, acceptFailure = false, signal } = {}) {
     if (exited || child.exitCode !== null || child.signalCode) return Promise.reject(new PiRpcError("PI_RPC_EXITED"));
     if (stopping && !duringStop) return Promise.reject(new PiRpcError("PI_RPC_CANCELLED"));
+    if (signal?.aborted) return Promise.reject(new PiRpcError("PI_RPC_CANCELLED"));
     if (!child.stdin.writable) return Promise.reject(new PiRpcError("PI_RPC_WRITE_FAILED"));
     const id = randomUUID();
     return new Promise((resolve, reject) => {
       let settled = false;
       const timer = setTimeout(() => finish(new PiRpcError(timeoutCode)), timeout);
+      const onAbort = () => finish(new PiRpcError("PI_RPC_CANCELLED"));
       function finish(error, response) {
         if (settled) return;
-        settled = true; clearTimeout(timer); pending.delete(id);
+        settled = true; clearTimeout(timer); signal?.removeEventListener("abort", onAbort); pending.delete(id);
         if (error) reject(error); else resolve(response);
       }
+      signal?.addEventListener("abort", onAbort, { once: true });
       pending.set(id, { command: command.type, acceptFailure, finish });
       try { child.stdin.write(`${JSON.stringify({ ...command, id })}\n`, error => { if (error) finish(new PiRpcError("PI_RPC_WRITE_FAILED")); }); }
       catch { finish(new PiRpcError("PI_RPC_WRITE_FAILED")); }

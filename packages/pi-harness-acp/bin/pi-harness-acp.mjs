@@ -1,9 +1,12 @@
 #!/usr/bin/env node
-/** Pi Harness ACP bridge for Pi RPC sessions and Harness commands. */
+/** ACP v1 bridge for Pi RPC sessions and Pi Harness commands. */
+import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { Readable, Writable } from "node:stream";
 import { spawn } from "node:child_process";
+import * as acp from "@agentclientprotocol/sdk";
 import { decodeAcpPrompt } from "../lib/content.mjs";
 import { createPiRpc, PiRpcError } from "../lib/pi-rpc.mjs";
 
@@ -14,7 +17,13 @@ const sessions = new Map();
 let stored = loadStored();
 if (process.argv.includes("--version")) { console.log(VERSION); process.exit(0); }
 
-function loadStored() { try { return JSON.parse(readFileSync(STATE_PATH, "utf8")); } catch { return {}; } }
+function loadStored() {
+  try {
+    const value = JSON.parse(readFileSync(STATE_PATH, "utf8"));
+    return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  } catch { return {}; }
+}
+
 function persist() {
   try {
     mkdirSync(dirname(STATE_PATH), { recursive: true });
@@ -25,182 +34,340 @@ function persist() {
       if (!session.isReady) continue;
       merged[id] = { piSessionId: session.piSessionId, cwd: session.cwd, updatedAt: new Date().toISOString() };
     }
-    writeFileSync(temporary, JSON.stringify(merged, null, 2));
+    writeFileSync(temporary, JSON.stringify(merged, null, 2), { mode: 0o600 });
     renameSync(temporary, STATE_PATH);
   } catch {
-    // Non-fatal persistence error
+    // State persistence must not interrupt ACP session processing.
   }
 }
-function send(message) { if (!process.stdout.destroyed) process.stdout.write(`${JSON.stringify(message)}\n`); }
-function result(id, value) { if (id !== undefined) send({ jsonrpc: "2.0", id, result: value }); }
-function failure(id, error) { if (id !== undefined) send({ jsonrpc: "2.0", id, error: { code: -32603, message: error instanceof Error ? error.message : String(error), ...(error?.code ? { data: { failure_code: error.code } } : {}) } }); }
-function notify(method, params) { send({ jsonrpc: "2.0", method, params }); }
-function commands() { return [...EXTENSION_COMMANDS]; }
-function parseLines(stream, onLine) {
-  let buffered = "";
-  stream.on("data", (chunk) => {
-    buffered += chunk;
-    for (;;) {
-      const end = buffered.indexOf("\n");
-      if (end < 0) break;
-      const line = buffered.slice(0, end);
-      buffered = buffered.slice(end + 1);
-      if (line.trim()) onLine(line);
-    }
-  });
+
+function enqueueUpdate(session, client, update) {
+  const queued = session.updateChain.then(() => client.notify(acp.methods.client.session.update, {
+    sessionId: session.id,
+    update,
+  }));
+  session.updateChain = queued.catch(error => { session.updateError ??= error; });
+  return session.updateChain;
 }
-function translatePiEvent(sessionId, message) {
-  const type = message?.type ?? message?.method ?? "message";
+
+function updateForPiEvent(session, message) {
+  const type = message?.type ?? message?.method;
   if (type === "message_update") {
     const event = message.assistantMessageEvent;
     if (event?.type === "text_delta") {
-      notify("session/update", { sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: event.delta ?? "" }, raw: message } });
+      session.messageId ??= randomUUID();
+      return {
+        sessionUpdate: "agent_message_chunk",
+        messageId: session.messageId,
+        content: { type: "text", text: event.delta ?? "" },
+      };
+    }
+    if (event?.type === "thinking_delta") {
+      session.messageId ??= randomUUID();
+      return {
+        sessionUpdate: "agent_thought_chunk",
+        messageId: session.messageId,
+        content: { type: "text", text: event.delta ?? "" },
+      };
     }
   } else if (type === "text_delta") {
-    notify("session/update", { sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: message.delta ?? message.text ?? "" }, raw: message } });
-  } else if (type === "tool_call") {
-    notify("session/update", { sessionId, update: { sessionUpdate: "tool_call", toolName: message.toolName, input: message.input, callId: message.callId ?? message.id, raw: message } });
-  } else if (type === "tool_result") {
-    notify("session/update", { sessionId, update: { sessionUpdate: "tool_result", toolName: message.toolName, result: message.result, callId: message.callId ?? message.id, raw: message } });
+    session.messageId ??= randomUUID();
+    return {
+      sessionUpdate: "agent_message_chunk",
+      messageId: session.messageId,
+      content: { type: "text", text: message.delta ?? message.text ?? "" },
+    };
+  } else if (type === "message_start" && message.message?.role === "assistant") {
+    session.messageId = randomUUID();
+  } else if (type === "message_end") {
+    if (message.message?.role === "assistant" && message.message.stopReason === "error" && session.activeTurn) {
+      session.activeTurn.error = new Error("Pi could not complete the prompt.");
+    }
+    if (message.message?.role === "assistant") session.messageId = undefined;
   } else if (type === "tool_execution_start") {
-    notify("session/update", { sessionId, update: { sessionUpdate: "tool_call", toolName: message.toolName, input: message.args ?? {}, callId: message.toolCallId, raw: message } });
+    return {
+      sessionUpdate: "tool_call",
+      toolCallId: message.toolCallId,
+      title: message.toolName,
+      name: message.toolName,
+      kind: "other",
+      status: "in_progress",
+      rawInput: message.args,
+    };
   } else if (type === "tool_execution_end") {
-    notify("session/update", { sessionId, update: { sessionUpdate: "tool_result", result: message.result, callId: message.toolCallId, raw: message } });
-  } else if (type === "agent_settled") {
-    notify("session/update", { sessionId, update: { sessionUpdate: "agent_settled", raw: message } });
-  } else if (type === "message_end" && message.message?.role === "assistant" && message.message.stopReason === "error") {
-    notify("session/update", { sessionId, update: { sessionUpdate: "agent_error", message: message.message.errorMessage ?? "Pi request failed", raw: message } });
-  } else if (/assistant|text|tool/i.test(type)) {
-    notify("session/update", { sessionId, update: { sessionUpdate: type, ...message } });
-  } else {
-    notify("session/update", { sessionId, update: { sessionUpdate: "pi_event", event: message } });
+    return {
+      sessionUpdate: "tool_call_update",
+      toolCallId: message.toolCallId,
+      status: message.isError ? "failed" : "completed",
+    };
   }
 }
-function spawnPi(sessionId, resumeId, cwd) {
+
+function onPiEvent(session, message) {
+  if (message?.type === "agent_settled") {
+    const turn = session.activeTurn;
+    if (turn) void session.updateChain.then(turn.resolveSettled, turn.resolveSettled);
+    return;
+  }
+  if (message?.type === "extension_ui_request" && message.method === "notify" && session.activeTurn) {
+    const update = {
+      sessionUpdate: "agent_message_chunk",
+      messageId: randomUUID(),
+      content: { type: "text", text: String(message.message ?? "") },
+    };
+    const queued = session.client ? enqueueUpdate(session, session.client, update) : Promise.resolve();
+    if (session.activeTurn.isHarnessCommand) void queued.then(session.activeTurn.resolveSettled, session.activeTurn.resolveSettled);
+    return;
+  }
+  const update = updateForPiEvent(session, message);
+  if (update && session.client) void enqueueUpdate(session, session.client, update);
+}
+
+function spawnPi(sessionId, resumeId, cwd, client) {
   const id = resumeId || sessionId;
   const piBin = process.env.PI_BIN || "pi";
-  const piArgs = ["--mode", "rpc"];
-  if (id) {
-    piArgs.push("--session-id", id);
-  }
-  if (process.env.PI_EXTRA_ARGS) {
-    piArgs.push(...process.env.PI_EXTRA_ARGS.split(/\s+/).filter(Boolean));
-  }
-  const sessionCwd = process.env.PI_CWD || cwd || process.cwd();
-  const child = spawn(piBin, piArgs, { stdio: ["pipe", "pipe", "pipe"], cwd: sessionCwd });
-  const rpc = createPiRpc(child, { onEvent: message => translatePiEvent(sessionId, message) });
-  const session = { child, rpc, piSessionId: id, cwd: sessionCwd, pending: rpc.pending };
+  const piArgs = ["--mode", "rpc", "--session-id", id];
+  if (process.env.PI_EXTRA_ARGS) piArgs.push(...process.env.PI_EXTRA_ARGS.split(/\s+/).filter(Boolean));
+  const child = spawn(piBin, piArgs, { stdio: ["pipe", "pipe", "pipe"], cwd: cwd || process.cwd() });
+  const session = {
+    id: sessionId,
+    child,
+    piSessionId: id,
+    cwd: cwd || process.cwd(),
+    client,
+    updateChain: Promise.resolve(),
+    activeTurn: undefined,
+    messageId: undefined,
+    updateError: undefined,
+  };
+  const rpc = createPiRpc(child, { onEvent: message => onPiEvent(session, message) });
+  session.rpc = rpc;
   sessions.set(sessionId, session);
   session.ready = rpc.ready.then(state => {
     if (rpc.exited || sessions.get(sessionId) !== session) throw new PiRpcError("PI_RPC_EXITED");
     if (state.sessionId !== id) throw new PiRpcError("PI_RPC_SESSION_MISMATCH");
     session.isReady = true;
-    stored[sessionId] = { piSessionId: id, cwd: sessionCwd, updatedAt: new Date().toISOString() };
+    stored[sessionId] = { piSessionId: id, cwd: session.cwd, updatedAt: new Date().toISOString() };
     persist();
     return session;
-  }).catch(async error => { await rpc.stop({ abort: false }); throw error; });
+  }).catch(async error => {
+    await rpc.stop({ abort: false });
+    throw error;
+  });
   void session.ready.catch(() => {});
-  parseLines(child.stderr, (line) => notify("session/update", { sessionId, update: { sessionUpdate: "stderr", text: line } }));
-  child.once("exit", (code, signal) => {
+  child.stderr.resume();
+  child.once("exit", () => {
     if (sessions.get(sessionId) === session) sessions.delete(sessionId);
+    if (session.activeTurn) {
+      session.activeTurn.error ??= new Error("Pi session ended before the prompt completed.");
+      session.activeTurn.resolveSettled();
+    }
     persist();
-    notify("session/update", { sessionId, update: { sessionUpdate: "terminated", code, signal } });
   });
   return session;
 }
-async function rpcToPi(session, command) {
-  await session.ready;
-  try { return await session.rpc.request(command); }
-  catch (error) {
-    if (["PI_RPC_TIMEOUT", "PI_RPC_WRITE_FAILED"].includes(error.code)) await session.rpc.stop();
-    throw error;
+
+async function ensureSession(sessionId, client, signal) {
+  const active = sessions.get(sessionId);
+  if (active) {
+    active.client = client;
+    await waitForSignal(active.ready, signal);
+    return active;
   }
-}
-async function ensureSession(sessionId) {
-  if (sessions.has(sessionId)) return sessions.get(sessionId).ready;
   stored = loadStored();
   const saved = stored[sessionId];
   if (!saved) throw new Error(`Unknown session: ${sessionId}`);
-  return spawnPi(sessionId, saved.piSessionId, saved.cwd).ready;
+  const session = spawnPi(sessionId, saved.piSessionId, saved.cwd, client);
+  await waitForSignal(session.ready, signal);
+  return session;
 }
-async function handle(request) {
-  const params = request.params ?? {};
-  switch (request.method) {
-    case "initialize":
-      return result(request.id, {
-        protocolVersion: params.protocolVersion ?? "2025-06-18",
-        serverInfo: { name: "pi-harness-acp", version: VERSION },
-        capabilities: { prompt: true, sessionLoad: true, toolCalling: true, sessionCancel: true },
-        agentCapabilities: {
-          loadSession: true,
-          promptCapabilities: { image: true, embeddedContext: true },
-        },
-        commands: commands(),
-      });
-    case "session/new": {
-      const sessionId = crypto.randomUUID();
-      const session = spawnPi(sessionId, undefined, params.cwd);
-      await session.ready;
-      return result(request.id, { sessionId, piSessionId: session.piSessionId, commands: commands() });
+
+function advertiseCommands(session, client) {
+  const update = {
+    sessionUpdate: "available_commands_update",
+    availableCommands: EXTENSION_COMMANDS.map(name => ({
+      name,
+      description: `Run the Pi Harness ${name} command.`,
+      input: { hint: "arguments" },
+    })),
+  };
+  void enqueueUpdate(session, client, update);
+}
+
+function requireNoMcpServers(servers = []) {
+  if (servers.length) throw new Error("Pi Harness ACP does not support MCP servers.");
+}
+
+async function newSession({ params, client, signal }) {
+  requireNoMcpServers(params.mcpServers);
+  const sessionId = randomUUID();
+  const session = spawnPi(sessionId, undefined, params.cwd, client);
+  try {
+    await waitForSignal(session.ready, signal);
+  } catch (error) {
+    await session.rpc.stop();
+    if (sessions.get(sessionId) === session) sessions.delete(sessionId);
+    delete stored[sessionId];
+    persist();
+    throw error;
+  }
+  advertiseCommands(session, client);
+  return { sessionId };
+}
+
+async function resumeSession({ params, client, signal }) {
+  requireNoMcpServers(params.mcpServers);
+  stored = loadStored();
+  const saved = stored[params.sessionId];
+  if (!saved) throw new Error(`Unknown session: ${params.sessionId}`);
+  if (saved.cwd !== params.cwd) throw new Error("Session working directory does not match.");
+  const session = sessions.get(params.sessionId) ?? spawnPi(params.sessionId, saved.piSessionId, saved.cwd, client);
+  session.client = client;
+  await waitForSignal(session.ready, signal);
+  advertiseCommands(session, client);
+  return {};
+}
+
+function waitForSignal(promise, signal) {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(signal.reason ?? new Error("Request cancelled."));
+  return new Promise((resolve, reject) => {
+    const abort = () => {
+      signal.removeEventListener("abort", abort);
+      reject(signal.reason ?? new Error("Request cancelled."));
+    };
+    signal.addEventListener("abort", abort, { once: true });
+    promise.then(value => {
+      signal.removeEventListener("abort", abort);
+      resolve(value);
+    }, error => {
+      signal.removeEventListener("abort", abort);
+      reject(error);
+    });
+  });
+}
+
+async function cancelTurn(session, turn) {
+  if (!turn.cancelPromise) {
+    turn.cancelled = true;
+    turn.controller.abort(new Error("ACP prompt cancelled."));
+    turn.cancelPromise = (async () => {
+      try {
+        await session.rpc.request({ type: "abort" }, { timeout: 500 });
+      } catch {
+        try { await session.rpc.stop(); }
+        catch {
+          turn.cancelError = new Error("Pi could not confirm prompt cancellation.");
+          turn.resolveSettled();
+        }
+      }
+      await turn.settled;
+      await session.updateChain;
+    })();
+  }
+  return turn.cancelPromise;
+}
+
+async function prompt({ params, client, signal }) {
+  const session = await ensureSession(params.sessionId, client, signal);
+  if (session.activeTurn) throw new Error("A prompt is already active for this session.");
+  const { message, images } = decodeAcpPrompt(params.prompt, session.cwd);
+  if (!message && images.length === 0) throw new Error("The prompt contains no supported content.");
+
+  let resolveSettled;
+  const settled = new Promise(resolve => { resolveSettled = resolve; });
+  const controller = new AbortController();
+  const commandName = message.match(/^\/([^\s]+)/)?.[1];
+  const turn = {
+    cancelled: false,
+    error: undefined,
+    cancelError: undefined,
+    isHarnessCommand: EXTENSION_COMMANDS.includes(commandName),
+    resolveSettled,
+    settled,
+    controller,
+  };
+  session.activeTurn = turn;
+  const onRequestAbort = () => {
+    void cancelTurn(session, turn).catch(error => {
+      turn.cancelError ??= error;
+      turn.resolveSettled();
+    });
+  };
+  if (signal?.aborted) onRequestAbort();
+  else signal?.addEventListener("abort", onRequestAbort, { once: true });
+  try {
+    const response = session.rpc.request({
+      type: "prompt",
+      message,
+      ...(images.length ? { images } : {}),
+    }, { signal: controller.signal });
+    await response;
+    await settled;
+    await session.updateChain;
+    if (session.updateError) throw new Error("ACP client update delivery failed.");
+    if (turn.error && !turn.cancelled) throw turn.error;
+    return { stopReason: turn.cancelled ? "cancelled" : "end_turn" };
+  } catch (error) {
+    if (turn.cancelled) {
+      await settled;
+      await session.updateChain;
+      if (turn.cancelError) throw turn.cancelError;
+      return { stopReason: "cancelled" };
     }
-    case "session/load": {
-      const session = await ensureSession(params.sessionId);
-      const stateRes = await rpcToPi(session, { type: "get_state" });
-      const actualPiSessionId = stateRes?.data?.sessionId;
-      const restored = Boolean(actualPiSessionId && actualPiSessionId === session.piSessionId);
-      return result(request.id, {
-        sessionId: params.sessionId,
-        restored,
-        piSessionId: actualPiSessionId,
-        commands: commands(),
-      });
+    if (["PI_RPC_TIMEOUT", "PI_RPC_WRITE_FAILED"].includes(error.code)) {
+      await session.rpc.stop().catch(() => {});
     }
-    case "session/prompt": {
-      const session = await ensureSession(params.sessionId);
-      const { message, images } = decodeAcpPrompt(params.prompt ?? params.text ?? "", session.cwd);
-      const response = await rpcToPi(session, {
-        type: "prompt",
-        message,
-        ...(images.length ? { images } : {}),
-      });
-      // Legacy bridge response means Pi preflight accepted, NOT terminal completion.
-      return result(request.id, { accepted: true, commands: commands(), pi: response.data ?? { success: true, command: response.command } });
-    }
-    case "session/command": {
-      const session = await ensureSession(params.sessionId);
-      const command = String(params.command ?? "").replace(/^\//, "");
-      if (!commands().includes(command)) throw new Error(`Unknown Pi Harness command: ${command}`);
-      const response = await rpcToPi(session, { type: "prompt", message: `/${command}${params.args ? ` ${params.args}` : ""}` });
-      return result(request.id, { accepted: true, pi: response.data ?? { success: true, command: response.command }, commands: commands() });
-    }
-    case "session/cancel": {
-      // Do not await readiness: cancellation must also interrupt startup.
-      const session = sessions.get(params.sessionId) ?? await ensureSession(params.sessionId);
-      const child = session.child;
-      const childPid = child?.pid;
-      await session.rpc.stop();
-      if (sessions.get(params.sessionId) === session) sessions.delete(params.sessionId);
-      persist();
-      return result(request.id, { cancelled: true, terminated: true, pid: childPid });
-    }
-    default:
-      throw new Error(`Unknown ACP method: ${request.method}`);
+    throw error;
+  } finally {
+    signal?.removeEventListener("abort", onRequestAbort);
+    if (session.activeTurn === turn) session.activeTurn = undefined;
   }
 }
-parseLines(process.stdin, (line) => {
-  let request;
-  try { request = JSON.parse(line); } catch (error) { failure(undefined, error); return; }
-  handle(request).catch((error) => failure(request?.id, error));
-});
-// An idle stdio pipe does not keep the Node event loop alive on every runtime.
-const lifecycleKeepalive = setInterval(() => {}, 60_000);
-async function shutdown() {
-  clearInterval(lifecycleKeepalive);
-  await Promise.allSettled([...sessions.values()].map(session => session.rpc.stop()));
-  persist();
+
+async function cancel({ params }) {
+  const session = sessions.get(params.sessionId);
+  if (session?.activeTurn) await cancelTurn(session, session.activeTurn);
 }
-let shuttingDown;
-const finishShutdown = () => { shuttingDown ??= shutdown().then(() => process.exit(0)); };
-process.on("SIGINT", finishShutdown);
-process.on("SIGTERM", finishShutdown);
-process.stdin.on("end", finishShutdown);
+
+async function closeSession({ params }) {
+  const session = sessions.get(params.sessionId);
+  if (!session) return {};
+  if (session.activeTurn) {
+    session.activeTurn.cancelled = true;
+    session.activeTurn.controller.abort(new Error("ACP session closed."));
+  }
+  await session.rpc.stop();
+  if (sessions.get(params.sessionId) === session) sessions.delete(params.sessionId);
+  persist();
+  return {};
+}
+
+const app = acp.agent({ name: "pi-harness-acp" })
+  .onRequest("initialize", ({ params }) => ({
+    protocolVersion: acp.PROTOCOL_VERSION,
+    agentInfo: { name: "pi-harness-acp", version: VERSION },
+    agentCapabilities: {
+      loadSession: false,
+      promptCapabilities: { image: true, embeddedContext: true },
+      sessionCapabilities: { resume: {}, close: {} },
+    },
+    authMethods: [],
+  }))
+  .onRequest("session/new", newSession)
+  .onRequest("session/resume", resumeSession)
+  .onRequest("session/prompt", prompt)
+  .onRequest("session/close", closeSession)
+  .onNotification("session/cancel", cancel);
+
+const stream = acp.ndJsonStream(Writable.toWeb(process.stdout), Readable.toWeb(process.stdin));
+const connection = app.connect(stream);
+let shutdownPromise;
+function shutdown() {
+  shutdownPromise ??= Promise.allSettled([...sessions.values()].map(session => session.rpc.stop()));
+  return shutdownPromise;
+}
+process.stdin.once("end", () => { void shutdown(); });
+process.on("SIGINT", () => { void shutdown().then(() => process.exit(0)); });
+process.on("SIGTERM", () => { void shutdown().then(() => process.exit(0)); });
+void connection.closed.then(() => shutdown());
