@@ -11,6 +11,10 @@ import {
   executeCoordinateTask,
   executeCoordinatorTurn,
   hasActiveCoordinateTasks,
+  managedTaskTimeout,
+  DEFAULT_TERMINAL_TIMEOUT_MS,
+  MANAGED_WORKER_TERMINAL_TIMEOUT_MS,
+  MAX_TERMINAL_TIMEOUT_MS,
   validateTask,
 } from "../lib/coordinator.mjs";
 
@@ -155,6 +159,23 @@ test("Coordinator terminal timeout aborts its own signal and releases ownership"
   assert.equal(events.listenerCount("subagents:completed"), 0);
   assert.equal(events.listenerCount("subagents:failed"), 0);
   events.emit("subagents:completed", { id: "timed-coordinator", status: "completed", result: "late decision" });
+  assert.equal(hasActiveCoordinateTasks(), false);
+});
+
+test("managed Worker receives a bounded terminal budget; other roles retain the default", async () => {
+  assert.equal(DEFAULT_TERMINAL_TIMEOUT_MS, 120_000);
+  assert.equal(MANAGED_WORKER_TERMINAL_TIMEOUT_MS, 300_000);
+  assert.equal(MAX_TERMINAL_TIMEOUT_MS, 300_000);
+  assert.equal(managedTaskTimeout("worker"), MANAGED_WORKER_TERMINAL_TIMEOUT_MS);
+  for (const role of ["coordinator", "scout", "research", "reviewer", "security-reviewer"]) assert.equal(managedTaskTimeout(role), DEFAULT_TERMINAL_TIMEOUT_MS);
+  const source = readFileSync("extensions/pi-harness.ts", "utf8");
+  assert.match(source, /timeout: managedTaskTimeout\(task\.owner\), reviewerTimeout: managedTaskTimeout\("reviewer"\)/);
+  const task = { owner: "research", scope: "Inspect.", verification: "inspect", permission: "read" };
+  for (const timeout of [0, -1, MAX_TERMINAL_TIMEOUT_MS + 1, 1.5, Infinity]) {
+    await assert.rejects(executeCoordinateTask({}, task, { timeout }), /terminal budget/);
+    await assert.rejects(executeCoordinatorTurn({}, "brief", { timeout }), /terminal budget/);
+  }
+  await assert.rejects(executeCoordinateTask({}, task, { reviewerTimeout: MAX_TERMINAL_TIMEOUT_MS + 1 }), /terminal budget/);
   assert.equal(hasActiveCoordinateTasks(), false);
 });
 

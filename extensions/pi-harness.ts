@@ -9,7 +9,7 @@ import {
   isPlanAllowedTool, parsePlan, planState, restore, transitionGoal,
 } from "../lib/state.mjs";
 import { appendProjectMemory, clearProjectMemory, loadProjectMemory } from "../lib/memory.mjs";
-import { cancelCoordinateTasks, executeCoordinateTask, executeCoordinatorTurn, hasActiveCoordinateTasks, validateTask } from "../lib/coordinator.mjs";
+import { cancelCoordinateTasks, executeCoordinateTask, executeCoordinatorTurn, hasActiveCoordinateTasks, managedTaskTimeout, validateTask } from "../lib/coordinator.mjs";
 import { PROACTIVE_COMPACT_ENTRY, proactiveCompactionPolicy, restoreProactivePolicy, setProactiveThreshold } from "../lib/compaction-policy.mjs";
 import { HEAD_REGISTRY_ENTRY, HEAD_STATE_ENTRY, createHeadRegistry, validateHeadRegistry, validateHeadState } from "../lib/domain-head.mjs";
 import { COORDINATOR_ENTRY, coordinatorState, parallelTaskLimit, runOperation } from "../lib/operation-runner.mjs";
@@ -444,7 +444,8 @@ export default function harness(pi: Pi): void {
         const report = await runOperation(operation, {
           turn: (prompt: string) => executeCoordinatorTurn(pi, prompt, { cwd: process.cwd(), model: input.model, groupId: runId, signal: controller.signal }),
           headTurn: (prompt: string) => executeCoordinatorTurn(pi, prompt, { cwd: process.cwd(), role: "head", groupId: runId, signal: controller.signal }),
-          dispatch: async (task: any) => promoteTaskResult(await executeCoordinateTask(pi, validateTask(task), { cwd: process.cwd(), groupId: runId, signal: controller.signal, modelRegistry: ctx?.modelRegistry })),
+          dispatch: async (task: any) => promoteTaskResult(await executeCoordinateTask(pi, validateTask(task), { cwd: process.cwd(), groupId: runId, signal: controller.signal, modelRegistry: ctx?.modelRegistry,
+            timeout: managedTaskTimeout(task.owner), reviewerTimeout: managedTaskTimeout("reviewer") })),
           save,
         }, { state: coordinatorStates[id] ?? coordinatorState(operation), graph: taskGraphs[id], registry: headRegistries[id], headStates: headStates[id] ?? {}, mission: goal?.status === "active" ? goal.objective : undefined, cwd: process.cwd(), signal: controller.signal, parallelLimit });
         return { content: [{ type: "text", text: JSON.stringify(report) }] };
