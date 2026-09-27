@@ -150,9 +150,9 @@ HeadState v1 stores only Operation/Head IDs, turn count, last three concise deci
 
 ## ACP and external presentation
 
-`packages/pi-harness-acp` is the active ACP owner. It exposes ACP over stdio, owns the Pi RPC session process and session mapping, translates Pi events, relays cancellation, and projects `/plan`, `/goal`, `/learn`, and `/skill-hub`. The bridge has no ACP runtime dependency; upstream `pi-acp@0.0.33` is not an active dependency because it does not expose the required extension-command projection hook.
+`packages/pi-harness-acp` is the active ACP owner. It uses `@agentclientprotocol/sdk` 1.5.0 and targets ACP v1 over stdio. It owns Pi RPC session mapping, translates Pi text/thought/tool events, relays cancellation, and advertises `/plan`, `/goal`, `/learn`, and `/skill-hub`. The upstream `pi-acp@0.0.33` package is not an active dependency because it does not expose the required extension-command projection hook.
 
-TUI-specific status is optional; ACP clients receive textual command/status data. The package has no browser or screen-reader claim. Zed registration and end-to-end ACP forwarding require their dedicated smoke tests before release.
+The bridge rejects MCP servers and does not advertise `loadSession` or model selection. Pi owns provider, model, and authentication configuration. Automated ACP lifecycle and subprocess tests pass. Zed 0.229.0 GUI prompt integration passed with the registered `pi-harness` agent. This is client integration evidence, not a full official ACP conformance-suite result. See [packages/pi-harness-acp/UPSTREAM.md](packages/pi-harness-acp/UPSTREAM.md) for the tested surface and limits.
 
 ## Native feature boundaries
 

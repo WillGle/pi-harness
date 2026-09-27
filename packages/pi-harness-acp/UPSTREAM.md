@@ -9,10 +9,14 @@ Patch set:
 
 - package and executable are renamed to `@will/pi-harness-acp` and
   `pi-harness-acp`;
-- Pi is always spawned as `pi --mode rpc`; no provider, model, authentication,
-  alias, secret, or environment variable is introduced by this bridge;
-- persisted ACP-to-Pi session IDs, cancellation relay, Pi event forwarding,
-  and merged `/plan` and `/goal` extension command discovery are added.
+- the bridge uses `@agentclientprotocol/sdk` 1.5.0 and negotiates ACP protocol
+  version 1;
+- Pi runs with `--mode rpc`; the bridge does not set a provider, model, or
+  authentication method;
+- ACP session IDs map to persisted Pi session IDs;
+- ACP cancel notifications relay to Pi RPC abort;
+- Pi text, thought, and tool events map to ACP session updates;
+- `/plan`, `/goal`, `/skill-hub`, and `/learn` are advertised as ACP commands.
 
 ## Current upstream delta
 
@@ -22,26 +26,51 @@ executable rather than a supported command-projection API. The current bridge
 therefore remains the single active ACP implementation; no upstream dependency
 is installed.
 
-This package does not claim ACP/Zed acceptance: that is a release gate and must
-be run against the installed executable.
+## ACP v1 implementation and tested limits
+
+The bridge supports ACP v1 initialization, new and resumed sessions, prompt
+completion, cancellation, close, text and image content, streamed text and
+thought updates, tool-call updates, and the listed extension commands. For a
+normal prompt, the bridge returns `stopReason: "end_turn"` after Pi emits
+`agent_settled` and queued ACP updates finish. Registered Harness extension
+commands do not emit `agent_settled`; the bridge returns after the command's
+notification reaches the ACP client. A cancelled prompt returns
+`stopReason: "cancelled"`.
+
+Pi 0.87.1 serializes `message_update` without its assistant `message` envelope.
+The bridge uses `assistantMessageEvent` for those assistant-only updates. The
+controlled Pi RPC fixture uses the same shape.
+
+The package rejects MCP servers. It does not advertise `loadSession` or model
+selection. Pi owns provider, model, and authentication configuration. Session
+ownership is process-local; the bridge does not lock persisted session IDs across
+multiple ACP processes.
+
+The automated ACP lifecycle and subprocess tests pass. Zed 0.229.0 GUI testing
+with the registered `pi-harness` agent also passed: a prompt reached Pi and Zed
+displayed `ACP GUI check passed.`. This is client integration evidence. It is
+not an official ACP conformance-suite result.
 
 ## RPC lifecycle boundary
 
 A correlated native `get_state` response establishes readiness; spawn and first
 stdout do not. New and restored sessions await the same bounded readiness gate.
 RPC failures use bounded `PI_RPC_*` codes; exit rejects pending requests, and late
-responses are discarded. Cancellation uses a separate 500 ms abort acknowledgement,
-native EOF shutdown, then bounded TERM/KILL fallback. Ordinary RPC remains 30 s.
+responses are discarded. `session/cancel` and `$/cancel_request` abort the Pi prompt with a separate
+500 ms acknowledgement. The bridge keeps the Pi session when abort succeeds.
+Cancellation during session startup stops the request; a cancelled `session/new`
+cleans its owned child. Session shutdown uses native EOF, then bounded TERM/KILL
+fallback if required. Ordinary RPC remains 30 s.
 
-The bridge preserves its existing custom acceptance response. Pi prompt preflight
-acceptance is not terminal completion; `agent_settled` is forwarded separately.
-This is not a claim of ACP v1 conformance: the
-[official v1 contract](https://github.com/agentclientprotocol/agent-client-protocol/blob/main/docs/protocol/v1/overview.mdx)
-returns a stop reason after the turn, while
-[v2](https://github.com/agentclientprotocol/agent-client-protocol/blob/main/docs/protocol/v2/overview.mdx)
-separates acceptance and idle updates. No protocol migration is bundled into this fix.
-Cancel notifications do not receive a fabricated JSON-RPC response; legacy
-cancel requests still receive the existing acknowledgement after process exit.
+Pi's correlated RPC prompt response marks preflight acceptance. It does not mark
+turn completion. For normal prompts, the bridge waits for `agent_settled` and all
+queued session updates. A registered Harness command uses its queued completion
+notification because Pi does not emit `agent_settled` for extension commands. ACP
+`session/cancel` is a notification. The bridge does not fabricate a response.
+
+The bridge targets the stable ACP v1 contract. It does not claim full official
+ACP conformance. The automated suite covers the implemented lifecycle and tested
+message forms. Zed GUI integration covers one text prompt and response.
 
 Pi 0.87.1 may strand its catalog-store lock when it exits during asynchronous lock
 acquisition. Subsequent Pi startup can block before RPC initialization. Readiness

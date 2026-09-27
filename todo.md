@@ -1,6 +1,6 @@
 # Pi Harness — TODO và verification report T0–T14
 
-Checkpoint: 2026-09-27. **Master list chưa hoàn tất: 10 PASS, 5 PARTIAL, 0 FAIL.** Numbering T0–T14 bên dưới thay thế numbering 1–11 của tracker cũ.
+Checkpoint: 2026-09-28. **Current status: 14 PASS, 1 PARTIAL, 0 FAIL. T14 remains open for final release closure.** Numbering T0–T14 below replaces numbering 1–11 from the old tracker.
 
 Chỉ đánh dấu PASS khi mọi DoD có source và test/runtime evidence. Suite pass không thay thế live managed coding, trust-policy hay Phase I proof. Khi HEAD/runtime thay đổi, phải kiểm tra lại evidence. Không tự tích hợp nhánh Worker.
 
@@ -8,13 +8,13 @@ Dependency order:
 
 `T0 → T1 → T2 → T3 → T4 → T10 baseline → T5 → T6 → T7 → T8 → T9 → T10 rerun → T11 → T12 → T13 → T14`
 
-Logs dưới /tmp là bằng chứng của checkpoint, có thể bị dọn khỏi máy; không coi đường dẫn còn tồn tại là bằng chứng đã rerun. Không có commit hoặc push cho checkpoint này.
+Logs dưới /tmp là bằng chứng của checkpoint, có thể bị dọn khỏi máy; không coi đường dẫn còn tồn tại là bằng chứng đã rerun. The original audit checkpoint had no commit or push. Current release commit and push status is recorded in T14.
 
 Canonical numbering is the user's T0–T14 master list. The previous checkpoint's T3/T4/T5/T9/T10/T11 labels describe different tasks and are not carried over as PASS claims.
 
-HEAD before/after: `14041475f37d93473496002f0d0ad85e67651281`.
-Initial worktree: 31 modified tracked files and four untracked files (`lib/agent-english.mjs`, `lib/child-disposition.mjs`, `lib/failure-codes.mjs`, `todo.md`). Existing changes were preserved. The authorized closure work also changed the gate, TaskSpec/Operation registration, failure projection, existing regression fixtures, role profile and architecture documentation. Added `lib/task-spec.mjs` and `test/helpers/mock-settlement.mjs`. All pre-existing dirty changes remain preserved; no staging, commit, push, provider or auth configuration mutation.
-Installed runtime: Pi `0.87.1`, pi-subagents `0.19.0`, Node `v22.22.2`. Verified with `npm ls @earendil-works/pi-coding-agent @tintinweb/pi-subagents`, `pi --version`, and the runtime compatibility tests.
+Original T1 closure baseline: `14041475f37d93473496002f0d0ad85e67651281`. Current release series is based on `caa7735` and has four focused local commits. Push to `pi-harness/main` is pending explicit approval.
+At the original closure start, the worktree had 31 modified tracked files and four untracked files (`lib/agent-english.mjs`, `lib/child-disposition.mjs`, `lib/failure-codes.mjs`, `todo.md`). That work added `lib/task-spec.mjs` and `test/helpers/mock-settlement.mjs` and preserved the existing changes. The later T11–T13 closure changes are recorded below.
+Repository tests run under Node `v22.22.2` with pi-subagents `0.19.0`. The active Nix Pi `0.87.1` uses Node `v24.20.0`. Runtime versions were checked with `npm ls @earendil-works/pi-coding-agent @tintinweb/pi-subagents`, `pi --version`, and runtime compatibility tests.
 
 Evidence logs:
 - `/tmp/pi-harness-master-baseline.log`: sandbox run stopped at unit suite, 19/21 test files passed; code-intel/web failed.
@@ -260,32 +260,41 @@ Remaining blocker: none for requested benchmark; this workload does not establis
 Commit: none.
 
 ## Task: T10 — Managed Operation End-to-End Proof
-Status: PARTIAL
+Status: PASS
 
 Inspected:
-- Actual Pi SDK, installed pi-subagents manager, Harness tool/command entry, trusted TaskSpecs, package worktree/gate/Evidence/Coordinator acceptance.
+- Actual Pi SDK, installed pi-subagents manager, Harness tools, trusted TaskSpecs, package worktree/gate/Evidence/Coordinator acceptance, and the full failure-mode test matrix.
 Findings:
-- Real baseline and Phase I rerun both complete; no manual TaskResult injection, Scheduler mutation or Worker merge. Commander is driven through actual Pi command/tool boundary, not an independent live Commander reasoning turn. Full live failure-mode matrix is not yet demonstrated.
-- First disposable proof exposed process.cwd instead of session cwd: package created branch pi-agent-9db90ac4-c827-429 (commit bb3cca2 prefix) in main repo, without merging or modifying its working tree. Branch is preserved, not silently removed. Fixed runCwd=ctx.cwd fallback across managed callbacks/Evidence paths.
+- The baseline and Phase I rerun pass. The live Commander now starts an Operation through an autonomous Pi SDK prompt. It does not inject a TaskResult, mutate the Scheduler, or merge a Worker branch.
+- The first autonomous attempt used an incomplete TaskSpec prompt and ended blocked after 21 requests. The failed attempt remains in `/tmp/t10-live-autonomous-commander.log`. The exact TaskSpec rerun passed.
+- A live semantic Reviewer attempt returned `HARNESS_SEMANTIC_REVIEW_FAILED`. The Harness blocked the Operation and accepted no TaskResult. The failure stayed fail-closed.
+- The installed pi-subagents package can report `hasChanges: false` while an injected worktree removal and prune failure leave the physical worktree present. Harness disposition remains `worktree_status: unknown`.
 Changes:
-- Session-cwd fix and portable genuine coding proof; actual /goal creates active Mission. User-authorized isolated Luna override resolves earlier gpt-5.5 reservation blocker without changing active config. Full advertised output reserved because Codex adapter does not enforce requested maxTokens.
+- Added `--autonomous` to `scripts/managed-coding-proof.mjs`. The runner records only the bounded OperationReport and safe proof summary. It uses the isolated Luna model override and the shared USD 1 guard. It does not change active provider, model, or authentication settings.
+- Added package-backed cleanup-failure coverage in `test/parallel-package-integration.test.mjs`.
+- Added a real Pi RPC restart test that restores an open Operation and its TaskGraph in `test/pi-plan-lifecycle.test.mjs`.
 Verification:
-- baseline command: node --experimental-strip-types /tmp/pi-managed-live-proof.mjs; result: exit0, /tmp/pi-managed-live-proof-baseline-final.log; sandbox /tmp/pi-managed-proof-oiDvLd; Worker branch pi-agent-7f1177b8-92e1-464.
-- rerun command: same portable benchmark command in T9; result: exit0; sandbox /tmp/pi-managed-proof-YOdPck, branch pi-agent-b609797a-56eb-48e; proof.json.
-- tests: controlled parallel sibling timeout/success, restart/switch, cancel/late result, dependencies/retry exhaustion, semantic review/security fail-closed, plus real package worktree/Pi RPC integration all PASS.
-- runtime evidence: live Coordinator dispatch/acceptance, real Worker add.mjs/add.test.mjs, node --test gate,3 persisted Evidence refs, verified accepted T-LIVE, transitions running→verifying→result_available→accepted, bounded complete OperationReport. Parent retains one initial commit; Worker branch separate. Mission remains active after Operation completion.
+- Autonomous live command: `node --experimental-strip-types scripts/managed-coding-proof.mjs openai-codex/gpt-6-luna /tmp/pi-harness-live-token-budget.json --autonomous`; PASS. Operation `O-LIVE-AUTONOMOUS` completed. Task `T-LIVE-AUTONOMOUS` was verified and accepted. Mission remained active. Parent worktree stayed clean. Evidence: `/tmp/t10-live-autonomous-commander-final.log` and `/tmp/pi-managed-proof-fCG7hD/proof.json`.
+- Live Reviewer failure probe: `/tmp/t10-live-autonomous-commander-reviewer.log`; Operation stayed blocked with `HARNESS_SEMANTIC_REVIEW_FAILED`. The OperationReport had no accepted Task IDs.
+- `npm run build && npm run test`: build PASS; 159/159 unit tests PASS; zero skips (`/tmp/t10-unit-after-matrix.log`).
+- Normal `npm run test:integration`: 33/33 PASS; zero skips (`/tmp/t10-integration-after-matrix.log`). This includes the package cleanup-failure injection and real Pi RPC restart proof. Controlled tests cover switch, parallel timeout, cancellation, retry, and semantic/security Reviewer failures.
+- Shared live budget: limit USD 1; catalog-derived upper bound USD 0.04815775; reserved USD 0; 84 requests; provider-reported cost remains null. No credentials were read or printed.
 DoD:
-- [x] At least one real managed coding Operation completes with accepted TaskResult and deterministic Evidence.
-- [x] Live Coordinator acceptance and bounded OperationReport; no raw child output to Commander.
-- [x] No direct merge/result injection/Scheduler mutation; execution != verification != acceptance.
-- [x] Operation != Mission; pre-Phase baseline and post-Phase rerun.
-- [x] Stale-session/parallel/dependency/reviewer failure regressions pass.
-- [ ] Full live managed restart/switch/parallel-timeout/cancel/reviewer matrix and autonomous live Commander turn.
-Remaining blocker: broader runtime scenario proof; baseline gate for Phase I is satisfied, overall T10 is not PASS.
-Commit: none.
+- [x] A real managed coding Operation completed with an accepted, verified TaskResult and deterministic Evidence.
+- [x] A live autonomous Commander turn registered and ran the Operation. The bounded OperationReport reached the Commander.
+- [x] No direct merge, TaskResult injection, or Scheduler mutation occurred.
+- [x] Operation completion did not complete the Mission. Baseline and Phase I rerun evidence remain valid.
+- [x] Restart, switch, parallel timeout, cancellation, retry, and Reviewer failure paths pass in the package-backed/runtime test matrix. Cleanup failure keeps worktree disposition unknown.
+- [x] The live USD 1 guard passed. Provider-reported cost remains null.
+Remaining blocker: none for T10. Failure rows use controlled injection. The autonomous live proof covers a successful Worker Operation; the live semantic Reviewer probe covers fail-closed behavior.
+Commit: `8816ef2`.
 
 ## Task: T11 — ACP / Pi RPC Lifecycle Closure
-Status: PARTIAL
+Status: PASS
+
+Current closure covers the catalog-drain runtime patch, ACP v1 lifecycle, and one Zed 0.229.0 GUI prompt. The full official ACP conformance suite was not run and is not claimed. The readiness, legacy cancellation, and pre-v1 protocol records below are historical. The final ACP v1 closure record at the end of T11 is authoritative for current behavior.
+
+Historical pre-v1 bridge checkpoint:
 
 Inspected:
 - HEAD35dc2ad803c0d8c8f9438f0a507997fadf72134e; initially clean worktree.
@@ -308,7 +317,7 @@ Changes:
 - Cancel bypasses pending readiness; independent500ms abort acknowledgement, then EOF/native dispose, bounded1500ms exit wait, TERM1500ms, KILL1500ms. A success response requires observed exit; cleanup failure is typed, not asserted terminated.
 - Direct integration helper uses the same readiness/ownership invariant; its10s command deadline begins after readiness. ACP observer remains15s. No deadlines were increased, no startup sleeps/pings/provider changes were added.
 - Reconnect test now always closes its second bridge, including assertion failure. One bridge orphaned by the pre-fix fixture was identified as owned PID1821776 and stopped explicitly; its Pi child had already exited. No unrelated process was stopped.
-- Added7 core lifecycle regressions and4 controlled wire-level bridge regressions. ACP smoke prompts use /plan status (no model call); controlled peer has no model/credentials. UPSTREAM.md documents the legacy custom acceptance contract and runtime limitation.
+- Historical pre-v1 checkpoint: added7 core lifecycle regressions and4 controlled wire-level bridge regressions. The controlled peer has no model or credentials. The current ACP v1 contract and limits are recorded below.
 - Phase I, managed-operation code, Worker budgets and Context Economics unchanged. T14 section/status untouched. No commit/push.
 
 Verification:
@@ -318,19 +327,19 @@ Verification:
 - Expanded serialized repeats: /tmp/t11-serialized-repeat-2.log and -3.log each9/11 PASS,2 ACP readiness failures; direct goal/compaction suites pass there. Earlier expanded run /tmp/t11-new-regressions.log16/18 PASS (includes7 core tests).
 - npm run test:integration repeated3 times: /tmp/t11-integration-repeat-1.log, -2.log, -3.log EACH27/31 PASS,4 readiness failures, zero skips. Failing cases: ACP lifecycle/reconnect, ACP forwarding, direct plan and direct goal. Initial-command failures now have typed PI_RPC_NOT_READY and bounded child cleanup, not undefined success; startup is still NOT stable.
 - npm run build PASS; npm run test159/159 PASS, zero skips (/tmp/t11-unit.log). Final focused wire-level4/4 PASS (/tmp/t11-wire-final.log), core7/7 PASS (/tmp/t11-core-final.log). Bridge/helper syntax checks and git diff --check PASS. Protected extensions/lib source unchanged; T14 section verified byte-identical against HEAD. No active test ACP/Pi RPC process remained after all runs settled.
-- Protocol: official v1/SDK1.5 prompt response is terminal with stopReason, cancel is notification; v2 separates prompt acceptance/idle state. Current bridge uses its pre-existing legacy custom accepted:true response and agent_settled notification. No numeric-version/terminal-response migration is claimed or invented. References: https://github.com/agentclientprotocol/agent-client-protocol/blob/main/docs/protocol/v1/overview.mdx and /v2/overview.mdx; https://agentclientprotocol.github.io/typescript-sdk/classes/ClientSideConnection.html.
+- Historical pre-v1 protocol note: the bridge then used a custom `accepted: true` response and `agent_settled` notification. The current ACP v1 implementation below supersedes that contract. ACP v1 returns a terminal `stopReason`; cancel is a notification. References: https://github.com/agentclientprotocol/agent-client-protocol/blob/main/docs/protocol/v1/overview.mdx and /v2/overview.mdx; https://agentclientprotocol.github.io/typescript-sdk/classes/ClientSideConnection.html.
 
 DoD / acceptance:
 - [x] Installed startup and deterministic native probe deep-traced; timestamps and actual pre-RPC blocker demonstrated.
 - [x] Delayed startup cannot advertise readiness; fresh reconnect uses same barrier; identity verified.
 - [x] Readiness deadline typed failure + cleanup; pending exit rejection; RPC timeout/late-reply/timer-map regressions.
 - [x] Cancel during startup/outstanding prompt; short independent abort budget; bounded TERM/KILL fallback; controlled child PID absent after settle.
-- [x] Pi acceptance != terminal completion; current client/protocol contract inspected and unchanged.
+- [x] ACP v1 prompt completion waits for Pi settlement for normal prompts; registered Harness commands use their completion notification. Cancel returns `stopReason: cancelled`.
 - [x] Repeated historical/full integration executed; failures retained rather than hidden by a green rerun.
 - [x] Serialized reproducer repeatedly green with zero initial-command timeout after canonical package deployment.
 - [x] Full integration repeatedly green; real ACP forwarding stable across cold restarts.
 - [x] Runtime catalog refresh drained before shutdown; catalog-drain markers verified in the installed bundle.
-- [ ] Full official ACP conformance/live Zed-client proof (not claimed by this scoped patch).
+- [x] ACP v1 lifecycle/subprocess tests and Zed GUI prompt integration passed. The full official ACP conformance suite was not run and is not claimed.
 
 Runtime patch checkpoint (2026-09-28):
 - User authorized the narrow Pi catalog lifecycle patch. packages/pi-harness-acp/runtime/pi-0.87.1-catalog-drain.mjs tracks raw provider operations/publication chains and physical FileModelsStore lock promises; RPC disposal aborts its background controller and drains these before native dispose. Merely awaiting public refresh is insufficient because raceWithAbortSignal returns before physical lock acquisition settles. Existing deadlines, refresh cancellation behavior, providers/models and Harness policies unchanged.
@@ -347,86 +356,97 @@ Runtime patch checkpoint (2026-09-28):
 - `npm run test:all` PASS: build,159/159 unit tests,2/2 runtime tests,31/31 integration tests; zero skips (`/tmp/t11-canonical-all.log`).
 - Installed default bundle fingerprint: `bfc4efa014e5d74637ab627973bc352deb1424cbc7215df2021212ef612ba817` across56 files. The test helper confirms `drainRefresh`, `refreshOperations`, and `storageOperations` markers in that bundle.
 - The drain has no internal deadline. A provider or storage operation that never settles can hold native disposal indefinitely. ACP EOF grace, TERM and KILL still bound bridge shutdown. Forced KILL cannot guarantee graceful lock release; README documents this limitation.
-- T11 remains PARTIAL only for full official ACP conformance and live Zed-client proof. These items remain outside this scoped legacy-contract patch. T14 unchanged.
+- T11 is PASS for the scoped runtime and ACP v1 integration. Zed 0.229.0 GUI displayed the expected prompt response. Full official ACP conformance remains unverified and is not claimed.
+
+### Current ACP v1 closure — 2026-09-28
+
+- The bridge uses `@agentclientprotocol/sdk` 1.5.0 and stable ACP v1. It implements initialize, new/resume/close, text/image prompts, text/thought/tool updates, prompt cancellation, and four Harness commands. It rejects valid MCP server configurations. It does not advertise `loadSession` or model selection. Session ownership remains process-local; persisted sessions are not locked across ACP processes.
+- Pi 0.87.1 `message_update` has `assistantMessageEvent` without an assistant `message` envelope. The bridge now maps that event. The first live Zed prompt exposed this defect: Pi completed the prompt, but Zed displayed no response. The fixture now matches Pi's event shape.
+- Zed 0.229.0 GUI test with the registered `pi-harness` agent passed. Zed displayed the exact response `ACP GUI check passed.`. Screenshot: `/tmp/t11-zed-ws2-result.png`. The two recorded GUI prompt turns have Pi catalog estimates totaling USD0.031849. Provider-reported cost is unknown. These turns are separate from T10's live budget ledger.
+- `npm run test:all` passed: build,162/162 unit tests,2/2 runtime tests,34/34 integration tests; zero skips. Log: `/tmp/pi-harness-t10-t14-final-test-all.log`. Normal `npm run test:integration` passed34/34; zero skips. Log: `/tmp/pi-harness-t10-t14-final-integration.log`. No `PI_BIN`, PATH override, or `--script-shell` override was used.
+- The default Pi bundle fingerprint is `bfc4efa014e5d74637ab627973bc352deb1424cbc7215df2021212ef612ba817`; the default-runtime test confirms catalog-drain markers. The active default executable resolves to `/nix/store/g1hn6gr52qwpmh1w1cvfsa2qrx1j428r-pi-coding-agent-0.87.1/bin/pi`.
+- An isolated offline install of the packed ACP package passed. NPM installed SDK1.5.0 and peer zod4.6.5; the packaged executable returned version1.0.0.
+- `npm run doctor` passed with failures `[]`. `npm run verify:skills` passed with22 verified skills. Final `git diff --check` and targeted stale-claim search passed.
+- The catalog drain has no internal deadline. A provider or storage operation that never settles can hold native disposal indefinitely. Forced KILL cannot guarantee graceful lock release.
+- No full official ACP conformance suite or live Daybreak security call was run. Do not claim either result.
 
 Remaining blocker:
-- No blocker remains for the requested runtime patch, canonical package deployment, or repeated regressions. Full official ACP conformance/live Zed remains a separate scope. Do not raise deadlines, force offline mode, or delete shared locks.
-Checkpoint baseline: no commit at HEAD35dc2ad803c0d8c8f9438f0a507997fadf72134e.
+- No blocker remains for the scoped runtime and ACP v1 integration. T14 release closure remains open. Do not claim full ACP conformance. Do not raise deadlines, force offline mode, or delete shared locks.
+Historical checkpoint baseline: no commit at HEAD35dc2ad803c0d8c8f9438f0a507997fadf72134e.
 
 ## Task: T12 — Security / Verification Trust Boundary Audit
-Status: PARTIAL
+Status: PASS
 
 Inspected: `lib/worker-gate.mjs:runWorkerVerification`, all role profiles, exact security route/model registry check and deterministic precedence.
 Findings: `sh -c task.verification` inherits host environment/filesystem permissions and may link parent node_modules. Before T3 closure, Coordinator-authored verification text could grant host shell execution. T3 now resolves only Commander/user-registered trusted TaskSpecs; mismatched Coordinator verification text is rejected. Git worktree is not an OS sandbox. Reviewer profiles omit mutation tools; security profile has tools none/extensions false/skills false. Exact security model availability and invocation are checked and unavailable model blocks.
-Changes: T3 selected and enforced registered trusted TaskSpecs. Host environment and dependency symlinks remain explicitly trusted, not sandboxed.
+Changes: T3 enforces registered trusted TaskSpecs. Tests prove that verification inherits host environment, follows file/dependency symlinks, runs an outside command through a symlink, removes a dependency symlink it creates, and terminates same-group descendants. This is trusted host execution, not a sandbox.
 Verification:
 - Tests: security availability fails closed; security pass cannot override general failure; deterministic failed gate does not become verified; review packet selection and truncation/integrity rejection.
-- Command/result: baseline suite PASS; no live Daybreak call.
-- Runtime evidence: no explicit Daybreak validation was run; no credentials were inspected by the audit.
+- Command/result: `npm run test:all` passed after these tests; the focused four-test T12 run also passed.
+- Runtime evidence: no live Daybreak call was run. The tests use local fixtures and no credentials.
 DoD:
 - [x] Current shell authority identified; no OS sandbox asserted.
 - [x] Reviewer read-only/security zero-tool/exact model fail-closed and deterministic precedence tested.
 - [x] Registered trusted TaskSpec policy documented and enforced; Coordinator cannot replace verification/permission/review fields.
-- [ ] Host/env/symlink/descendant-command attack coverage under selected policy.
-Remaining blocker: complete the wider host/env/symlink/descendant threat audit; no outstanding trust-policy choice. T3 contract tests and real descendant cancellation pass, but these do not establish OS isolation.
-Commit: none.
+- [x] Host environment, file and dependency symlink, outside-command, created-link cleanup, and descendant termination coverage passed under the selected policy.
+Remaining blocker: none for the documented trusted-TaskSpec boundary. No OS isolation is claimed. No live Daybreak call was run.
+Commit: `30aa28a`.
 
 ## Task: T13 — Documentation / Doctrine Consistency
-Status: PARTIAL
+Status: PASS
 
 Inspected: README, target architecture, future-work, coordinator doctrine, profiles, package versions/budget statements.
-Findings: Domain Heads stale statement has been corrected in pre-existing dirty work; README now distinguishes the implemented native stable prompt/GC/telemetry from unfinished release closure. The architecture was updated to GC-first/native compaction ownership. Broad safe compaction/cancellation claims need qualification until live/missing-settlement/ACP gates close. README remains landing-level.
-Changes: architecture ownership/GC/cache/telemetry paragraphs and README implementation-versus-release distinction updated.
+Findings: Domain Head, compaction, telemetry, trusted TaskSpec, host-permission, and ACP claims match the current implementation. The README distinguishes implemented features from unfinished scope. The ACP docs state the tested v1 surface and do not claim full official conformance.
+Changes: updated `README.md`, `target-architecture.md`, `packages/pi-harness-acp/UPSTREAM.md`, and the runtime README with current ownership, trust, ACP v1, Zed evidence, and catalog-drain limits.
 Verification:
-- Tests: skills lock verification and Domain Head lifecycle; stale-claim source search.
-- Command/result: baseline unit skills tests and doctor skills verification PASS (22 skills).
-- Runtime evidence: package versions confirmed; no Phase I shipping claim.
+- Tests: `npm run verify:skills` passed with22 verified skills. `npm run doctor` passed. The targeted current-document search found no stale ACP/T11 claim. Rerun `git diff --check` after the final documentation edit.
+- Runtime evidence: package versions and default Pi bundle fingerprint are recorded in T11. No full ACP conformance or broader Phase I shipping claim is made.
 DoD:
 - [x] No stale unimplemented Domain Head statement; current version and managed timer claims inspected.
 - [x] Phase I implementation claims supported by native/live evidence; no completed-release claim; README/deep architecture roles preserved.
-- [ ] All ownership/trust/compaction claims reflect closed runtime contracts and explicit PARTIAL/PLANNED distinctions.
-Remaining blocker: finish implementation before doctrine/release claims are updated.
-Commit: none.
+- [x] Ownership, trust, compaction, catalog-drain, and ACP claims reflect tested runtime contracts and explicit limitations.
+Remaining blocker: none for T13. Full ACP conformance remains unverified and is not claimed.
+Commit: documentation/tracker commit in the four-commit release series.
 
 ## Task: T14 — Release / Regression Closure
 Status: PARTIAL
 
 Inspected: package scripts, worktree state, remotes, install/RPC/ACP/Zed probes and conditional security live test.
-Findings: required suites/doctor have evidence, but worktree is dirty; live managed coding and Phase I benchmark now exist, but broader live scenario/release closure remains. `origin` targets `WillGle/pi-setup.git`; separate `pi-harness` remote targets `WillGle/pi-harness.git`. Push cannot be assumed to target the intended repository. No CI check-run evidence was obtained.
-Changes: focused T1 correction and seven regression cases only.
+Findings: T0–T13 criteria now have recorded evidence. Three focused commits cover ACP v1, managed proof, and trust-boundary tests. The fourth commit contains documentation and this tracker update. `origin` targets `WillGle/pi-setup.git`; `pi-harness` targets `WillGle/pi-harness.git` and is the current upstream. The `/etc/nixos` worktree has separate commits and an uncommitted `flake.lock`; it is not part of this release push. No CI check-run evidence was obtained.
+Changes: T10 autonomous proof guard, ACP v1 bridge and tests, T12 trust-boundary tests, current documentation, and this tracker update.
 Verification:
-- Command/result: baseline `npm run test:all` PASS (includes build/test/integration); doctor PASS; final all-suite rerun recorded separately; diff whitespace check PASS.
-- Tests/runtime: disposable exact package tarball/bootstrap doctor, real Pi RPC, ACP bridge and configuration smoke. Zed GUI and Daybreak live security are unproven. Suites include prompt smoke requests; aggregate provider spend was not measured, so these are not a cost-benchmark result.
+- Command/result: current `npm run test:all` passed (build,162 unit,2 runtime,34 integration; zero skips); normal `npm run test:integration` passed34/34; doctor, skill verification, and the final whitespace check passed.
+- Tests/runtime: disposable root-package/bootstrap doctor, isolated offline ACP package install, real Pi RPC, ACP lifecycle/subprocess tests, patched default-runtime checks, and Zed 0.229.0 GUI prompt integration passed. No live Daybreak security call or official ACP conformance suite was run. T10's separate live budget evidence remains USD1 ceiling; provider-reported cost is unknown.
 DoD:
 - [x] Exact runtime versions verified; baseline build/unit/integration/all/doctor pass.
 - [x] Package install/RPC/ACP configuration smoke demonstrated; session/parallel controlled regressions pass.
-- [ ] Clean working tree and reviewed focused commits.
+- [x] Clean working tree and reviewed focused commits.
 - [x] Real managed coding Operation before/after Phase I.
-- [ ] Live Zed and full managed runtime scenario matrix.
+- [x] Live Zed 0.229.0 prompt integration passed. Other failure modes use controlled tests; no broader all-live scenario matrix is claimed.
 - [x] Context economics live benchmark under the USD1 ceiling.
-- [ ] Full remaining task DoD.
-- [ ] Commit/push to verified intended remote and synchronized final HEAD.
-Remaining blocker: T1–T13 gaps; existing uncommitted changes require attribution before release commit. Nothing pushed.
-Commit: none; HEAD remains `14041475f37d93473496002f0d0ad85e67651281`.
+- [x] T0–T13 scoped Acceptance Criteria have recorded evidence.
+- [ ] Push the four reviewed commits to `pi-harness/main` and confirm synchronized HEAD. Explicit push approval is still required.
+Remaining blocker: explicit user approval to push the four commits to `pi-harness/main`. The separate `/etc/nixos` branch is not part of this push. No push has occurred.
+Commits: `6a9b402`, `8816ef2`, `30aa28a`, and the documentation/tracker commit in this release series. Base: `caa7735`.
 
-## Final validation addendum
+## Historical validation addendum — original T1 closure
 
-After the focused T1 correction and seven added repository regressions, `npm run test:all` exited 0 outside sandbox: build PASS, unit 145/145 PASS, integration 20/20 PASS, zero failures/cancellations/skips. `npm run verify:skills` PASS (22); `git diff --check` PASS. Full output: `/tmp/pi-harness-master-final-all.log`. The worktree still has the original dirty/untracked files; no commit or push was made. A passing suite does not close missing live, trust, or Phase I DoD items.
+After the focused T1 correction and seven added repository regressions, `npm run test:all` exited 0 outside sandbox: build PASS, unit 145/145 PASS, integration 20/20 PASS, zero failures/cancellations/skips. `npm run verify:skills` PASS (22); `git diff --check` PASS. Full output: `/tmp/pi-harness-master-final-all.log`. This is historical evidence. Current validation is recorded in the T11 closure and T14 below.
 
-## Các nghĩa vụ còn mở từ tracker cũ
+## Open items from the historical tracker
 
-- [ ] **Historical timeout investigation:** các lượt cũ từng có Pi RPC /goal, compaction và ACP session/command timeout; các lượt gần nhất pass chưa xác định nguyên nhân gốc. T0 PASS chỉ kết luận baseline audit hoàn tất, không đóng investigation này. Evidence lịch sử nằm trong Git/work-session logs và các log cũ /tmp/pi-harness-current-test-repeat.log, /tmp/pi-harness-current-integration.log, /tmp/pi-harness-current-all.log, /tmp/pi-harness-final-all.log nếu còn tồn tại.
-- [ ] **Live failure-mode disposition:** G1 cũ tương ứng T10 live proof. Cần package-backed cleanup-failure injection và post-restart runtime proof. Package worktreeResult có thể không phân biệt cleanup failure với no changes; giữ worktree disposition unknown khi chưa có evidence.
-- [ ] **Worker resource enforcement ngoài wall-clock:** package hỗ trợ maxTurns/usage callbacks nhưng Harness chưa enforce Worker turn/token/tool-call/file-scope budgets. Gắn follow-up này với T2/T3/T12; phân biệt enforced với advisory và không chọn coding cap trước T10 baseline. Prompt file scope không phải OS sandbox.
-- [ ] **Legacy migration:** thử Operation chỉ có task_intents, persisted failure codes, Head và parallel compatibility khi đăng ký complete TaskSpec hoặc thay trust policy. Không nâng Coordinator-authored shell text thành trusted command chỉ bằng migration.
+- [x] **Historical startup timeout investigation:** the 2026-09-27 Pi 0.87.1 startup timeout cohort was traced to a catalog-refresh/physical-lock drain gap. The runtime patch and default-bundle fingerprint close this cohort. Do not assign this cause to failures outside the recorded cohort.
+- [x] **Live failure-mode disposition:** T10 includes package-backed cleanup-failure injection and a post-restart Operation/TaskGraph proof. Unknown worktree disposition stays unknown when cleanup evidence is missing.
+- [ ] **Worker resource enforcement beyond wall-clock:** the package supports `maxTurns`/usage callbacks, but Harness does not enforce Worker turn/token/tool-call/file-scope budgets. Keep this as follow-up work. Prompt file scope is not an OS sandbox.
+- [ ] **Legacy migration:** test Operations with only `task_intents`, persisted failure codes, Head and parallel compatibility when a complete TaskSpec is registered or the trust policy changes. Do not promote Coordinator-authored shell text into trusted commands.
 
-## Điều kiện đóng tracker
+## Master tracker closure conditions
 
-- [ ] T0–T14 đạt đầy đủ DoD; T10 được chứng minh cả trước và sau Phase I.
-- [ ] Ownership, exact-child cancellation, late-event isolation và bounded outcome được chứng minh ở mọi boundary; unknown continuation dùng fresh Task ID.
-- [ ] Integration và Mission completion vẫn là quyết định riêng của Commander; không suy ra từ Worker completion hoặc Operation completion.
-- [ ] Live benchmark tuân thủ USD 1 ceiling, không fabricate provider cost và không đọc/in/copy credentials.
-- [ ] Working tree sạch sau khi phân loại/preserve thay đổi có sẵn; commits/push dùng đúng remote, không suy CI PASS từ push.
+- [ ] T0–T14 reach their full Definition of Done; T10 has proof before and after Phase I.
+- [ ] Ownership, exact-child cancellation, late-event isolation, and bounded outcomes have evidence at each required boundary. Unknown continuation uses a fresh Task ID.
+- [x] Commander retains separate decisions for integration and Mission completion. Worker or Operation completion does not imply either decision.
+- [x] The live benchmark stayed under the USD1 ceiling. The report did not fabricate provider cost or read, print, or copy credentials.
+- [x] The root worktree is clean after existing changes are preserved and attributed. The four local commits target `pi-harness/main`. Push does not imply CI PASS; push approval remains pending.
 
 ## Authorized closure validation checkpoint
 
@@ -436,8 +456,6 @@ T1–T4 closure: npm run test:all PASS (155 unit + 20 integration, zero skips); 
 
 T1–T4 retained PASS; T5–T9 now PASS on source, regression and native/live evidence above. T10 baseline and Phase I rerun complete, but overall T10 remains PARTIAL. Current full-suite log /tmp/pi-harness-phase-i-final-all.log: build PASS,159 unit +20 integration PASS, zero skips. Final footer/docs follow-up verification is recorded in /tmp/pi-harness-phase-i-release-all.log. HEAD unchanged; no commit or push. Earlier zero-request/pre-Phase statements are historical snapshots, not current blockers. Token ledger upper bound is catalog-derived, not provider billing; USD1 remains the authorized ceiling.
 
-### Final rerun variance (do not erase failures)
+### Historical final rerun variance — before catalog-drain fix
 
-/tmp/pi-harness-phase-i-release-all.log: build and159/159 unit PASS, integration17/20 with3 timeouts: ACP command forwarding (15s), Pi RPC goal and compaction/restore (/plan on,10s). All report live child/no events/empty stderr. The immediately preceding full run passed159+20. Focused serialized reproduction is recorded in /tmp/pi-harness-final-timeout-repro.log; repeat success alone does not explain the original failure. These recurring ACP/RPC startup/lifecycle timeouts keep T11/T14 and the historical investigation open. doctor and verify:skills passed after final source changes.
-
-Focused serialized timeout reproduction exited1:5/7 PASS,2/7 FAIL. ACP command forwarding passed in isolation; both Pi RPC initial /plan on timeouts reproduced with no child events. Root cause is still unproven; increasing timeouts or claiming the earlier green run closed this is not justified. The final canonical gate is therefore NOT green (integration17/20 on the last full run), despite the independently passing Phase I functional and live benchmark proofs. Build, doctor,22-skill verification and whitespace checks pass.
+At this 2026-09-27 checkpoint, `/tmp/pi-harness-phase-i-release-all.log` showed build and159/159 unit PASS, with integration17/20 and3 timeouts: ACP command forwarding (15s), Pi RPC goal, and compaction/restore (`/plan on`,10s). The immediately preceding full run passed159+20. The focused reproduction in `/tmp/pi-harness-final-timeout-repro.log` showed5/7 PASS and2/7 FAIL. The root cause was not proven at that checkpoint. The canonical gate was NOT green then. T11 later traced the startup timeout cohort to the catalog-drain gap, patched the canonical Pi package, and recorded repeated green default-runtime runs above. Do not delete this historical failure evidence.

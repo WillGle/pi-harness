@@ -24,9 +24,10 @@ The script validates all version/source anchors first and rebuilds the actual
 bundled CLI. It must not be run against `/nix/store` or the active user's agent
 directory. Nix deployment belongs in the existing Pi package derivation's build
 hook; do not introduce a second PATH shim or mutate generated system links.
-Neither the Nix installation nor the repository's npm-installed Pi has been
-changed by the disposable validation. T11 remains PARTIAL until the build hook
-and default runtime path are verified with repeated regressions.
+The disposable validation does not mutate installed runtimes. The canonical Nix
+package build now applies this patch, and the active default Pi resolves to the
+rebuilt output. The default-runtime fingerprint and repeated integration tests
+verify deployment. See the T11 evidence in `todo.md`.
 
 Regression tests, using the repository's exact Pi dependency without credentials
 or network calls:

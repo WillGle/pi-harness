@@ -55,7 +55,7 @@ A Worker finishing execution is not success by itself. Harness stores Evidence, 
 - Explicit TaskResult acceptance and bounded OperationReports.
 - Safe session switching, cancellation, and compaction lifecycle.
 
-Pi Harness also provides `/plan`, `/goal`, curated skills, and `pi-harness-acp` for ACP-compatible clients.
+Pi Harness also provides `/plan`, `/goal`, curated skills, and `pi-harness-acp`, an ACP v1 bridge for compatible clients.
 
 ## Quick start
 
@@ -69,7 +69,7 @@ npm run bootstrap -- --cli
 npm run doctor
 ```
 
-Then run `pi`. To install the ACP bridge and configure Zed, run `npm run bootstrap` without `--cli`; the Zed settings file must already exist.
+Then run `pi`. To install the ACP bridge and configure Zed, run `npm run bootstrap` without `--cli`; the Zed settings file must already exist. Zed 0.229.0 GUI prompt integration passed. The bridge's tested surface and unsupported features are documented in [UPSTREAM.md](packages/pi-harness-acp/UPSTREAM.md); this is not a full official ACP conformance claim.
 
 ## Architecture
 
@@ -77,7 +77,7 @@ See [target-architecture.md](target-architecture.md) for authority, lifecycle, s
 
 ## Status and limitations
 
-Managed Operations, bounded parallel Task waves, Evidence-backed verification, and session-safe cancellation are shipped. Dynamic TaskGraph expansion, automatic branch integration, automatic Mission completion, and persistent project intelligence are not shipped. The working implementation uses native stable prompts, deterministic Context GC, and availability-aware context telemetry; release closure and broader live scenario proof remain pending. An Operation completing does not complete the Mission.
+Managed Operations, bounded parallel Task waves, Evidence-backed verification, and session-safe cancellation are shipped. Dynamic TaskGraph expansion, automatic branch integration, automatic Mission completion, and persistent project intelligence are not shipped. The working implementation uses native stable prompts, deterministic Context GC, and availability-aware context telemetry; release closure and broader live scenario proof remain pending. Registered verification commands run with host permissions and environment. Git worktrees and process groups are not OS sandboxes. An Operation completing does not complete the Mission.
 
 ## Development and testing
 
