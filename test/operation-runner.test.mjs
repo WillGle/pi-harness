@@ -31,6 +31,34 @@ test("Coordinator packet contains bounded semantic state, not transcripts", () =
   assert.doesNotMatch(profile, /tools:.*\b(?:bash|write|edit|Agent)\b/);
 });
 
+test("operationBrief exposes validated Operation constraints and Task intents unchanged", () => {
+  const operation = createOperation({
+    operation_id: "O-1",
+    objective: "Implement context economics.",
+    required_task_ids: ["T-1", "T-2"],
+    constraints: ["Do not bypass Coordinator.", "Do not change Scheduler authority."],
+    task_intents: {
+      "T-1": "Implement stable prompt and deterministic context maintenance.",
+      "T-2": "Verify cache/compaction lifecycle and telemetry.",
+    },
+  });
+  const brief = operationBrief(operation, coordinatorState(operation)).OperationBrief;
+  assert.deepEqual(brief.constraints, operation.constraints);
+  assert.deepEqual(brief.task_intents, operation.task_intents);
+});
+
+test("operationBrief keeps the existing MAX_PACKET limit for large Operation inputs", () => {
+  const required_task_ids = Array.from({ length: 20 }, (_, index) => `T-${index}`);
+  const operation = createOperation({
+    operation_id: "O-1",
+    objective: "Check packet bounds.",
+    required_task_ids,
+    constraints: Array.from({ length: 16 }, () => "c".repeat(500)),
+    task_intents: Object.fromEntries(required_task_ids.map((id) => [id, "i".repeat(500)])),
+  });
+  assert.throws(() => operationBrief(operation, coordinatorState(operation)), /bounded Coordinator packet exceeds its limit/);
+});
+
 test("pi-subagents 0.19.0 RPC cannot safely resume a completed Coordinator session", () => {
   const source = readFileSync("node_modules/@tintinweb/pi-subagents/dist/index.js", "utf8");
   const start = source.indexOf("const spawnTopLevel =");
@@ -324,9 +352,58 @@ test("late results from both old-session parallel Tasks cannot overwrite the new
   assertFresh();
 });
 
+test("managed Coordinator receives Operation inputs and dispatches a registered Worker", async () => {
+  const pi = fakePi();
+  const constraints = ["Do not bypass Coordinator.", "Do not change Scheduler authority."];
+  const task_intents = { "T-1": "Implement stable prompt and deterministic context maintenance." };
+  await call(pi, "pi_harness_operation", {
+    action: "create", operation_id: "O-1", objective: "Implement context economics.",
+    required_task_ids: ["T-1"], constraints, task_intents,
+  });
+  let workerRequest;
+  let sequence = 0;
+  pi.events.on("subagents:rpc:spawn", (request) => {
+    const id = `agent-${++sequence}`;
+    pi.events.emit(`subagents:rpc:spawn:reply:${request.requestId}`, { success: true, data: { id } });
+    if (request.type === "coordinator") {
+      queueMicrotask(() => {
+        const packet = JSON.parse(request.prompt.slice(request.prompt.indexOf('{"OperationBrief"')));
+        assert.deepEqual(packet.OperationBrief.constraints, constraints);
+        assert.deepEqual(packet.OperationBrief.task_intents, task_intents);
+        assert.deepEqual(packet.OperationBrief.ready_task_ids, ["T-1"]);
+        pi.events.emit("subagents:completed", {
+          id, status: "completed",
+          result: decision("dispatch", { task: {
+            task_id: "T-1", owner: "worker", scope: "Implement stable prompt sections.",
+            permission: "write", verification: "true",
+          } }),
+        });
+      });
+    } else if (request.type === "worker") {
+      workerRequest = request;
+      request.options.signal.addEventListener("abort", () => {
+        pi.events.emit("subagents:failed", { id, status: "stopped" });
+      }, { once: true });
+    }
+  });
+
+  const run = call(pi, "pi_harness_run_operation", { operation_id: "O-1" });
+  for (let i = 0; i < 40 && !workerRequest; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.ok(workerRequest, "the registered Worker TaskOrder must spawn");
+  assert.equal(workerRequest.options.isolation, "worktree");
+  assert.match(workerRequest.prompt, /Implement stable prompt sections/);
+  const graph = pi.entries.filter((entry) => entry.customType === TASK_GRAPH_ENTRY).at(-1).data.task_graphs["O-1"];
+  assert.equal(graph.nodes["T-1"].scheduler_status, "running");
+
+  await call(pi, "pi_harness_cancel_operation", { operation_id: "O-1" });
+  assert.equal((await run).status, "blocked");
+});
+
 test("serial Coordinator turns dispatch through Harness; Commander receives only OperationReport", async () => {
   const pi = fakePi();
-  await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-1", objective: "Check reports.", required_task_ids: ["T-1", "T-2"], dependencies: { "T-2": ["T-1"] }, acceptance_criteria: ["The Coordinator checked the result."] });
+  const constraints = ["Do not bypass Coordinator.", "Do not change Scheduler authority."];
+  const task_intents = { "T-1": "Inspect the first registered task.", "T-2": "Inspect the dependent registered task." };
+  await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-1", objective: "Check reports.", required_task_ids: ["T-1", "T-2"], dependencies: { "T-2": ["T-1"] }, acceptance_criteria: ["The Coordinator checked the result."], constraints, task_intents });
   const types = [], prompts = [], order = ["T-1", "T-2"];
   let stage = 0, seq = 0;
   pi.events.on("subagents:rpc:spawn", (request) => {
@@ -342,6 +419,8 @@ test("serial Coordinator turns dispatch through Harness; Commander receives only
     queueMicrotask(() => {
       if (request.type === "coordinator") {
         const packet = JSON.parse(request.prompt.slice(request.prompt.indexOf('{"OperationBrief"')));
+        assert.deepEqual(packet.OperationBrief.constraints, constraints);
+        assert.deepEqual(packet.OperationBrief.task_intents, task_intents);
         assert.ok(!request.prompt.includes("RAW PRIVATE REPORT"));
         assert.ok(!request.prompt.includes("RAW REVIEWER OUTPUT"));
         const steps = [
