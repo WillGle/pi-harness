@@ -1,5 +1,6 @@
 import test from "node:test";
 import { createPiRpc } from "../packages/pi-harness-acp/lib/pi-rpc.mjs";
+import { DEFAULT_PI_EXECUTABLE, defaultPiEnv } from "./helpers/default-pi.mjs";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -20,9 +21,10 @@ import {
 
 function spawnPiRpc(options = {}) {
   const tmpDir = mkdtempSync(join(tmpdir(), "pi-rpc-test-"));
-  const child = spawn("pi", ["--mode", "rpc", "-e", ".", "--no-session"], {
+  const child = spawn(DEFAULT_PI_EXECUTABLE, ["--mode", "rpc", "-e", ".", "--no-session"], {
     stdio: ["pipe", "pipe", "pipe"],
     cwd: options.cwd || process.cwd(),
+    env: defaultPiEnv(),
   });
 
   const events = [];

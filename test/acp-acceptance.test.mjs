@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { decodeAcpPrompt } from "../packages/pi-harness-acp/lib/content.mjs";
+import { defaultPiEnv } from "./helpers/default-pi.mjs";
 
 function createAcpClient(envOverrides = {}) {
   const tmpDir = mkdtempSync(join(tmpdir(), "pi-acp-test-"));
@@ -15,7 +16,7 @@ function createAcpClient(envOverrides = {}) {
   const child = spawn("node", [binPath], {
     stdio: ["pipe", "pipe", "pipe"],
     env: {
-      ...process.env,
+      ...defaultPiEnv(),
       PI_HARNESS_ACP_STATE: statePath,
       PI_EXTRA_ARGS: "-e . --no-session",
       ...envOverrides,

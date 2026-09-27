@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 import { COMPACT_ENTRY, PLAN_ENTRY } from "../lib/state.mjs";
 import { PROACTIVE_COMPACT_ENTRY } from "../lib/compaction-policy.mjs";
 import { TASK_GRAPH_ENTRY } from "../lib/task-graph.mjs";
+import { DEFAULT_PI_EXECUTABLE, defaultPiEnv } from "./helpers/default-pi.mjs";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const PI_TOOLS = [
@@ -202,7 +203,7 @@ class DisposablePi {
     this.buffer = "";
     this.stderr = "";
     this.child = spawn(
-      "pi",
+      DEFAULT_PI_EXECUTABLE,
       [
         "--mode",
         "rpc",
@@ -360,7 +361,7 @@ async function createFixture(options = {}) {
 
   const provider = new DisposableProvider(root, project, agentDir, options.mode);
   provider.env = {
-    ...process.env,
+    ...defaultPiEnv(),
     HOME: home,
     PI_CODING_AGENT_DIR: agentDir,
     PI_CODING_AGENT_SESSION_DIR: sessionDir,

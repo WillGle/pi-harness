@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { defaultPiEnv } from "./helpers/default-pi.mjs";
 
 test("disposable install: exact tarball pack, bootstrap.mjs execution, unpacked package doctor, and Zed fingerprint protection", () => {
   const sandboxDir = mkdtempSync(join(tmpdir(), "pi-disposable-install-"));
@@ -26,10 +27,11 @@ test("disposable install: exact tarball pack, bootstrap.mjs execution, unpacked 
   );
   writeFileSync(zedSettingsPath, initialZedSettings);
 
+  const baseEnv = defaultPiEnv();
   const env = {
-    ...process.env,
+    ...baseEnv,
     HOME: fakeHome,
-    PATH: `${join(npmGlobalPrefix, "bin")}:${process.env.PATH}`,
+    PATH: `${join(npmGlobalPrefix, "bin")}:${baseEnv.PATH}`,
     npm_config_prefix: npmGlobalPrefix,
   };
 

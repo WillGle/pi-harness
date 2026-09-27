@@ -4,6 +4,7 @@ import { spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { defaultPiEnv } from "./helpers/default-pi.mjs";
 import { isPlanAllowedTool } from "../lib/state.mjs";
 
 test("Zed smoke: server entry, packaged skills, commands, plan block, state load, and no model claim", async () => {
@@ -39,7 +40,7 @@ test("Zed smoke: server entry, packaged skills, commands, plan block, state load
   const server = spawn("node", [acpBin], {
     stdio: ["pipe", "pipe", "pipe"],
     env: {
-      ...process.env,
+      ...defaultPiEnv(),
       HOME: tmpDir,
       PI_HARNESS_ACP_STATE: statePath,
       PI_EXTRA_ARGS: "-e . --no-session",
