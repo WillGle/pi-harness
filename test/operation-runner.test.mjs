@@ -25,6 +25,8 @@ test("Coordinator packet contains bounded semantic state, not transcripts", () =
   assert.deepEqual(packet.OperationBrief.pending_task_ids, ["T-2"]);
   assert.match(coordinatorPrompt(packet), /Every decision must include version, operation_id, action, and a nonempty reason/);
   assert.match(coordinatorPrompt(packet), /Use each exact OperationBrief\.task_intents value as the scope input/);
+  assert.match(coordinatorPrompt(packet), /owner value must be exactly scout, research, or worker/);
+  assert.match(coordinatorPrompt(packet), /A write Worker uses owner worker and permission write/);
   assert.ok(!coordinatorPrompt(packet).includes("raw Worker transcript"));
   const profile = readFileSync(".pi/agents/coordinator.md", "utf8");
   assert.match(profile, /tools: read/);
@@ -79,7 +81,7 @@ test("pi-subagents 0.19.0 RPC cannot safely resume a completed Coordinator sessi
 });
 
 test("malformed or unauthorized CoordinatorDecision fails closed", () => {
-  for (const raw of ["not JSON", decision("dispatch", { task: task("UNKNOWN") }), decision("accept_task", { task_id: "UNKNOWN" }), decision("report", { mission_complete: true }), decision("accept_task", { task_id: "T-1", task: task("T-1") }), JSON.stringify({ version: 1, operation_id: "O-1", action: "block", blocked_action: "dispatch", required_condition: "the registered Task intent is available" }), JSON.stringify({ ...JSON.parse(decision("report")), operation_id: "O-foreign" })]) assert.throws(() => parseCoordinatorDecision(raw, op()));
+  for (const raw of ["not JSON", decision("dispatch", { task: task("UNKNOWN") }), decision("dispatch", { task: { ...task("T-1"), owner: "write Worker", permission: "write" } }), decision("accept_task", { task_id: "UNKNOWN" }), decision("report", { mission_complete: true }), decision("accept_task", { task_id: "T-1", task: task("T-1") }), JSON.stringify({ version: 1, operation_id: "O-1", action: "block", blocked_action: "dispatch", required_condition: "the registered Task intent is available" }), JSON.stringify({ ...JSON.parse(decision("report")), operation_id: "O-foreign" })]) assert.throws(() => parseCoordinatorDecision(raw, op()));
   const state = coordinatorState(op());
   assert.deepEqual(Object.keys(state).sort(), ["blocker", "decisions", "operation_id", "turns", "version"]);
 });
