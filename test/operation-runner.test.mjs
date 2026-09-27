@@ -82,6 +82,17 @@ test("malformed or unauthorized CoordinatorDecision fails closed", () => {
   assert.deepEqual(Object.keys(state).sort(), ["blocker", "decisions", "operation_id", "turns", "version"]);
 });
 
+test("Coordinator cannot dispatch an unregistered TaskOrder", async () => {
+  let spawns = 0;
+  const report = await runOperation(op(), {
+    turn: async () => decision("dispatch", { task: task("T-X") }),
+    dispatch: async () => { spawns++; throw new Error("an unregistered TaskOrder must not spawn"); },
+  });
+  assert.equal(report.status, "blocked");
+  assert.match(report.blocker, /valid CoordinatorDecision/);
+  assert.equal(spawns, 0);
+});
+
 test("Harness rejects Dependency bypass and unverified acceptance", async () => {
   const reports = [];
   for (const proposed of [decision("dispatch", { task: task("T-2") }), decision("accept_task", { task_id: "T-1" }), decision("dispatch", { task: { ...task("T-1"), owner: "research", permission: "write" } })]) {
