@@ -284,24 +284,66 @@ DoD:
 Remaining blocker: broader runtime scenario proof; baseline gate for Phase I is satisfied, overall T10 is not PASS.
 Commit: none.
 
-## Task: T11 — ACP / Zed Reliability Closure
+## Task: T11 — ACP / Pi RPC Lifecycle Closure
 Status: PARTIAL
 
-Inspected: ACP bridge `rpcToPi:116`, `session/prompt:163`, `session/cancel:180`; Pi native RPC prompt ACK handling; ACP/zed smoke tests.
-Findings: 30s timeout resolves undefined; Pi may continue while bridge returns accepted. Process exit does not reject all pending RPC promises immediately. Cancel can wait for the abort RPC timeout before termination. initialize echoes client version or defaults to date string. Map prevents same-session duplicate process only within one bridge process. No Zed executable found on PATH.
-Changes: none.
+Inspected:
+- HEAD35dc2ad803c0d8c8f9438f0a507997fadf72134e; initially clean worktree.
+- Actual /run/current-system/sw/bin/pi resolves to Nix Pi0.87.1, Node24.20.0, bundled cli-runtime/chunk-OJP47DM6.js. Local test runner is Node22.22.2. Inspected installed plain dist sources and actual bundle, not just the local SDK.
+- Pi main:createAgentSessionServices→ModelRuntime.create/refresh→resource loading→runRpcMode→bindExtensions→attachJsonlLineReader. Native get_state/get_commands/prompt preflight and AgentSession.prompt; FileModelsStore.readLatest; FileAuthStorageBackend.acquireLockAsync; installed proper-lockfile acquisition/exit registry.
+- ACP spawnPi/ensureSession/rpcToPi/cancel/shutdown, persisted identity, both direct and bridge test helpers; official ACP v1/v2 and SDK1.5.0 contract.
+
+Findings — demonstrated root cause:
+- This is NOT demonstrated loss of an early /plan packet. Normal early packets succeed after buffering: /tmp/pi-startup-race.log shows write11.356ms, RPC-reader attachment1868.489ms, correlated native get_state response1884.417ms and early prompt reply1884.565ms. First stdout alone is not a readiness signal: bindExtensions can emit UI events before the input reader is attached.
+- Failed native child1774295: spawn1790526795477, first write1790526795478, no response at+7002ms, exit+10022ms. A get_state-first experiment also fails2/4: the failing commands were withheld entirely; native readiness itself never arrived (/tmp/t11-readiness-experiment.log, /tmp/pi-ready-experiment.jsonl). Disabling compile cache does not fix it.
+- Failed child1790724 pending stacks are FileModelsStore.readLatest→FileAuthStorageBackend.acquireLockAsync before RPC startup (/tmp/pi-async-1790724.json). The backend class name does not imply credential access: FileModelsStore uses that backend for models-store.json. Only stack locations and catalog-lock metadata were inspected, not credentials.
+- Controlled native TERM comparison: child1809908 received TERM1790527186171 while lock absent; exited1790527186216 with a newly stranded catalog lock, mtime1790527186171.7056. Next children1810096/1810881 inherited that same lock and timed out after10s without RPC output (/tmp/pi-close-experiment.jsonl; /tmp/t11-native-close-metadata.log). Native backend's stale threshold is30s; this is shared catalog-lock startup blocking, not command latency.
+- Exact installed-library gap reproduced on synthetic catalog /tmp/pi-lock-gap-Nz7fUF: lock directory exists, tracked registry count0, child TERM exits, lock remains, next acquisition ELOCKED. /tmp/t11-lock-gap-proof.log, command node /tmp/pi-lock-gap-proof.mjs exit0. proper-lockfile creates directory and awaits mtime precision probing before registering the lock; exit cleanup only removes registered locks. No real runtime lock was deleted or modified.
+- Abort acknowledgement plus EOF/native shutdown helps (controlled4/4 and initial fixed real7/7), but later reruns still strand locks. Pi0.87.1 main starts background catalog refresh with a private controller; AgentSessionRuntime.dispose does not abort/await it, and no native RPC exposes its drain. A readiness barrier cannot repair that runtime shutdown gap.
+
+Changes:
+- packages/pi-harness-acp/lib/pi-rpc.mjs:createPiRpc/PiRpcError owns bounded readiness, exact pending requests, exit/error rejection, late-response suppression, listener/timer cleanup, cancellation and termination. Readiness is a correlated native get_state response, not sleep or stdout activity.
+- Bridge new and fresh restore/reconnect await the same readiness promise; starting sessions are not persisted as usable. Identity checked against requested/restored Pi ID; stale exited-session callbacks cannot publish readiness or delete replacement sessions.
+- Existing normal30s RPC deadline unchanged. Timeouts reject PI_RPC_TIMEOUT, never resolve undefined; bridge drains/stops its owned child on RPC timeout/write failure. Child exit rejects every pending promise immediately; failures expose bounded codes, not raw child errors.
+- Cancel bypasses pending readiness; independent500ms abort acknowledgement, then EOF/native dispose, bounded1500ms exit wait, TERM1500ms, KILL1500ms. A success response requires observed exit; cleanup failure is typed, not asserted terminated.
+- Direct integration helper uses the same readiness/ownership invariant; its10s command deadline begins after readiness. ACP observer remains15s. No deadlines were increased, no startup sleeps/pings/provider changes were added.
+- Reconnect test now always closes its second bridge, including assertion failure. One bridge orphaned by the pre-fix fixture was identified as owned PID1821776 and stopped explicitly; its Pi child had already exited. No unrelated process was stopped.
+- Added7 core lifecycle regressions and4 controlled wire-level bridge regressions. ACP smoke prompts use /plan status (no model call); controlled peer has no model/credentials. UPSTREAM.md documents the legacy custom acceptance contract and runtime limitation.
+- Phase I, managed-operation code, Worker budgets and Context Economics unchanged. T14 section/status untouched. No commit/push.
+
 Verification:
-- Tests: ACP lifecycle/command updates/content; Zed server/config/package smoke.
-- Command/result: baseline integration 20/20 PASS.
-- Runtime evidence: real bridge/Pi subprocess smoke; no actual Zed launch, >30s proof or protocol conformance suite.
-DoD:
-- [x] Basic cancel/identity reconnect/ACP smoke demonstrated by current tests.
-- [ ] Long prompt accepted vs terminal vs timeout contract.
-- [ ] Timeout/process-exit pending drain and no orphan proof.
-- [ ] Current ACP protocol conformance and real Zed compatibility.
-- [ ] Duplicate same-session process protection across bridge reconnects.
-Remaining blocker: lifecycle fix and standards-based completion response plus actual client environment proof.
-Commit: none.
+- Original serialized reproducer: node --test --test-concurrency=1 test/acp-acceptance.test.mjs test/pi-rpc-integration.test.mjs;5/7 PASS,2 direct initial /plan timeouts; /tmp/t11-original-repro.log.
+- Core regressions: node --test test/acp-rpc-lifecycle.test.mjs;7/7 PASS, no skips. Controlled bridge regressions all4 PASS, including real child PID disappearance, in /tmp/t11-new-regressions.log and repeated full runs.
+- Initial fixed historical7/7 PASS: /tmp/t11-second-fix-repro.log. This is not accepted as stability proof.
+- Expanded serialized repeats: /tmp/t11-serialized-repeat-2.log and -3.log each9/11 PASS,2 ACP readiness failures; direct goal/compaction suites pass there. Earlier expanded run /tmp/t11-new-regressions.log16/18 PASS (includes7 core tests).
+- npm run test:integration repeated3 times: /tmp/t11-integration-repeat-1.log, -2.log, -3.log EACH27/31 PASS,4 readiness failures, zero skips. Failing cases: ACP lifecycle/reconnect, ACP forwarding, direct plan and direct goal. Initial-command failures now have typed PI_RPC_NOT_READY and bounded child cleanup, not undefined success; startup is still NOT stable.
+- npm run build PASS; npm run test159/159 PASS, zero skips (/tmp/t11-unit.log). Final focused wire-level4/4 PASS (/tmp/t11-wire-final.log), core7/7 PASS (/tmp/t11-core-final.log). Bridge/helper syntax checks and git diff --check PASS. Protected extensions/lib source unchanged; T14 section verified byte-identical against HEAD. No active test ACP/Pi RPC process remained after all runs settled.
+- Protocol: official v1/SDK1.5 prompt response is terminal with stopReason, cancel is notification; v2 separates prompt acceptance/idle state. Current bridge uses its pre-existing legacy custom accepted:true response and agent_settled notification. No numeric-version/terminal-response migration is claimed or invented. References: https://github.com/agentclientprotocol/agent-client-protocol/blob/main/docs/protocol/v1/overview.mdx and /v2/overview.mdx; https://agentclientprotocol.github.io/typescript-sdk/classes/ClientSideConnection.html.
+
+DoD / acceptance:
+- [x] Installed startup and deterministic native probe deep-traced; timestamps and actual pre-RPC blocker demonstrated.
+- [x] Delayed startup cannot advertise readiness; fresh reconnect uses same barrier; identity verified.
+- [x] Readiness deadline typed failure + cleanup; pending exit rejection; RPC timeout/late-reply/timer-map regressions.
+- [x] Cancel during startup/outstanding prompt; short independent abort budget; bounded TERM/KILL fallback; controlled child PID absent after settle.
+- [x] Pi acceptance != terminal completion; current client/protocol contract inspected and unchanged.
+- [x] Repeated historical/full integration executed; failures retained rather than hidden by a green rerun.
+- [ ] Serialized reproducer repeatedly green with zero initial-command timeout.
+- [ ] Full integration repeatedly green; real ACP forwarding stable across cold restarts.
+- [ ] Runtime catalog refresh drained before shutdown; no stranded catalog lock remains.
+- [ ] Full official ACP conformance/live Zed-client proof (not claimed by this scoped patch).
+
+Runtime patch checkpoint (2026-09-28):
+- User authorized the narrow Pi catalog lifecycle patch. packages/pi-harness-acp/runtime/pi-0.87.1-catalog-drain.mjs tracks raw provider operations/publication chains and physical FileModelsStore lock promises; RPC disposal aborts its background controller and drains these before native dispose. Merely awaiting public refresh is insufficient because raceWithAbortSignal returns before physical lock acquisition settles. Existing deadlines, refresh cancellation behavior, providers/models and Harness policies unchanged.
+- Permanent regression command: node packages/pi-harness-acp/runtime/catalog-drain.test.mjs;2/2 PASS. Tests prove public provider/read abort can finish while physical work remains, drain stays pending until that work ends, and tracked sets then empty. Tests use synthetic storage/provider, no credentials or paid token requests.
+- Disposable actual Pi0.87.1 source runtime /tmp/t11-runtime-VM3xax, same installed Node24.20.0 and dependencies: historical serialized reproducer3 consecutive11/11 PASS, zero skips (/tmp/t11-drained-serialized-1.log through -3.log).
+- Full integration with explicit disposable runtime selection3 consecutive31/31 PASS, zero skips (/tmp/t11-drained-full-1.log through -3.log). Command: npm run test:integration --script-shell=/tmp/t11-patched-script-shell. All command and readiness deadlines unchanged. Native goal/compaction and ACP forwarding/reconnect pass.
+- A preceding npm run test:integration still27/31 because npm prepends node_modules/.bin/pi (unpatched local Pi0.87.1), overriding the disposable PATH prefix. That failure is retained in /tmp/t11-drained-integration-1.log; it is NOT evidence against the patched runtime and NOT hidden as a default-runtime success.
+- Version/source-guarded apply-catalog-drain.mjs provided for an upstream monorepo build tree; it patches compiled modules and invokes the upstream bundle rebuild. This packaging hook has NOT yet been exercised in a canonical Nix/upstream build. No immutable Nix store, system links, installed npm dependency, credentials or real catalog lock were modified/deleted. Runtime README distinguishes candidate validation from deployment.
+- T11 remains PARTIAL: repeated stability demonstrated only with the disposable patched runtime, not the default installed paths. T14 unchanged; no release claim or commit.
+
+Remaining blocker:
+- Deploy and verify the version-gated catalog patch through the canonical Pi build/package owner, rebuild the actual bundle, then repeat default-path regressions. Both Nix Pi and npm-installed Pi remain unpatched; build hook not yet exercised. Do not raise deadlines, force offline mode or delete shared locks. Official ACP conformance/live Zed remains outside this scoped legacy-contract change.
+Commit: none; HEAD35dc2ad803c0d8c8f9438f0a507997fadf72134e.
 
 ## Task: T12 — Security / Verification Trust Boundary Audit
 Status: PARTIAL
