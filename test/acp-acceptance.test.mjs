@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -24,6 +24,7 @@ function createAcpClient(envOverrides = {}) {
 
   const pending = new Map();
   const notifications = [];
+  const notificationWaiters = new Set();
   let buffer = "";
   let stderrTail = "";
   let childExit;
@@ -45,6 +46,7 @@ function createAcpClient(envOverrides = {}) {
           pending.delete(msg.id);
         } else if (msg.method) {
           notifications.push(msg);
+          for (const waiter of notificationWaiters) if (waiter.predicate(msg)) { clearTimeout(waiter.timer); notificationWaiters.delete(waiter); waiter.resolve(msg); }
         }
       } catch {}
     }
@@ -79,11 +81,19 @@ function createAcpClient(envOverrides = {}) {
         } catch {}
         resolvePromise();
       });
-      child.kill("SIGTERM");
+      if (child.exitCode !== null || child.signalCode) { rmSync(tmpDir, { recursive: true, force: true }); resolvePromise(); }
+      else child.kill("SIGTERM");
     });
   }
 
-  return { child, request, notifications, statePath, tmpDir, close };
+  function waitForNotification(predicate) {
+    const existing = notifications.find(predicate); if (existing) return Promise.resolve(existing);
+    return new Promise((resolve, reject) => {
+      const waiter = { predicate, resolve, timer: setTimeout(() => { notificationWaiters.delete(waiter); reject(new Error("Notification timeout")); }, 15000) };
+      notificationWaiters.add(waiter);
+    });
+  }
+  return { child, request, notifications, statePath, tmpDir, close, waitForNotification };
 }
 
 test("ACP prompt content converts clipboard images and text/file-manager resources for Pi RPC", () => {
@@ -142,7 +152,7 @@ test("ACP lifecycle: initialize, new, prompt, load, cancel, reconnect, and clean
     // 3. session/prompt
     const promptRes = await acp.request("session/prompt", {
       sessionId,
-      prompt: "echo test",
+      prompt: "/plan status",
     });
     assert.equal(promptRes.accepted, true);
 
@@ -167,64 +177,14 @@ test("ACP lifecycle: initialize, new, prompt, load, cancel, reconnect, and clean
     }
 
     // 6. Reconnect with a second fresh ACP client pointing to the same statePath
-    const binPath = resolve("packages/pi-harness-acp/bin/pi-harness-acp.mjs");
-    const acp2Child = spawn("node", [binPath], {
-      stdio: ["pipe", "pipe", "pipe"],
-      env: {
-        ...process.env,
-        PI_HARNESS_ACP_STATE: acp.statePath,
-        PI_EXTRA_ARGS: "-e . --no-session",
-      },
-    });
+    const acp2 = createAcpClient({ PI_HARNESS_ACP_STATE: acp.statePath });
+    try {
+      const reconnectLoad = await acp2.request("session/load", { sessionId });
+      assert.equal(reconnectLoad.restored, true);
+      assert.equal(reconnectLoad.sessionId, sessionId);
+      assert.equal(reconnectLoad.piSessionId, savedState[sessionId].piSessionId);
+    } finally { await acp2.close(); }
 
-    let buffer2 = "";
-    const pending2 = new Map();
-    acp2Child.stdout.on("data", (chunk) => {
-      buffer2 += chunk.toString("utf8");
-      for (;;) {
-        const idx = buffer2.indexOf("\n");
-        if (idx < 0) break;
-        const line = buffer2.slice(0, idx).trim();
-        buffer2 = buffer2.slice(idx + 1);
-        if (!line) continue;
-        try {
-          const msg = JSON.parse(line);
-          if (msg.id && pending2.has(msg.id)) {
-            pending2.get(msg.id)(msg);
-            pending2.delete(msg.id);
-          }
-        } catch {}
-      }
-    });
-
-    const request2 = (method, params = {}) => {
-      const id = crypto.randomUUID();
-      return new Promise((resolvePromise, rejectPromise) => {
-        const timer = setTimeout(() => {
-          pending2.delete(id);
-          rejectPromise(new Error(`Timeout waiting for response to ${method}`));
-        }, 15000);
-        pending2.set(id, (res) => {
-          clearTimeout(timer);
-          if (res.error) rejectPromise(new Error(res.error.message));
-          else resolvePromise(res.result);
-        });
-        acp2Child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
-      });
-    };
-
-    // Reconnect to existing sessionId
-    const reconnectLoad = await request2("session/load", { sessionId });
-    assert.equal(reconnectLoad.restored, true);
-    assert.equal(reconnectLoad.sessionId, sessionId);
-    assert.ok(reconnectLoad.piSessionId, "piSessionId must be present and verified");
-    assert.equal(reconnectLoad.piSessionId, savedState[sessionId].piSessionId);
-
-    // Cleanup second client
-    await new Promise((resolvePromise) => {
-      acp2Child.once("exit", resolvePromise);
-      acp2Child.kill("SIGTERM");
-    });
   } finally {
     await acp.close();
   }
@@ -250,7 +210,7 @@ test("ACP command forwarding and event updates", async () => {
     // Test prompt command execution and notification arrival
     await acp.request("session/prompt", {
       sessionId,
-      prompt: "test notification",
+      prompt: "/plan status",
     });
 
     const badCommand = await acp.request("session/command", {
@@ -272,4 +232,68 @@ test("ACP command forwarding and event updates", async () => {
   } finally {
     await acp.close();
   }
+});
+
+
+function controlledAcp(mode, statePath) {
+  const fixture = resolve("test/helpers/fake-pi-rpc.mjs"); chmodSync(fixture, 0o755);
+  return createAcpClient({ PI_BIN: fixture, PI_EXTRA_ARGS: "", FIXTURE_PI_MODE: mode, ...(statePath ? { PI_HARNESS_ACP_STATE: statePath } : {}) });
+}
+const fixtureEvent = type => notification => notification.params?.update?.event?.type === type;
+const assertDead = pid => assert.throws(() => process.kill(pid,0), { code: "ESRCH" });
+
+test("ACP delayed startup and fresh reconnect advertise readiness only after native state", async () => {
+  const first = controlledAcp("delay"); let second;
+  try {
+    let advertised = false;
+    const created = first.request("session/new").then(value => { advertised = true; return value; });
+    const pending = await first.waitForNotification(fixtureEvent("fixture_startup"));
+    assert.equal(advertised,false); assert.equal(existsSync(first.statePath),false);
+    const session = await created;
+    assert.equal(session.sessionId,pending.params.sessionId);
+    const command = await first.request("session/command", { sessionId: session.sessionId, command: "plan", args: "on" });
+    assert.equal(command.accepted,true); assert.deepEqual(command.pi,{ success:true, command:"prompt" });
+    await first.request("session/cancel",{ sessionId:session.sessionId }); assertDead(pending.params.update.event.pid);
+    second = controlledAcp("delay",first.statePath);
+    let loaded = false;
+    const reconnect = second.request("session/load",{sessionId:session.sessionId}).then(value=>{loaded=true;return value;});
+    const starting = await second.waitForNotification(fixtureEvent("fixture_startup"));
+    assert.equal(loaded,false); const restored = await reconnect;
+    assert.equal(restored.restored,true); assert.equal(restored.piSessionId,session.piSessionId);
+    await second.request("session/cancel",{sessionId:session.sessionId}); assertDead(starting.params.update.event.pid);
+  } finally { if(second)await second.close(); await first.close(); }
+});
+
+test("ACP readiness deadline returns typed failure and cleans owned child", async () => {
+  const acp = controlledAcp("never");
+  try {
+    const created = acp.request("session/new",{},true);
+    const event = await acp.waitForNotification(fixtureEvent("fixture_startup"));
+    const response = (await created).response;
+    assert.equal(response.result,undefined); assert.equal(response.error.data.failure_code,"PI_RPC_NOT_READY");
+    assertDead(event.params.update.event.pid);
+  } finally { await acp.close(); }
+});
+
+test("ACP cancel during startup does not await readiness and does not return an orphan session", async () => {
+  const acp = controlledAcp("never");
+  try {
+    const created = acp.request("session/new",{},true);
+    const event = await acp.waitForNotification(fixtureEvent("fixture_startup"));
+    const cancelled = await acp.request("session/cancel",{sessionId:event.params.sessionId});
+    assert.equal(cancelled.terminated,true); assertDead(event.params.update.event.pid);
+    assert.equal((await created).response.error.data.failure_code,"PI_RPC_CANCELLED");
+  } finally { await acp.close(); }
+});
+
+test("ACP pending prompt cancellation is a failure, never accepted with undefined Pi data", async () => {
+  const acp = controlledAcp("pending");
+  try {
+    const session = await acp.request("session/new");
+    const prompt = acp.request("session/prompt",{sessionId:session.sessionId,prompt:"ordinary prompt"},true);
+    const event = await acp.waitForNotification(fixtureEvent("fixture_prompt"));
+    await acp.request("session/cancel",{sessionId:session.sessionId}); assertDead(event.params.update.event.pid);
+    const response = (await prompt).response;
+    assert.equal(response.result,undefined); assert.equal(response.error.data.failure_code,"PI_RPC_CANCELLED");
+  } finally { await acp.close(); }
 });

@@ -1,4 +1,5 @@
 import test from "node:test";
+import { createPiRpc } from "../packages/pi-harness-acp/lib/pi-rpc.mjs";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -24,79 +25,20 @@ function spawnPiRpc(options = {}) {
     cwd: options.cwd || process.cwd(),
   });
 
-  const pending = new Map();
   const events = [];
-  let buffer = "";
-  let stderrTail = "";
-  let childExit;
-  child.stderr.on("data", (chunk) => { stderrTail = (stderrTail + chunk.toString("utf8")).slice(-2048); });
-  child.once("exit", (code, signal) => { childExit = { code, signal }; });
-
-  child.stdout.on("data", (chunk) => {
-    buffer += chunk.toString("utf8");
-    for (;;) {
-      const idx = buffer.indexOf("\n");
-      if (idx < 0) break;
-      const line = buffer.slice(0, idx).trim();
-      buffer = buffer.slice(idx + 1);
-      if (!line) continue;
-      try {
-        const msg = JSON.parse(line);
-        if (msg.type === "extension_ui_request") {
-          child.stdin.write(`${JSON.stringify({ type: "extension_ui_response", id: msg.id })}\n`);
-        }
-        if (msg.id && pending.has(msg.id)) {
-          pending.get(msg.id)(msg);
-          pending.delete(msg.id);
-        } else {
-          events.push(msg);
-        }
-      } catch {}
-    }
-  });
-
-  function sendCommand(command) {
-    const id = crypto.randomUUID();
-    return new Promise((resolvePromise, rejectPromise) => {
-      const timer = setTimeout(() => {
-        pending.delete(id);
-        const diagnostic = stderrTail.trim().replace(/(api[_-]?key|token|secret)\s*[:=]\s*\S+/gi, "$1=[redacted]");
-        const childState = childExit ? `exited ${childExit.code ?? childExit.signal}` : "still running";
-        const label = command.type === "prompt" ? `prompt ${String(command.message ?? "").slice(0, 100)}` : command.type;
-        const eventTypes = events.slice(-12).map((event) => event.type ?? event.method ?? "unknown").join(",");
-        rejectPromise(new Error(`Timeout waiting for RPC command: ${label} (Pi child ${childState}; recent events: ${eventTypes || "none"}${diagnostic ? `; stderr: ${diagnostic}` : "; stderr empty"})`));
-      }, 10000);
-
-      pending.set(id, (res) => {
-        clearTimeout(timer);
-        if (res.success === false && res.error) {
-          resolvePromise(res);
-        } else {
-          resolvePromise(res);
-        }
-      });
-
-      child.stdin.write(`${JSON.stringify({ id, ...command })}\n`);
-    });
+  const rpc = createPiRpc(child, { readinessTimeout: 10000, requestTimeout: 10000, onEvent: event => events.push(event) });
+  // Drain stderr without promoting private runtime output into failures.
+  child.stderr.resume();
+  async function sendCommand(command) {
+    await rpc.ready;
+    return rpc.request(command, { acceptFailure: true });
   }
-
-  function prompt(message) {
-    return sendCommand({ type: "prompt", message });
+  const prompt = message => sendCommand({ type: "prompt", message });
+  async function close() {
+    try { await rpc.stop(); }
+    finally { rmSync(tmpDir, { recursive: true, force: true }); }
   }
-
-  function close() {
-    return new Promise((resolvePromise) => {
-      child.once("exit", () => {
-        try {
-          rmSync(tmpDir, { recursive: true, force: true });
-        } catch {}
-        resolvePromise();
-      });
-      child.kill("SIGTERM");
-    });
-  }
-
-  return { child, sendCommand, prompt, events, close };
+  return { child, sendCommand, prompt, events, ready: rpc.ready, close };
 }
 
 test("Pi RPC: command discovery includes every packaged skill and Harness command", async () => {

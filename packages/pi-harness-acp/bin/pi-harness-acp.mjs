@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawn } from "node:child_process";
 import { decodeAcpPrompt } from "../lib/content.mjs";
+import { createPiRpc, PiRpcError } from "../lib/pi-rpc.mjs";
 
 const VERSION = "1.0.0";
 const STATE_PATH = process.env.PI_HARNESS_ACP_STATE || join(homedir(), ".pi-harness", "acp-sessions.json");
@@ -21,6 +22,7 @@ function persist() {
     stored = loadStored();
     const merged = { ...stored };
     for (const [id, session] of sessions) {
+      if (!session.isReady) continue;
       merged[id] = { piSessionId: session.piSessionId, cwd: session.cwd, updatedAt: new Date().toISOString() };
     }
     writeFileSync(temporary, JSON.stringify(merged, null, 2));
@@ -30,8 +32,8 @@ function persist() {
   }
 }
 function send(message) { if (!process.stdout.destroyed) process.stdout.write(`${JSON.stringify(message)}\n`); }
-function result(id, value) { send({ jsonrpc: "2.0", id, result: value }); }
-function failure(id, error) { send({ jsonrpc: "2.0", id, error: { code: -32603, message: error instanceof Error ? error.message : String(error) } }); }
+function result(id, value) { if (id !== undefined) send({ jsonrpc: "2.0", id, result: value }); }
+function failure(id, error) { if (id !== undefined) send({ jsonrpc: "2.0", id, error: { code: -32603, message: error instanceof Error ? error.message : String(error), ...(error?.code ? { data: { failure_code: error.code } } : {}) } }); }
 function notify(method, params) { send({ jsonrpc: "2.0", method, params }); }
 function commands() { return [...EXTENSION_COMMANDS]; }
 function parseLines(stream, onLine) {
@@ -86,48 +88,40 @@ function spawnPi(sessionId, resumeId, cwd) {
   }
   const sessionCwd = process.env.PI_CWD || cwd || process.cwd();
   const child = spawn(piBin, piArgs, { stdio: ["pipe", "pipe", "pipe"], cwd: sessionCwd });
-  const session = { child, piSessionId: id, cwd: sessionCwd, pending: new Map() };
+  const rpc = createPiRpc(child, { onEvent: message => translatePiEvent(sessionId, message) });
+  const session = { child, rpc, piSessionId: id, cwd: sessionCwd, pending: rpc.pending };
   sessions.set(sessionId, session);
-  stored[sessionId] = { piSessionId: id, cwd: sessionCwd, updatedAt: new Date().toISOString() };
-  parseLines(child.stdout, (line) => {
-    try {
-      const message = JSON.parse(line);
-      if (message.type === "extension_ui_request") {
-        child.stdin.write(`${JSON.stringify({ type: "extension_ui_response", id: message.id })}\n`);
-      }
-      if (message.id && session.pending.has(message.id)) {
-        session.pending.get(message.id)(message);
-        session.pending.delete(message.id);
-      }
-      translatePiEvent(sessionId, message);
-    } catch {
-      notify("session/update", { sessionId, update: { sessionUpdate: "pi_raw", text: line } });
-    }
-  });
+  session.ready = rpc.ready.then(state => {
+    if (rpc.exited || sessions.get(sessionId) !== session) throw new PiRpcError("PI_RPC_EXITED");
+    if (state.sessionId !== id) throw new PiRpcError("PI_RPC_SESSION_MISMATCH");
+    session.isReady = true;
+    stored[sessionId] = { piSessionId: id, cwd: sessionCwd, updatedAt: new Date().toISOString() };
+    persist();
+    return session;
+  }).catch(async error => { await rpc.stop({ abort: false }); throw error; });
+  void session.ready.catch(() => {});
   parseLines(child.stderr, (line) => notify("session/update", { sessionId, update: { sessionUpdate: "stderr", text: line } }));
   child.once("exit", (code, signal) => {
-    sessions.delete(sessionId);
+    if (sessions.get(sessionId) === session) sessions.delete(sessionId);
     persist();
     notify("session/update", { sessionId, update: { sessionUpdate: "terminated", code, signal } });
   });
-  persist();
   return session;
 }
-function rpcToPi(session, command) {
-  const id = crypto.randomUUID();
-  if (!session.child.stdin.writable) throw new Error("Pi RPC process is not writable");
-  session.child.stdin.write(`${JSON.stringify({ id, ...command })}\n`);
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => { session.pending.delete(id); resolve(undefined); }, 30_000);
-    session.pending.set(id, (response) => { clearTimeout(timer); resolve(response); });
-  });
+async function rpcToPi(session, command) {
+  await session.ready;
+  try { return await session.rpc.request(command); }
+  catch (error) {
+    if (["PI_RPC_TIMEOUT", "PI_RPC_WRITE_FAILED"].includes(error.code)) await session.rpc.stop();
+    throw error;
+  }
 }
 async function ensureSession(sessionId) {
-  if (sessions.has(sessionId)) return sessions.get(sessionId);
+  if (sessions.has(sessionId)) return sessions.get(sessionId).ready;
   stored = loadStored();
   const saved = stored[sessionId];
   if (!saved) throw new Error(`Unknown session: ${sessionId}`);
-  return spawnPi(sessionId, saved.piSessionId, saved.cwd);
+  return spawnPi(sessionId, saved.piSessionId, saved.cwd).ready;
 }
 async function handle(request) {
   const params = request.params ?? {};
@@ -146,6 +140,7 @@ async function handle(request) {
     case "session/new": {
       const sessionId = crypto.randomUUID();
       const session = spawnPi(sessionId, undefined, params.cwd);
+      await session.ready;
       return result(request.id, { sessionId, piSessionId: session.piSessionId, commands: commands() });
     }
     case "session/load": {
@@ -168,37 +163,23 @@ async function handle(request) {
         message,
         ...(images.length ? { images } : {}),
       });
-      return result(request.id, { accepted: true, commands: commands(), pi: response?.data });
+      // Legacy bridge response means Pi preflight accepted, NOT terminal completion.
+      return result(request.id, { accepted: true, commands: commands(), pi: response.data ?? { success: true, command: response.command } });
     }
     case "session/command": {
       const session = await ensureSession(params.sessionId);
       const command = String(params.command ?? "").replace(/^\//, "");
       if (!commands().includes(command)) throw new Error(`Unknown Pi Harness command: ${command}`);
       const response = await rpcToPi(session, { type: "prompt", message: `/${command}${params.args ? ` ${params.args}` : ""}` });
-      return result(request.id, { accepted: true, pi: response?.data, commands: commands() });
+      return result(request.id, { accepted: true, pi: response.data ?? { success: true, command: response.command }, commands: commands() });
     }
     case "session/cancel": {
-      const session = await ensureSession(params.sessionId);
+      // Do not await readiness: cancellation must also interrupt startup.
+      const session = sessions.get(params.sessionId) ?? await ensureSession(params.sessionId);
       const child = session.child;
       const childPid = child?.pid;
-      try {
-        await rpcToPi(session, { type: "abort" });
-      } catch {}
-      if (child && !child.killed) {
-        child.kill("SIGTERM");
-        await new Promise((resolve) => {
-          if (child.exitCode !== null) return resolve();
-          const timer = setTimeout(() => {
-            try { child.kill("SIGKILL"); } catch {}
-            resolve();
-          }, 1500);
-          child.once("exit", () => {
-            clearTimeout(timer);
-            resolve();
-          });
-        });
-      }
-      sessions.delete(params.sessionId);
+      await session.rpc.stop();
+      if (sessions.get(params.sessionId) === session) sessions.delete(params.sessionId);
       persist();
       return result(request.id, { cancelled: true, terminated: true, pid: childPid });
     }
@@ -213,16 +194,13 @@ parseLines(process.stdin, (line) => {
 });
 // An idle stdio pipe does not keep the Node event loop alive on every runtime.
 const lifecycleKeepalive = setInterval(() => {}, 60_000);
-function shutdown() {
+async function shutdown() {
   clearInterval(lifecycleKeepalive);
-  for (const session of sessions.values()) {
-    try {
-      if (!session.child.killed) {
-        session.child.kill("SIGTERM");
-      }
-    } catch {}
-  }
+  await Promise.allSettled([...sessions.values()].map(session => session.rpc.stop()));
   persist();
 }
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", () => { shutdown(); process.exit(0); });
+let shuttingDown;
+const finishShutdown = () => { shuttingDown ??= shutdown().then(() => process.exit(0)); };
+process.on("SIGINT", finishShutdown);
+process.on("SIGTERM", finishShutdown);
+process.stdin.on("end", finishShutdown);
