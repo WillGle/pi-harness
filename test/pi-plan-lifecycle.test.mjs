@@ -498,6 +498,32 @@ test("Pi plan mode persists across RPC reload and restores mutations after /plan
   }
 });
 
+test("Pi RPC restart restores a managed Operation and its TaskGraph", async () => {
+  const fixture = await createFixture();
+  let pi;
+  try {
+    pi = fixture.spawn();
+    await pi.prompt("CALL_OPERATION_CREATE");
+    const beforeEntries = (await pi.send({ type: "get_entries" })).data.entries;
+    const before = latestCustom(beforeEntries, TASK_GRAPH_ENTRY)?.data;
+    assert.ok(before);
+    assert.equal(before.operations["O-compact"].status, "open");
+    const beforeGraph = structuredClone(before.task_graphs["O-compact"]);
+    assert.deepEqual([beforeGraph.nodes["T-root"].scheduler_status, beforeGraph.nodes["T-child"].scheduler_status], ["ready", "pending"]);
+
+    await pi.close();
+    pi = fixture.spawn();
+    const afterEntries = (await pi.send({ type: "get_entries" })).data.entries;
+    const after = latestCustom(afterEntries, TASK_GRAPH_ENTRY)?.data;
+    assert.ok(after);
+    assert.equal(after.operations["O-compact"].status, "open");
+    assert.deepEqual(after.task_graphs["O-compact"], beforeGraph);
+  } finally {
+    if (pi) await pi.close();
+    await fixture.close();
+  }
+});
+
 test("Pi plan mode survives real compaction and still blocks built-in and Harness mutation", async () => {
   const fixture = await createFixture();
   let pi;

@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { createWorktree, cleanupWorktree } from "../node_modules/@tintinweb/pi-subagents/dist/worktree.js";
 import { loadSettings, applySettings } from "../node_modules/@tintinweb/pi-subagents/dist/settings.js";
 import { AgentManager } from "../node_modules/@tintinweb/pi-subagents/dist/agent-manager.js";
+import { executeCoordinateTask } from "../lib/coordinator.mjs";
 
 const exec = promisify(execFile);
 const git = (cwd, ...args) => exec("git", args, { cwd });
@@ -75,5 +76,62 @@ test("installed pi-subagents applies project capacity and isolates two concurren
     for (const wt of worktrees) if (wt?.path) await git(cwd, "worktree", "remove", "--force", wt.path).catch(() => {});
     rmSync(cwd, { recursive: true, force: true });
     manager.dispose();
+  }
+});
+
+test("package cleanup failure keeps the timed-out Worker's worktree disposition unknown", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "pi-h-cleanup-failure-"));
+  const makePi = (injectCleanupFailure = false) => ({ exec: async (_command, args, options) => {
+    if (injectCleanupFailure && args[0] === "worktree" && ["remove", "prune"].includes(args[1])) return { stdout: "", stderr: "injected cleanup failure", code: 1, killed: false };
+    try { const { stdout, stderr } = await exec("git", args, { cwd: options.cwd }); return { stdout, stderr, code: 0, killed: false }; }
+    catch (error) { return { stdout: error.stdout ?? "", stderr: error.stderr ?? "", code: error.code ?? 1, killed: false }; }
+  } });
+  const cleanPi = makePi();
+  let worktree;
+  const managerKey = Symbol.for("pi-subagents:manager");
+  const previousManager = globalThis[managerKey];
+  try {
+    await git(cwd, "init", "-q");
+    await git(cwd, "config", "user.name", "Pi test");
+    await git(cwd, "config", "user.email", "pi@example.invalid");
+    writeFileSync(join(cwd, "base.txt"), "base\n");
+    await git(cwd, "add", "base.txt");
+    await git(cwd, "commit", "-qm", "base");
+    worktree = await createWorktree(cleanPi, cwd, "cleanup-failure");
+    assert.ok(worktree);
+
+    const worktreeResult = await cleanupWorktree(makePi(true), cwd, worktree, "unchanged Worker");
+    assert.deepEqual(worktreeResult, { hasChanges: false });
+    assert.equal(existsSync(worktree.path), true, "the injected package cleanup failure leaves the physical worktree present");
+
+    const records = new Map();
+    const id = "package-cleanup-failure-child";
+    records.set(id, { status: "stopped", promise: Promise.resolve(), worktree, worktreeResult });
+    globalThis[managerKey] = { getRecord: (agentId) => records.get(agentId) };
+    const listeners = new Map();
+    const events = {
+      on(name, handler) { const set = listeners.get(name) ?? new Set(); set.add(handler); listeners.set(name, set); return () => set.delete(handler); },
+      emit(name, payload) {
+        if (name === "subagents:rpc:spawn") {
+          payload.options.onSpawned(id);
+          this.emit(`${name}:reply:${payload.requestId}`, { success: true, data: { id } });
+        }
+        for (const handler of [...(listeners.get(name) ?? [])]) handler(payload);
+      },
+    };
+    await assert.rejects(executeCoordinateTask({ events }, {
+      owner: "worker", task_id: "T-CLEANUP-FAILURE", operation_id: "O-CLEANUP-FAILURE",
+      scope: "Run a bounded Worker task.", permission: "write", verification: "true",
+    }, { cwd, timeout: 30, rpcTimeout: 1000 }), (error) => {
+      assert.equal(error.code, "HARNESS_CHILD_TERMINAL_TIMEOUT");
+      assert.deepEqual(error.child_disposition, { branch_status: "not_reported", worktree_status: "unknown" });
+      assert.equal(Object.hasOwn(error, "taskResult"), false);
+      return true;
+    });
+  } finally {
+    if (previousManager === undefined) delete globalThis[managerKey];
+    else globalThis[managerKey] = previousManager;
+    if (worktree?.path && existsSync(worktree.path)) await cleanupWorktree(cleanPi, cwd, worktree, "test cleanup").catch(() => {});
+    rmSync(cwd, { recursive: true, force: true });
   }
 });
