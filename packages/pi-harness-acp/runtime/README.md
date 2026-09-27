@@ -29,5 +29,5 @@ Regression tests, using the repository's exact Pi dependency without credentials
 or network calls:
 
 ```sh
-node packages/pi-harness-acp/runtime/catalog-drain.test.mjs
+npm run test:runtime
 ```
