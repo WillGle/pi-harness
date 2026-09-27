@@ -1,162 +1,91 @@
 # Pi Harness
 
-Pi-native harness and extension for **Pi 0.87.1**. Provides read-only planning (`/plan`), evidence-backed goal tracking (`/goal`), managed Operations with bounded parallel Task waves, curated skills, and an Agent Client Protocol (ACP) bridge for editors like Zed. Child execution uses `@tintinweb/pi-subagents@0.19.0`.
-
----
-
-## Features
-
-- **Read-Only Planning Mode (`/plan on|off|status`)**: Strips mutating tools (`edit`, `write`), blocks mutating bash syntax (e.g. `sed -i`, redirects, file deletions), and prompts the agent to provide assumptions, steps, and verification gates. Lifecycle tests cover persisted reload, real compaction, real fork/branch independence, and mutation blocking after transitions.
-- **Evidence-Backed Goal (`/goal <objective>`)**: Tracks a single active objective requiring concrete verification evidence and blockers for terminal transitions. It does not provide wait, pause/resume, token-budget, or strong no-progress circuit-breaker states.
-- **Safe proactive compaction (`/harness-compact set <50-90>|status|disable`)**: Enabled by default at **70% of the active model's context window**. A whole-number threshold from 50% to 90% can override the default and is stored in the Pi session; `disable` is also persisted. Crossing it queues a request. Harness waits for an idle `agent_settled` boundary with no active tools, managed Operation, Task pipeline, or child review before calling Pi's compaction API. Goal continuation waits for compaction success or failure. After either outcome, Harness will not retry until usage first drops below the threshold. This is separate from Pi's `/autocompact`, which remains enabled and handles mid-run/emergency compaction. Session switches reset pending work but restore the saved threshold.
-- **Skills**: Pi Harness owns the skills checked into `skills/`. `skills/skills.lock.json` records SHA-256 checksums for every packaged skill file; verification is self-contained and does not require another repository, source commit, or upstream checkout. The set includes clarification, requirement checks, architecture and formal draw.io models, atomic commits, delegation, repository scouting, defensive security reasoning (`/skill:security`, explicit invocation only), writing/review, and caveman/ponytail modes.
-- **Managed Operations**: A separate Coordinator proposes TaskOrders and optional Domain Heads give bounded advice. The Harness TaskGraph checks Dependencies and retry budgets, claims ready Tasks, runs independent Task pipelines in bounded parallel waves, and persists each TaskResult separately. The Coordinator must explicitly accept verified TaskResults; Operation completion does not complete the Mission. The Commander receives a bounded OperationReport, not Worker transcripts.
-- **Isolated verification**: Harness runs deterministic Worker gates and commit checks before selected semantic criteria reach the general Reviewer or the packet-only security-reviewer. A TaskOrder routes security criteria only through an explicit `review_profile: { "exact criterion": "security" }`. The security reviewer requests Daybreak Blue only if the model is available in Pi; otherwise verification is blocked, with no silent fallback. `/skill:security` is explicit-only reasoning guidance and does not change the model or dispatch a reviewer. Worker branches remain separate; Harness never auto-integrates them. See `target-architecture.md` for the contracts and boundaries.
-- **ACP Stdio Bridge (`pi-harness-acp`)**: Connects Pi with Zed Editor or any ACP client over JSON-RPC stdio, advertises Harness commands, forwards Pi events, persists session mappings, relays cancellation, and passes pasted/dragged images plus text-file resources to Pi.
-- **Project Memory (`/learn <note>`)**: Retains user-saved rules and lessons in owner-only local files at `~/.pi-harness/memory/<project-hash>.md`, outside the repository. Loaded memory is sent with the prompt to the active model provider.
-
-Other skill directories are ignored by Git and excluded from the package file list. Review the package contents before publishing this checkout.
-
----
-
-## Clients
-
-Use Pi's native terminal interface directly, or connect an ACP-compatible editor such as Zed through `pi-harness-acp`. Each ACP client owns its process and session; the bridge does not provide a separate terminal application.
-
-In Pi's native terminal, use `Ctrl+V` (`Alt+V` on Windows/WSL) for clipboard images or text, drag images from the file manager into a supported terminal, and type `@` to attach text/code files. ACP clients can send standard text, image, embedded-resource, and local `resource_link` content blocks; the bridge forwards images and includes text-file contents in the Pi prompt.
-
-## Ownership
-
-```text
-Pi 0.87.1
-├── provider, model, authentication, local runtime, session tree, compaction
-├── Pi Harness
-│   ├── plan, goal, explicit project memory, precise editing
-│   ├── code intelligence, skill loading/provenance, bounded web CLI
-│   ├── bootstrap, doctor, and compatibility policy
-│   ├── TaskGraph readiness, parallel capacity, Evidence, verification
-│   └── Coordinator, Operation acceptance, and ACP compatibility policy
-├── @tintinweb/pi-subagents@0.19.0
-│   └── child lifecycle, package capacity, worktrees, and cancellation
-└── ACP
-    └── Pi Harness: ACP bridge and Harness command compatibility
-```
-
-### Managed Operation: reasoning and execution boundaries
+Pi Harness is a control plane for Pi that keeps long-running coding work bounded: it isolates Worker context, checks Evidence before acceptance, and returns concise reports to the Commander.
 
 ```mermaid
-flowchart LR
-    User[User] --> Commander[Commander · Mission decision]
-    Commander -->|Operation request| Coordinator[Coordinator · serial decisions]
-    Coordinator -.->|optional consultation| Heads[Domain Heads · advice only]
-    Coordinator -->|dispatch / dispatch_batch| Scheduler[Harness TaskGraph + capacity]
-    Scheduler -->|claimed TaskOrders| Pipelines[Independent Task pipelines]
-    Pipelines --> Units[scout / research / isolated Workers]
-    Units --> Evidence[(Evidence Store)]
-    Evidence --> Verifiers[Deterministic + selected semantic Verifiers]
-    Verifiers -->|per-Task results| Scheduler
-    Scheduler -->|bounded state| Coordinator
-    Coordinator -->|explicit acceptance| Operation[Operation state]
-    Operation -->|OperationReport only| Commander
+flowchart TD
+    M["Commander<br/>Mission and final decisions"] --> C["Coordinator<br/>Plan, accept, retry"]
+    C --> S["Harness Scheduler<br/>Dependency-aware TaskGraph"]
+    S --> A["Isolated Worker A"]
+    S --> B["Isolated Worker B"]
+    A --> E["Evidence + Verification"]
+    B --> E
+    E -->|verified TaskResults| C
+    C --> R["OperationReport"]
+    R --> M
 ```
 
-The Coordinator and Heads select or advise; they do not own capacity or child lifecycle. Harness persists a `running` claim **before** it starts a child. Pi owns provider configuration and authentication; pi-subagents owns child lifecycle and Worker worktrees. Raw Evidence and child transcripts do not enter the Commander or Coordinator context.
+## Why this exists
 
-### Parallel wave and security routing
+| Problem | Pi Harness solution |
+|---|---|
+| Worker logs flood the main agent context | Workers use disposable contexts; the Commander receives a bounded `OperationReport`, not Worker transcripts. |
+| Agents report completion without proof | Harness stores Evidence and checks Acceptance Criteria before a TaskResult can be verified. The Coordinator must accept verified TaskResults explicitly. |
+| Delegated agents recursively control other agents | Harness validates dispatch; `pi-subagents` manages child execution. Workers do not own scheduling. |
+| Parallel Workers race or corrupt state | A persistent, dependency-aware TaskGraph, atomic claims, isolated worktrees, and session guards protect execution. |
+| The parent agent receives implementation noise | The Coordinator promotes semantic TaskResults; the Commander receives only the bounded OperationReport. |
+| Security review can use the wrong review path | Exact criterion routing and fail-closed verification prevent silent reviewer fallback. |
 
-```mermaid
-flowchart TB
-    Ready[TaskGraph: T1 and T2 ready; T3 pending on T1 + T2]
-    Ready --> Claim[Harness: validate and persist atomic wave claim]
-    Claim --> T1[T1 · isolated Worker + deterministic gate]
-    Claim --> T2[T2 · research ExecutionUnit]
-    T1 --> Default[General Reviewer · default criteria]
-    T2 --> Security[Security-reviewer · explicit security criteria]
-    Security -->|role-only model request| Daybreak[Daybreak Blue via Pi, if available]
-    Security -->|model unavailable| R2
-    Default --> R1[T1 TaskResult · result_available]
-    Daybreak --> R2[T2 TaskResult · result_available or blocked]
-    R1 --> Accept[Coordinator: accept each verified TaskResult]
-    R2 --> Accept
-    Accept -->|both Dependencies accepted| T3[T3 becomes ready for a later wave]
-```
+## How it works
 
-Harness defaults to **2 active Task pipelines** per managed Operation (maximum **4** via `PI_HARNESS_MAX_PARALLEL_TASKS=1..4`); `.pi/subagents.json` permits four background children but does not decide TaskGraph readiness. A Task pipeline includes its verification children. The Coordinator waits for the whole wave before its next decision; Harness persists each TaskResult as it arrives. `verified` does not mean parallel Worker branches are merge-compatible. If Daybreak is unavailable, only the selected security verification is blocked; Harness does not route it to the general Reviewer.
+A Commander defines a Mission. A Coordinator plans bounded Tasks and decides whether to dispatch, retry, or accept results. The Harness Scheduler checks Dependencies and dispatches eligible Tasks to isolated Workers. Harness stores Evidence and verifies Acceptance Criteria. The Coordinator accepts verified TaskResults into the Operation, then returns an OperationReport to the Commander.
 
----
+Execution completion is not verification. Verification is not Operation acceptance. Operation completion does not complete the Mission.
 
-## Quick Setup (Zero-Config)
+## What it is useful for
 
-### Multi-Device Setup (PC, Laptop, Mini PC)
+### Large repository changes
 
-On any machine with Node.js 22+ and Pi installed:
+Give the Commander one Mission. The Coordinator divides it into Tasks. Independent Workers can run in parallel, and only verified results return.
+
+### Long-running coding sessions
+
+Keep mechanical investigation and implementation inside Worker contexts instead of growing the Commander context with every log and intermediate step.
+
+### Changes that require proof
+
+A Worker finishing execution is not success by itself. Harness stores Evidence, runs verification, and requires explicit Coordinator acceptance of each verified TaskResult.
+
+## Key capabilities
+
+- Persistent, dependency-aware TaskGraph.
+- Bounded parallel execution in isolated worktrees.
+- Separate Commander, Coordinator, and Worker contexts.
+- Evidence-backed deterministic and selected semantic verification.
+- Explicit TaskResult acceptance and bounded OperationReports.
+- Safe session switching, cancellation, and compaction lifecycle.
+
+Pi Harness also provides `/plan`, `/goal`, curated skills, and `pi-harness-acp` for ACP-compatible clients.
+
+## Quick start
+
+Requirements: Node.js 22.19 or later and Pi 0.87.1.
 
 ```bash
-# 1. Clone repository
-git clone git@github.com:WillGle/pi-harness.git ~/dev/pi-harness
-cd ~/dev/pi-harness
-
-# 2. Run automated bootstrap
-npm run bootstrap
-```
-
-The bootstrap script automatically:
-
-1. Installs the extension and curated skills into Pi via `pi install .`.
-2. Installs the `pi-harness-acp` binary globally.
-3. Automatically configures Zed Editor (`~/.config/zed/settings.json`) with rollback backup and fingerprint protection.
-
-Use this setup when you want the bootstrap script to configure Zed. For Pi CLI use without Zed, use the CLI-only setup below.
-
-### Pi CLI Only
-
-On a machine without Zed, install only the Pi package:
-
-```bash
+git clone https://github.com/WillGle/pi-harness.git
+cd pi-harness
+npm install
 npm run bootstrap -- --cli
 npm run doctor
 ```
 
-### Configure another ACP client
+Then run `pi`. To install the ACP bridge and configure Zed, run `npm run bootstrap` without `--cli`; the Zed settings file must already exist.
 
-Install Pi Harness and expose its ACP bridge:
+## Architecture
 
-```bash
-cd ~/dev/pi-harness
-pi install .
-cd packages/pi-harness-acp
-npm link
-```
+See [target-architecture.md](target-architecture.md) for authority, lifecycle, state, and verification contracts.
 
-Configure the ACP-compatible client to launch `pi-harness-acp`. Zed can be configured automatically with the full bootstrap command above, or configured manually for other clients. Use Pi's native terminal interface when you want a terminal workflow.
+## Status and limitations
 
----
+Managed Operations, bounded parallel Task waves, Evidence-backed verification, and session-safe cancellation are shipped. Dynamic TaskGraph expansion, automatic branch integration, automatic Mission completion, and persistent project intelligence are not shipped. Stable Prompt, Context GC, and cache-economics features are not yet shipped. An Operation completing does not complete the Mission.
 
-## Verification & Diagnostics
+## Development and testing
 
-Verify system readiness at any time:
+Run these checks from the repository root:
 
 ```bash
-# Check Pi CLI readiness
-npm run doctor
-
-# Also require ACP and Zed readiness
-npm run doctor -- --zed
-
-# Build and run unit/integration tests
 npm run build
 npm test
 npm run test:integration
-
-# Verify locally canonical skill package checksums
 npm run verify:skills
-
-# Inspect the exact files included before distributing a package
-npm pack --dry-run --json
 ```
-
----
-
-## License
-
-MIT
