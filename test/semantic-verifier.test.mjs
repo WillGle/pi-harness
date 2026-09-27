@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { taskOrder, taskResult, promoteTaskResult } from "../lib/communication.mjs";
 import { storeEvidence, readEvidence } from "../lib/evidence.mjs";
 import { reviewTask, verificationPacket, validateSemanticReview, acceptedFindings } from "../lib/semantic-verifier.mjs";
-import { executeCoordinateTask, cancelCoordinateTasks } from "../lib/coordinator.mjs";
+import { executeCoordinateTask, cancelCoordinateTasks, hasActiveCoordinateTasks, securityReviewModel } from "../lib/coordinator.mjs";
 
 const root = mkdtempSync(join(tmpdir(), "pi-semantic-test-"));
 const old = process.env.PI_HARNESS_EVIDENCE_DIR;
@@ -102,6 +102,35 @@ test("Harness-owned read-only reviewer returns verified Finding, not raw reviewe
   const reviewer = readFileSync(".pi/agents/reviewer.md", "utf8");
   assert.match(reviewer, /tools: read, grep, find, ls/);
   assert.doesNotMatch(reviewer, /tools:.*\bbash\b/);
+});
+
+test("semantic and security Reviewer timeouts abort the owned child and reject late verification", async () => {
+  for (const profile of ["default", "security"]) {
+    const events = new Bus();
+    let reviewer;
+    events.on("subagents:rpc:spawn", (req) => {
+      const id = req.type === "research" ? `research-${profile}` : `reviewer-${profile}`;
+      events.emit(`subagents:rpc:spawn:reply:${req.requestId}`, { success: true, data: { id } });
+      if (req.type === "research") queueMicrotask(() => events.emit("subagents:completed", { id, status: "completed", result: "Inspection report." }));
+      else {
+        reviewer = { id, req };
+        req.options.signal.addEventListener("abort", () => events.emit("subagents:failed", { id, status: "stopped" }), { once: true });
+      }
+    });
+    const criterion = "The report identifies a source.";
+    const result = await executeCoordinateTask({ events }, {
+      owner: "research", task_id: `T-${profile}`, operation_id: "O-timeout", scope: "Inspect report.", verification: "inspect", permission: "read",
+      acceptance_criteria: [criterion], review_profile: { [criterion]: profile },
+    }, { cwd, timeout: 40, rpcTimeout: 1000, modelRegistry: { getAvailable: () => { const [provider, id] = securityReviewModel().split("/"); return [{ provider, id }]; } } });
+    assert.ok(reviewer);
+    assert.equal(reviewer.req.options.signal.aborted, true);
+    assert.equal(result.taskResult.verification_status, "blocked");
+    assert.equal(hasActiveCoordinateTasks(), false);
+    assert.equal(events.handlers.get("subagents:completed")?.size ?? 0, 0);
+    assert.equal(events.handlers.get("subagents:failed")?.size ?? 0, 0);
+    events.emit("subagents:completed", { id: reviewer.id, status: "completed", result: "LATE VERIFIED" });
+    assert.equal(result.taskResult.verification_status, "blocked");
+  }
 });
 
 test("group cancellation stops only the active semantic Reviewer", async () => {

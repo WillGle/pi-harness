@@ -6,7 +6,7 @@ import { join } from "node:path";
 import harness from "../extensions/pi-harness.ts";
 import { createOperation } from "../lib/operation.mjs";
 import { coordinatorPrompt, coordinatorState, operationBrief, operationReport, parseCoordinatorDecision, runOperation } from "../lib/operation-runner.mjs";
-import { cancelCoordinateTasks, executeCoordinatorTurn } from "../lib/coordinator.mjs";
+import { cancelCoordinateTasks, executeCoordinateTask, executeCoordinatorTurn, hasActiveCoordinateTasks } from "../lib/coordinator.mjs";
 import { blockGraphTask, createTaskGraph, TASK_GRAPH_ENTRY } from "../lib/task-graph.mjs";
 import { readEvidence } from "../lib/evidence.mjs";
 
@@ -212,6 +212,40 @@ test("a legacy Operation entry migrates to TaskGraph without resetting accepted 
   assert.equal(migrated.nodes["T-2"].attempts, 2);
   assert.equal(migrated.nodes["T-2"].scheduler_status, "exhausted");
   assert.equal(Object.hasOwn(legacy.entries.filter((entry) => entry.customType === "pi-harness-coordinator-state").at(-1).data["O-1"], "dispatch_counts"), false);
+});
+
+test("timed-out parallel Task aborts only its child; late completion cannot change the TaskGraph", async () => {
+  const pi = fakePi();
+  const operation = createOperation({ operation_id: "O-1", objective: "Check parallel timeout.", required_task_ids: ["T-1", "T-2"] });
+  let graphSnapshot, operationSnapshot;
+  const requests = new Map();
+  pi.events.on("subagents:rpc:spawn", (req) => {
+    const id = req.prompt.includes("TaskOrder T-1") ? "slow" : "fast";
+    requests.set(id, req);
+    pi.events.emit(`subagents:rpc:spawn:reply:${req.requestId}`, { success: true, data: { id } });
+    if (id === "fast") setTimeout(() => pi.events.emit("subagents:completed", { id, status: "completed", result: "Verified only as execution." }), 5);
+    else req.options.signal.addEventListener("abort", () => pi.events.emit("subagents:failed", { id, status: "stopped" }), { once: true });
+  });
+  const report = await runOperation(operation, {
+    turn: async (prompt) => {
+      const brief = JSON.parse(prompt.slice(prompt.indexOf('{"OperationBrief"'))).OperationBrief;
+      return brief.ready_task_ids.length === 2 ? decision("dispatch_batch", { tasks: [task("T-1"), task("T-2")] }) : decision("report");
+    },
+    dispatch: async (selected) => (await executeCoordinateTask(pi, selected, { timeout: 100, rpcTimeout: 1000 })).taskResult,
+    save: (nextOperation, _state, graph) => { operationSnapshot = nextOperation; graphSnapshot = graph; },
+  });
+  assert.equal(report.status, "blocked");
+  assert.equal(requests.get("slow").options.signal.aborted, true);
+  assert.equal(requests.get("fast").options.signal.aborted, false);
+  assert.equal(graphSnapshot.nodes["T-1"].scheduler_status, "blocked");
+  assert.equal(graphSnapshot.nodes["T-2"].scheduler_status, "result_available");
+  assert.equal(operationSnapshot.task_results["T-1"], undefined);
+  assert.deepEqual(report.scheduler_blockers.map((item) => item.task_id), ["T-1"]);
+  assert.equal(hasActiveCoordinateTasks(), false);
+  const before = JSON.stringify([operationSnapshot, graphSnapshot]);
+  pi.events.emit("subagents:completed", { id: "slow", status: "completed", result: "LATE PRIVATE RESULT" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(JSON.stringify([operationSnapshot, graphSnapshot]), before);
 });
 
 test("goal cancellation aborts the Coordinator turn; an unrelated turn is unaffected", async () => {

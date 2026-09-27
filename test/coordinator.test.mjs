@@ -9,6 +9,8 @@ import { promoteTaskResult } from "../lib/communication.mjs";
 import {
   cancelCoordinateTasks,
   executeCoordinateTask,
+  executeCoordinatorTurn,
+  hasActiveCoordinateTasks,
   validateTask,
 } from "../lib/coordinator.mjs";
 
@@ -34,6 +36,7 @@ class EventBus {
   emit(name, payload) {
     for (const handler of [...(this.#handlers.get(name) ?? [])]) handler(payload);
   }
+  listenerCount(name) { return this.#handlers.get(name)?.size ?? 0; }
 }
 
 function makeRepo(prefix) {
@@ -118,6 +121,42 @@ function packageManagerFor(events, repo, mode = "read") {
     },
   };
 }
+
+test("terminal timeout aborts only the owned ExecutionUnit and ignores late completion", async () => {
+  for (const owner of ["worker", "scout", "research"]) {
+    const events = new EventBus();
+    let request;
+    events.on("subagents:rpc:spawn", (next) => {
+      request = next;
+      events.emit(`subagents:rpc:spawn:reply:${next.requestId}`, { success: true, data: { id: `timed-${owner}` } });
+      next.options.signal.addEventListener("abort", () => events.emit("subagents:failed", { id: `timed-${owner}`, status: "stopped" }), { once: true });
+    });
+    await assert.rejects(executeCoordinateTask({ events }, { owner, task_id: `T-${owner}`, operation_id: "O-timeout", scope: "Inspect timeout.", permission: owner === "worker" ? "write" : "read", verification: "true" }, { timeout: 30, rpcTimeout: 1000 }), (error) => error.code === "HARNESS_CHILD_TERMINAL_TIMEOUT");
+    assert.equal(request.options.signal.aborted, true, `${owner} child signal must reach pi-subagents`);
+    assert.equal(hasActiveCoordinateTasks(), false);
+    assert.equal(events.listenerCount("subagents:completed"), 0);
+    assert.equal(events.listenerCount("subagents:failed"), 0);
+    events.emit("subagents:completed", { id: `timed-${owner}`, status: "completed", result: "LATE PRIVATE RESULT" });
+    assert.equal(hasActiveCoordinateTasks(), false);
+  }
+});
+
+test("Coordinator terminal timeout aborts its own signal and releases ownership", async () => {
+  const events = new EventBus();
+  let request;
+  events.on("subagents:rpc:spawn", (next) => {
+    request = next;
+    events.emit(`subagents:rpc:spawn:reply:${next.requestId}`, { success: true, data: { id: "timed-coordinator" } });
+    next.options.signal.addEventListener("abort", () => events.emit("subagents:failed", { id: "timed-coordinator", status: "stopped" }), { once: true });
+  });
+  await assert.rejects(executeCoordinatorTurn({ events }, "Bounded OperationBrief", { timeout: 30, rpcTimeout: 1000 }), (error) => error.code === "HARNESS_CHILD_TERMINAL_TIMEOUT");
+  assert.equal(request.options.signal.aborted, true);
+  assert.equal(hasActiveCoordinateTasks(), false);
+  assert.equal(events.listenerCount("subagents:completed"), 0);
+  assert.equal(events.listenerCount("subagents:failed"), 0);
+  events.emit("subagents:completed", { id: "timed-coordinator", status: "completed", result: "late decision" });
+  assert.equal(hasActiveCoordinateTasks(), false);
+});
 
 test("public task validation keeps scout and research read-only", () => {
   assert.throws(() => validateTask({ owner: "worker" }));
