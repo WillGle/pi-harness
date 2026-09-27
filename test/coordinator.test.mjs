@@ -2,7 +2,7 @@ import { runWorkerVerification } from "../lib/worker-gate.mjs";
 import { mockSettlement } from "./helpers/mock-settlement.mjs";
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -1067,6 +1067,69 @@ test("fake-clock terminal deadline aborts only at its exact boundary", async t =
     t.mock.timers.tick(1); assert.equal(signal.aborted,true);
     await rejected; assert.equal(hasActiveCoordinateTasks(),false);
   } finally {t.mock.timers.reset();child.resolve();restoreManager();}
+});
+
+test("trusted verification inherits host env and follows worktree symlinks", async () => {
+  const external = mkdtempSync(join(tmpdir(), "pi-harness-gate-host-"));
+  const repo = makeRepo("pi-harness-gate-symlink-");
+  const envName = `PI_HARNESS_GATE_SENTINEL_${process.pid}`;
+  const previous = process.env[envName];
+  try {
+    const hostFile = join(external, "host-file.txt");
+    const commandBin = join(external, "node_modules", ".bin");
+    const outsideCommand = join(commandBin, "outside-command");
+    writeFileSync(hostFile, "host-file-readable-through-symlink\n");
+    mkdirSync(commandBin, { recursive: true });
+    writeFileSync(outsideCommand, "#!/bin/sh\nprintf 'outside-command-ran\\n'\n");
+    chmodSync(outsideCommand, 0o755);
+    symlinkSync(hostFile, join(repo, "host-file"));
+    symlinkSync(join(external, "node_modules"), join(repo, "node_modules"), "dir");
+    process.env[envName] = "host-environment-visible";
+
+    const result = await runWorkerVerification(repo, {
+      verification: `printf '%s\\n' "$${envName}"; cat host-file; outside-command`,
+    }, { projectRoot: process.cwd() });
+
+    assert.equal(result.gatePassed, true);
+    assert.match(result.gateEvidence, /host-environment-visible/);
+    assert.match(result.gateEvidence, /host-file-readable-through-symlink/);
+    assert.match(result.gateEvidence, /outside-command-ran/);
+    assert.equal(existsSync(join(repo, "node_modules")), true, "the gate preserves a pre-existing worktree dependency symlink");
+  } finally {
+    if (previous === undefined) delete process.env[envName];
+    else process.env[envName] = previous;
+    rmSync(repo, { recursive: true, force: true });
+    rmSync(external, { recursive: true, force: true });
+  }
+});
+
+test("worker gate removes the project dependency symlink that it creates", async () => {
+  const repo = makeRepo("pi-harness-gate-dependency-link-");
+  try {
+    assert.equal(existsSync(join(process.cwd(), "node_modules")), true);
+    const result = await runWorkerVerification(repo, {
+      verification: `node -e 'const fs = require("node:fs"); if (!fs.lstatSync("node_modules").isSymbolicLink()) process.exit(12);'`,
+    }, { projectRoot: process.cwd() });
+    assert.equal(result.gatePassed, true);
+    assert.equal(existsSync(join(repo, "node_modules")), false);
+  } finally { rmSync(repo, { recursive: true, force: true }); }
+});
+
+test("worker gate kills same-group descendants after the verification shell exits", async () => {
+  const repo = makeRepo("pi-harness-gate-early-exit-");
+  try {
+    const result = await runWorkerVerification(repo, {
+      verification: `node -e 'const fs = require("node:fs"); const { spawn } = require("node:child_process"); const child = spawn("sleep", ["30"], { stdio: "ignore" }); child.unref(); fs.writeFileSync("descendant.pid", String(child.pid));'`,
+    }, { projectRoot: repo });
+    assert.equal(result.gatePassed, true);
+    const pid = Number(readFileSync(join(repo, "descendant.pid"), "utf8"));
+    assert.ok(pid > 0);
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 30));
+    let alive = false;
+    try { process.kill(pid, 0); alive = true; }
+    catch (error) { assert.equal(error.code, "ESRCH"); }
+    if (alive) assert.match(readFileSync(`/proc/${pid}/stat`, "utf8"), /\) Z /);
+  } finally { rmSync(repo, { recursive: true, force: true }); }
 });
 
 test("verification timeout and parent cancellation terminate shell descendants with bounded output", async () => {
