@@ -5,9 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import harness from "../extensions/pi-harness.ts";
 import { createOperation } from "../lib/operation.mjs";
-import { coordinatorPrompt, coordinatorState, operationBrief, parseCoordinatorDecision, runOperation } from "../lib/operation-runner.mjs";
+import { coordinatorPrompt, coordinatorState, operationBrief, operationReport, parseCoordinatorDecision, runOperation } from "../lib/operation-runner.mjs";
 import { cancelCoordinateTasks, executeCoordinatorTurn } from "../lib/coordinator.mjs";
-import { TASK_GRAPH_ENTRY } from "../lib/task-graph.mjs";
+import { blockGraphTask, createTaskGraph, TASK_GRAPH_ENTRY } from "../lib/task-graph.mjs";
+import { readEvidence } from "../lib/evidence.mjs";
 
 const dir = mkdtempSync(join(tmpdir(), "pi-phasee-test-"));
 const prior = process.env.PI_HARNESS_EVIDENCE_DIR;
@@ -114,6 +115,51 @@ test("strategic block escalates, but ordinary retry failure stays operational", 
   assert.equal(blocked.status, "blocked");
   assert.equal(blocked.escalation.type, "strategic_decision_required");
   assert.match(blocked.blocker, /until the Commander approves/);
+});
+
+test("OperationReport promotes only bounded structured Scheduler Blockers", () => {
+  const operation = op();
+  const graph = blockGraphTask(createTaskGraph(operation), operation, "T-1", "resolve an unknown child outcome", "the Commander checks the child outcome and creates a fresh TaskOrder for continuation");
+  const report = operationReport(operation, coordinatorState(operation), "The TaskOrder outcome is unknown.", undefined, graph);
+  assert.deepEqual(report.blocked_task_ids, ["T-1"]);
+  assert.deepEqual(report.scheduler_blockers, [{ task_id: "T-1", blocked_action: "resolve an unknown child outcome", required_condition: "the Commander checks the child outcome and creates a fresh TaskOrder for continuation" }]);
+  assert.deepEqual(Object.keys(report.scheduler_blockers[0]).sort(), ["blocked_action", "required_condition", "task_id"]);
+  assert.equal(Buffer.byteLength(JSON.stringify(report)) <= 24_000, true);
+  assert.equal(JSON.stringify(report).includes("raw_evidence"), false);
+});
+
+test("Scheduler Blocker projection stays within the existing report size bound", () => {
+  const ids = Array.from({ length: 40 }, (_, index) => `T-${index}`);
+  const operation = createOperation({ operation_id: "O-1", objective: "Bound blocked report.", required_task_ids: ids });
+  let graph = createTaskGraph(operation);
+  for (const id of ids) graph = blockGraphTask(graph, operation, id, "a".repeat(500), "b".repeat(500));
+  const report = operationReport(operation, coordinatorState(operation), "The TaskOrders are blocked.", undefined, graph);
+  assert.deepEqual(report.blocked_task_ids, ids);
+  assert.ok(report.scheduler_blockers.length < ids.length);
+  assert.ok(Buffer.byteLength(JSON.stringify(report)) <= 24_000);
+});
+
+test("an unbound child completion cannot become a managed TaskResult", async () => {
+  const operation = createOperation({ operation_id: "O-1", objective: "Verify lineage.", required_task_ids: ["T-1"] });
+  const report = await runOperation(operation, {
+    turn: async () => decision("dispatch", { task: task("T-1") }),
+    dispatch: async () => ({ version: 1, operation_id: "O-foreign", task_id: "T-1", execution_status: "execution_complete", verification_status: "verified", evidence_refs: [] }),
+  });
+  assert.equal(report.status, "blocked");
+  assert.deepEqual(report.accepted_task_ids, []);
+  assert.deepEqual(report.scheduler_blockers, [{ task_id: "T-1", blocked_action: "resolve an unknown child outcome", required_condition: "the Commander checks the child outcome and creates a fresh TaskOrder for continuation" }]);
+});
+
+test("a timed-out child remains blocked with bounded timeout provenance, not a TaskResult", async () => {
+  const operation = createOperation({ operation_id: "O-1", objective: "Verify timeout.", required_task_ids: ["T-1"] });
+  const report = await runOperation(operation, {
+    turn: async () => decision("dispatch", { task: task("T-1") }),
+    dispatch: async () => { throw Object.assign(new Error("private child output"), { code: "HARNESS_CHILD_TERMINAL_TIMEOUT" }); },
+  });
+  assert.deepEqual(report.accepted_task_ids, []);
+  assert.deepEqual(report.scheduler_blockers.map(({ task_id, blocked_action }) => ({ task_id, blocked_action })), [{ task_id: "T-1", blocked_action: "resolve an unknown child outcome" }]);
+  assert.match(report.scheduler_blockers[0].required_condition, /terminal wait timed out/);
+  assert.ok(!JSON.stringify(report).includes("private child output"));
 });
 
 test("Harness bounds repeated failed TaskOrders without an infinite loop", async () => {
@@ -407,6 +453,7 @@ test("managed Coordinator receives Operation inputs and dispatches a registered 
   assert.ok(workerRequest, "the registered Worker TaskOrder must spawn");
   assert.equal(workerRequest.options.isolation, "worktree");
   assert.match(workerRequest.prompt, /Implement stable prompt sections/);
+  assert.match(workerRequest.prompt, /Operation O-1/);
   const graph = pi.entries.filter((entry) => entry.customType === TASK_GRAPH_ENTRY).at(-1).data.task_graphs["O-1"];
   assert.equal(graph.nodes["T-1"].scheduler_status, "running");
 
@@ -460,6 +507,16 @@ test("serial Coordinator turns dispatch through Harness; Commander receives only
   assert.ok(!JSON.stringify(report).includes("RAW PRIVATE REPORT"));
   assert.ok(!JSON.stringify(report).includes("RAW REVIEWER OUTPUT"));
   assert.deepEqual(types, ["coordinator", "research", "reviewer", "coordinator", "coordinator", "research", "reviewer", "coordinator", "coordinator"]);
+  const managedSnapshot = pi.entries.filter((entry) => entry.customType === TASK_GRAPH_ENTRY).at(-1).data;
+  for (const id of ["T-1", "T-2"]) {
+    const result = managedSnapshot.operations["O-1"].task_results[id];
+    assert.equal(result.operation_id, "O-1");
+    assert.equal(result.task_id, id);
+    assert.equal(result.execution_status, "execution_complete");
+    assert.equal(result.verification_status, "verified");
+    assert.equal(managedSnapshot.task_graphs["O-1"].nodes[id].scheduler_status, "accepted");
+    for (const ref of result.evidence_refs) assert.deepEqual([readEvidence(ref).metadata.operation_id, readEvidence(ref).metadata.task_id], ["O-1", id]);
+  }
   assert.ok(prompts.filter((_, i) => types[i] === "coordinator").every((text) => !text.includes("RAW PRIVATE REPORT")));
   assert.equal(pi.entries.some((entry) => entry.customType === "pi-harness-goal-state"), false);
   const restored = fakePi(pi.entries);

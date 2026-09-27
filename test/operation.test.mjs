@@ -33,10 +33,12 @@ test("Operation completes only after explicit criterion acceptance; Mission rema
   try {
     const evidence = storeEvidence({ taskId: "T-1", kind: "report", content: "The Coordinator checked the Operation result." });
     const foreign = storeEvidence({ taskId: "T-other", kind: "report", content: "Unrelated result." });
+    const foreignOperation = storeEvidence({ taskId: "T-1", operationId: "O-other", kind: "report", content: "Evidence for another Operation." });
     let op = recordTaskResult(make(), verified("O-1", "T-1"));
     op = recordTaskResult(op, verified("O-1", "T-2"));
     assert.throws(() => acceptOperationCriterion(op, "The Operation result is documented.", ["evidence://foreign/invalid"]));
     assert.throws(() => acceptOperationCriterion(op, "The Operation result is documented.", [foreign.reference]), /required TaskOrder/);
+    assert.throws(() => acceptOperationCriterion(op, "The Operation result is documented.", [foreignOperation.reference]), /this Operation/);
     op = acceptOperationCriterion(op, "The Operation result is documented.", [evidence.reference]);
     assert.equal(op.status, "open");
     op = acceptTaskResult(op, "T-1");

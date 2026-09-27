@@ -55,6 +55,7 @@ test("invalid, foreign, escaped and tampered Evidence fails closed", () => fixtu
 }));
 
 test("Evidence size and directory symlinks are rejected", () => fixture(({ cwd, store, root }) => {
+  assert.throws(() => storeEvidence({ cwd, taskId: "T", operationId: " ", kind: "report", content: "test" }), /operation_id/);
   assert.throws(() => storeEvidence({ cwd, taskId: "T", kind: "report", content: "x".repeat(MAX_EVIDENCE_BYTES + 1) }), /size limit/);
   const item = storeEvidence({ cwd, taskId: "T", kind: "report", content: "test" });
   const project = join(store, getProjectIdentifier(cwd));
