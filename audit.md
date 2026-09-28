@@ -53,3 +53,65 @@ Linux verification ran in the local NixOS environment with Node.js `v22.22.2` an
 4. **Pending:** Run the Ubuntu 24.04 x86_64 workflow remotely. Keep the NixOS and local Ubuntu-container results as separate environments.
 5. **Partially verified:** Ubuntu 24.04 userspace with stock Pi passed in Docker on a NixOS host. A generic Linux host has not been separately tested.
 6. **Partially verified:** Host-simulation tests prove fail-closed behavior. Do not claim real macOS, Windows, or WSL runtime verification.
+
+## #41 — Linux CLI TUI Stability During Managed Subagent Execution
+
+**Status: FAIL — release blocker. Root cause: open.**
+
+### Requirement
+
+During managed subagent execution, progress updates must not corrupt, duplicate, replay, or destabilize the parent CLI transcript. Subagent activity must remain observable without destructive high-frequency full-screen redraws. A healthy Worker process is not sufficient if the supported Linux CLI becomes unusable while that Worker runs.
+
+### User-reported result
+
+The user reported a reproduced CLI presentation failure during managed subagent activity:
+
+- Repeated `Working` separators appeared.
+- The same Worker status row replayed many times, including a truncated activity row.
+- Transcript presentation became noisy and usability degraded.
+- The report does not show that Worker execution or orchestration results were corrupted.
+
+**Presentation correctness failed. Runtime correctness is not shown to have failed.**
+
+### Investigation evidence from this session
+
+The investigation used disposable workspaces and a local fake provider. It used no model credentials and made no network calls.
+
+- A disposable 120x30 tmux session used Pi `0.87.1`, the actual `pi-subagents` extension, the Harness extension/footer, a 60-row synthetic transcript, a local fake provider, and one real `worker` subagent spawned through `subagents:rpc:spawn` with `isBackground: true`. The worker used `isolation: "off"` and made no project edits. Pi's `PI_TUI_DEBUG_REDRAW=1` log showed one initial `fullRender` during the four-second capture. The screen showed one Agents block, one Worker row, and one activity row. The reported replay symptom did not reproduce.
+- This Worker used the real `pi-subagents` child path. It did not use a Harness `TaskOrder`, Coordinator, or Operation Runner. The result does not verify the complete managed Harness path.
+- A separate renderer probe changed a synthetic 45-row widget every 80 ms on a 120x30 terminal. Pi logged 15 `fullRender` calls in two seconds. The logged reason was `firstChanged < viewportTop`. This proves that a changing off-screen component can cause repeated full renders. It does not prove that the production `pi-subagents` widget caused the user-reported symptom.
+- The bounded production AgentWidget did not cause a redraw storm in the tested one-Worker scenario. This narrows one hypothesis. It does not identify the exact trigger.
+- This session did not complete the FleetView on/off matrix, one/two/four real Harness Workers, foreground Agent comparison, high-volume tool start/end scenarios, or keyboard responsiveness checks. The user-reported duplicate `Working` separators remain unreproduced in this isolated test.
+- No production TUI code was changed. The Harness footer was present in the real Worker test. The investigation did not add sleeps or suppress progress.
+
+### Causal status
+
+The user-reported failure remains a release blocker. The exact Harness trigger is not proven. Candidate paths include the `pi-subagents` widget, FleetView, Pi's foreground `Working` and tool-result rendering, and interactions with Harness header/footer rows. The tested background AgentWidget alone did not reproduce the issue. Treat the footer as a possible amplifier, not a proven cause. Do not attribute the failure to a specific upstream issue without a matching reproducer.
+
+### Required regression and remaining investigation
+
+Continue the isolated Linux investigation. Trace managed Harness Worker events through the Coordinator, `pi-subagents`, UI components, and Pi's render request and redraw decision. Compare:
+
+- Widget on/off.
+- FleetView on/off.
+- Harness header/footer present/absent.
+- One, two, and four parallel Harness Workers.
+- A transcript longer than the viewport and a small terminal such as `120x30`.
+- High-volume Worker text streaming and tool start/end updates.
+- Foreground Agent and background Worker rendering.
+
+Use Pi TUI redraw instrumentation when the tested build supports it. Verify that full redraw frequency does not grow in proportion to token deltas or spinner ticks during steady-state streaming.
+
+Pass criteria:
+
+- No duplicated or replayed transcript history.
+- No stale repeated `Working` blocks or unexpected scrollback clearing.
+- No screen-jump storm or terminal flicker that prevents use.
+- Keyboard input remains responsive, including Ctrl/Esc agent management.
+- The final Worker status appears once in a stable form.
+
+Do not disable all progress, add arbitrary sleeps, remove the Harness footer, or patch Pi core before the causal layer is identified. Keep ownership clear: `pi-subagents` owns child presentation, Pi owns the TUI renderer, and Harness owns which managed child UI it exposes.
+
+## Release relationship
+
+`#40` defines the supported Linux CLI boundary. `#41` requires that boundary to remain usable during managed execution. Both requirements must pass before release. `#41` remains a release blocker, not a cosmetic issue. Keep #41 isolated from the committed #19 TaskGraph-planning change until separate review and integration, to avoid mixing orchestration changes with TUI diagnosis.
