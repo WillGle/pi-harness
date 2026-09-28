@@ -73,7 +73,7 @@ macOS, Windows, WSL, GUI clients, and ACP/editor integrations are outside the su
 - ripgrep (`rg`)
 - npm for bootstrap and package installation
 
-`npm run doctor` checks the runtime, command prerequisites, filesystem safety, process groups, and disposable Git worktree support. Universal Ctags and ast-grep are optional. Code-intel tools use ripgrep when those tools are unavailable. A local Ubuntu 24.04 container with stock Pi 0.87.1 passed the workflow-equivalent gates. Remote Ubuntu CI and a generic Linux host remain unverified.
+`npm run doctor` checks the runtime, command prerequisites, filesystem safety, process groups, and disposable Git worktree support. Universal Ctags and ast-grep are optional. Code-intel tools use ripgrep when those tools are unavailable. Ubuntu 24.04 GitHub Actions passed on commit `8196c5b` ([run #36453820891](https://github.com/WillGle/pi-harness/actions/runs/36453820891)). A local Ubuntu 24.04 container with stock Pi 0.87.1 also passed the workflow-equivalent gates. A generic Linux host remains unverified.
 
 ## Quick start
 

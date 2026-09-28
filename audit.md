@@ -4,10 +4,11 @@
 
 The source findings below were reported against `main` at `2042b1a`. This session did not independently re-audit that source snapshot. Implementation work used checkout `main` at `4e9f270`, which includes one later ACP MCP commit, plus uncommitted working-tree changes.
 
-Linux verification ran in the local NixOS environment with Node.js `v22.22.2` and Pi `0.87.1`. The active Pi runtime is the project-patched Nix build. The Ubuntu workflow has not run remotely in this session. A separate Ubuntu 24.04 Docker run with Node.js `v22.19.0` and npm-installed stock Pi `0.87.1` passed the workflow-equivalent steps on the NixOS host kernel.
+Linux verification ran in the local NixOS environment with Node.js `v22.22.2` and Pi `0.87.1`. The active Pi runtime is the project-patched Nix build. Ubuntu 24.04 GitHub Actions passed on commit `8196c5b96cc2c639d7b1c04624ab8dd82ec978cb` (run [#36453820891](https://github.com/WillGle/pi-harness/actions/runs/36453820891)). A separate Ubuntu 24.04 Docker run with Node.js `v22.19.0` and npm-installed stock Pi `0.87.1` passed the workflow-equivalent steps on the NixOS host kernel.
+
 ## #40 — Linux CLI Platform Boundary
 
-**Status: PARTIAL — fail-closed enforcement is implemented; Ubuntu userspace and stock Pi passed locally; remote CI and a generic Linux host remain unverified.**
+**Status: PARTIAL — fail-closed enforcement is implemented; Ubuntu 24.04 GitHub Actions passed; a generic Linux host remains unverified.**
 
 ### Requirement
 
@@ -42,7 +43,8 @@ Linux verification ran in the local NixOS environment with Node.js `v22.22.2` an
 - The disposable bootstrap test passed. Linux CLI is the default, and experimental Zed setup preserves settings fingerprints.
 - `npm pack --workspace=@will/pi-harness-acp --dry-run --json` confirmed that the ACP platform guard is included in the packed package.
 - Platform tests passed for simulated macOS, Windows, and WSL. They verify that bootstrap, extension registration, doctor probes, Evidence, memory, precise edits, and Worker verification fail before protected execution or filesystem mutation. These are host-simulation tests, not physical runs on macOS, Windows, or WSL.
-- The NixOS run used the project-patched Pi runtime. A separate Ubuntu 24.04 Docker userspace run used Node.js `v22.19.0` and npm-installed stock Pi `0.87.1`. `npm ci`, `npm run build`, `npm test` (173/173), `npm run test:runtime` (2/2), `npm run doctor`, and `npm run verify:skills` passed. The Docker bind mount ran as root, so the test set `/work` as a Git safe directory. This is local workflow-equivalent Evidence, not a remote CI result or a generic Linux host run.
+- The NixOS run used the project-patched Pi runtime. Ubuntu 24.04 GitHub Actions run [#36453820891](https://github.com/WillGle/pi-harness/actions/runs/36453820891) passed every workflow step on commit `8196c5b96cc2c639d7b1c04624ab8dd82ec978cb`: `npm ci`, build, 173/173 tests, 2/2 runtime tests, doctor, and skill verification.
+- A separate Ubuntu 24.04 Docker userspace run used Node.js `v22.19.0` and npm-installed stock Pi `0.87.1`. The workflow-equivalent commands passed. The Docker bind mount ran as root, so the test set `/work` as a Git safe directory. This local run used the NixOS host kernel and does not replace generic Linux host verification.
 - An extra `npm run test:all` attempt entered `test:integration`, which requires a separately installed patched default Pi outside `node_modules/.bin`. That extra suite could not find the required executable in the stock-Pi container. The Ubuntu workflow does not run `test:integration`.
 
 ### Closure criteria
@@ -50,7 +52,7 @@ Linux verification ran in the local NixOS environment with Node.js `v22.22.2` an
 1. **Implemented:** Declare Linux support and make Linux Pi CLI the default product path. Mark ACP/editor integrations experimental and unsupported.
 2. **Implemented:** Reject unsupported hosts and missing safety capabilities before bootstrap mutation, Harness registration, Worker dispatch, Evidence creation, and protected state mutation.
 3. **Implemented:** Extend `doctor` to report platform, prerequisites, filesystem safety, signal and process-group support, Git worktree support, and Pi readiness.
-4. **Pending:** Run the Ubuntu 24.04 x86_64 workflow remotely. Keep the NixOS and local Ubuntu-container results as separate environments.
+4. **Verified:** Ubuntu 24.04 x86_64 GitHub Actions passed in run [#36453820891](https://github.com/WillGle/pi-harness/actions/runs/36453820891). Keep the NixOS and local Ubuntu-container results as separate environments.
 5. **Partially verified:** Ubuntu 24.04 userspace with stock Pi passed in Docker on a NixOS host. A generic Linux host has not been separately tested.
 6. **Partially verified:** Host-simulation tests prove fail-closed behavior. Do not claim real macOS, Windows, or WSL runtime verification.
 
