@@ -1,9 +1,9 @@
 {
-  "schema_version": 1,
+  "version": 1,
   "skills": {
     "architecture-diagram": {
       "files": {
-        "SKILL.md": "47bd3199cddcfd6c9d0c1d8aa87c4bec73d4fb60a0b09372bd45c47d28c9f153",
+        "SKILL.md": "2227875ea5822d896baef1e468ba8a9fb2583e2b3c46aca1ae7e5c237412d350",
         "assets/badge_overlap_audit.py": "64831f01321587fd67160afef66115758ff0e85eea05f9c784d6ae57ba782170",
         "assets/template.drawio": "95e509d307a130eef2429889ee619068c54b8f0d88504f1465784b0938f78400",
         "references/readability.md": "977fd6bc8af8f3cf1e85e5c363050012e1691e44fae80877053e50bb2dde20e0",
@@ -12,18 +12,18 @@
     },
     "ask-user": {
       "files": {
-        "SKILL.md": "559abe0e8f17e90af13487e6e28fd2fc222af0473d975e1ae14ce1448e2f7803"
+        "SKILL.md": "34a1360fcd519d302a70b0882e6b3b0c8678d2c317a7265bd2160fc13f6f3262"
       }
     },
     "atomic-commit": {
       "files": {
-        "SKILL.md": "685586883afdb9bc9335163c48fdd73126616e1720662028f5c0c01188384a1e",
+        "SKILL.md": "0c827c557dcfe40f9acd9fb7c410b968c7878ed94d520d54756832f088dc9141",
         "references/splitting-recipes.md": "f725bbc3531cb57fff9f56b34955280dc085520362ee23dfe411bff544cdaa81"
       }
     },
     "cavecrew": {
       "files": {
-        "SKILL.md": "bd6c6eeba794dee0d2e0fc5265d3762df30637c8dea5d2eb9cf618b19108519a",
+        "SKILL.md": "2ec34e817d73bcd3e2731afc17504425a3a9f1d8d703b5ba6cbca80c2f0d906b",
         "references/agents/cavecrew-builder.md": "498f5bd26cd78a85d1e6c78047662fc8bc75837c44694abbafddf08e65fbd87b",
         "references/agents/cavecrew-investigator.md": "b722ca51e90a81ee025d732346bd9f2d66ee5bf00bf296149dfb9bbe7e76b57b",
         "references/agents/cavecrew-reviewer.md": "6148701b3f7851070ab3fa4ee9abbec33b7b2865a4f6f2b34e6663e099215522"
@@ -36,12 +36,12 @@
     },
     "caveman-commit": {
       "files": {
-        "SKILL.md": "5c887565a7324d324f54b442083868fcccaebdbaf150f14c465157d8e830c362"
+        "SKILL.md": "2c386e317ccf0df8787ecc56c7305063ca2b17649be4f3cc824bf6b987f52091"
       }
     },
     "caveman-compress": {
       "files": {
-        "SKILL.md": "beeea3d86ebc30b3fe24efdbf319be0ffdb0d6427e01fede857ce0af0dc57521",
+        "SKILL.md": "256123e64d27e31514cd1c365a2836ee2a2937f2d774b9f2baa20a127ba2944d",
         "references/security.md": "ac3432493cfe71368a141f437bf35562eb8f4ce07ae699e5399c0cb665e02da3",
         "scripts/__init__.py": "429c3e1c5cc5b9705f28d77f303c728304ae68693913ad3d5ce9b5a44c8ee40f",
         "scripts/__main__.py": "6d8b7d7846a845059d7a3107143f11131f63c5511d669b44085b15ec5e3d2279",
@@ -54,23 +54,23 @@
     },
     "caveman-help": {
       "files": {
-        "SKILL.md": "cc08a97f446d87a777a095b1f108619fdc3168c707e49ec091e0c22e0f30c474"
+        "SKILL.md": "0949f7c8cba95657867adc6fd13f4f4cdbec57a7545bdb4419f77a43d7e918d6"
       }
     },
     "caveman-review": {
       "files": {
-        "SKILL.md": "d21e71e7937461c7c8bcf51c0d565f41de0e6e6cd497f06f80e8419d8f6def5e"
+        "SKILL.md": "be75dd833f5ee6e2311828e338c76f8e641ed58694d844458b6e936a01b5c6e7"
       }
     },
     "caveman-stats": {
       "files": {
-        "SKILL.md": "f3aa28647bd45e6fcf7ea03b35aaefdc054d347a297c744bd083dcea8b97c015",
+        "SKILL.md": "9d2365a5f488fba02e99c81e479c43a7fed26b44545922d634159fded9d26193",
         "scripts/session_stats.js": "3c51b024cfe31412f9c2498b0cecadf990a2cb830d74cdcdf778f1aa90f029d0"
       }
     },
     "drawio-modeling": {
       "files": {
-        "SKILL.md": "dcb4fce129595fa576004b8a1a31168a24d4a85e0ba1a68dd3452ea8eea96f75",
+        "SKILL.md": "92ae82d75b6a3b9218abbfced238793abe8b2426bd10ce159828685aca5ce026",
         "assets/template.drawio": "993b1ca5d76ae4e0c510c02ac3e27d61ac3dc70eebc4025ce6945602b6367af9",
         "references/activity.md": "634bbb79ed0b0ced46cc83061b383066cc28478ce9041352cf0abfda916c8b83",
         "references/common.md": "50a09654500b60d22dc29ca2cf4f2b4a5a8b49b4549415cf3ea1dbfe09ad916c",
@@ -81,11 +81,6 @@
         "references/use-case.md": "074a4116ca03ea11ca864bea3f6d6c780e10865be3ef037add32b235f5689933"
       }
     },
-    "pi-coordinator": {
-      "files": {
-        "SKILL.md": "19695d73fdc120a5db2c67c63c3dfdec52018dad0a3172937b62ffe8eb2264a9"
-      }
-    },
     "ponytail": {
       "files": {
         "SKILL.md": "b34e63abe90949ccfe266e5b2900045d92bd0de8a726e6d86dcc80e28856e419"
@@ -93,37 +88,37 @@
     },
     "ponytail-audit": {
       "files": {
-        "SKILL.md": "5560b8e383dbe2ddfddc873a1e2bf2e586e23e0cd7d995537482b2315331f6d1"
+        "SKILL.md": "a6a38a6553af808f4b6e15b117ab41d25c18d71a61e6c969abeef82fac0761a8"
       }
     },
     "ponytail-debt": {
       "files": {
-        "SKILL.md": "c84fba75f0ca12bfe83f9a78ea02fd125c5dd3f1fbb18124105a489937f284e6"
+        "SKILL.md": "5d3f04376a06012bc23e120e7112312f3e8c9cb6ab08d7b6f98e0ebc2410c96a"
       }
     },
     "ponytail-gain": {
       "files": {
-        "SKILL.md": "e8e5531f12caf1484bf745aa19a46da9e3b5cfd54ee6cbbc016fca9fd1b36e4e"
+        "SKILL.md": "1fd9d77e63b2e0fe91250e01e766ea2d455ddce19ac54fcfbe2a9deb6b42064f"
       }
     },
     "ponytail-help": {
       "files": {
-        "SKILL.md": "15bc63b43ec7403afc034d33fe15ef09406152354a33f8ba6f807ebbf625b709"
+        "SKILL.md": "97413af1e48a0e993d8fe7eeffe5985d98e8f8026dd7baf6ff8f8b702d47978a"
       }
     },
     "ponytail-review": {
       "files": {
-        "SKILL.md": "40df33b58fc6ef889b93585733feb9566b76e9586efa7f376785c1e995197ac0"
+        "SKILL.md": "c284654b533e596cf905d6aaff36aa5cbffe4fb8becda7950b1fc5b34c1128a3"
       }
     },
     "project-scouting": {
       "files": {
-        "SKILL.md": "aa7a8442094b1c681aef6c2b1af954a3768ce1a26bc24afe13130eabf6a8ac3d"
+        "SKILL.md": "cc030a3c2a482c168c1640116a08dad219f0cd11384f13f2e0699cc6ac1fc4a7"
       }
     },
     "requirement-check": {
       "files": {
-        "SKILL.md": "3b117e9d7c965fc89ec73d0839db9c0efba1bcb70d054fe520616b43d03905fa"
+        "SKILL.md": "1cd982a91945e5c10e4a971d7c4e987e4e6c2d1d4ff82af54a81104d821cea1c"
       }
     },
     "security": {
@@ -133,7 +128,7 @@
     },
     "skill-creator": {
       "files": {
-        "SKILL.md": "1f703ef896555715375b1b6b500e0f8d1b7d133781db72f36e1e0190ecaa05cd",
+        "SKILL.md": "4fe5c4f5c7d7d75cb7bae23d8b467233d5f8cc42714b05f3b4daea86d7438873",
         "assets/templates/SKILL-template.md": "983e0a7398321fbbb24dfe90ccdc86b587c1c7aa62a1eaeee542a2ce99036e98",
         "references/anti-patterns.md": "b2b7759e329eaa8e646d19c7b9fafcc14cea43db89b9d3509a2a22c212f9a120",
         "references/checklist.md": "62bdead257ff1877324948e130911a1a0e40372c2b498b5a28200ad19ab8e159",

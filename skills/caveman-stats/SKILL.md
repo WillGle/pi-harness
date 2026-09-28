@@ -6,6 +6,7 @@ description: >
   estimation of the counts. Trigger: /caveman-stats, "caveman stats",
   "token stats", "how many tokens saved".
 allowed-tools: [Bash]
+disable-model-invocation: true
 ---
 
 Report real session token usage. Numbers come from the session transcript, never from guessing.

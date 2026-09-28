@@ -1,6 +1,7 @@
 ---
 name: project-scouting
 description: Reconnaissance doctrine for unfamiliar or changed repositories; obtain bounded structural findings through Pi Harness when useful, not an independent scout workflow.
+disable-model-invocation: true
 ---
 
 # Project reconnaissance

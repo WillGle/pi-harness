@@ -1,6 +1,7 @@
 ---
 name: drawio-modeling
 description: Create or edit editable draw.io diagrams for ERD, functional decomposition, UML activity, sequence, state machine and use-case models. Use when a user requests one of these diagram types from product documents, schemas or source code. Prefer formal notation over decorative architecture styles; use architecture-diagram instead for app/system component architecture.
+disable-model-invocation: true
 ---
 
 # Draw.io product models

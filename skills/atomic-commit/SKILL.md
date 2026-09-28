@@ -8,6 +8,7 @@ description: >
   one. Use when the user says "atomic commit", "commit nguyên tử", "split
   this into commits", "tách commit", "commit theo từng phần", or when a large
   mixed diff is about to be committed as one blob.
+disable-model-invocation: true
 ---
 
 Turn the current working-tree changes into a sequence of atomic commits.

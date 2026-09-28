@@ -5,6 +5,7 @@ description: >
   intent and reasoning. Conventional Commits format. Subject ≤50 chars, body only when "why"
   isn't obvious. Use only when the user asks for a commit-message draft or invokes
   /caveman-commit. Do not trigger merely because files are staged or a commit is requested.
+disable-model-invocation: true
 ---
 
 Write commit messages terse and exact. Conventional Commits format. No fluff. Why over what.

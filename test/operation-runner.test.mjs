@@ -30,8 +30,7 @@ test("Coordinator packet contains bounded semantic state, not transcripts", () =
   assert.deepEqual(packet.OperationBrief.pending_task_ids, ["T-2"]);
   assert.match(coordinatorPrompt(packet), /Every decision must include version, operation_id, action, and a nonempty reason/);
   assert.match(coordinatorPrompt(packet), /Harness uses each exact OperationBrief\.task_intents value as the scope/);
-  assert.match(coordinatorPrompt(packet), /ASD-STE100-derived Agent English/);
-  assert.match(coordinatorPrompt(packet), /Put a condition before the action that depends on it/);
+  assert.doesNotMatch(coordinatorPrompt(packet), /ASD-STE100-derived Agent English/, "stable Coordinator doctrine belongs in the Coordinator profile");
   assert.match(coordinatorPrompt(packet), /Harness resolves trusted registered TaskSpecs/);
   assert.ok(!coordinatorPrompt(packet).includes("raw Worker transcript"));
   const profile = readFileSync(".pi/agents/coordinator.md", "utf8");

@@ -1,6 +1,7 @@
 ---
 name: ask-user
 description: Clarify vague, broad or ambiguous user requests before planning or acting. Use independently of /plan, or within /plan, whenever uncertainty about the user's needs, goals, scope, priorities or success criteria could change what to do. Ask focused questions and wait for answers instead of silently choosing defaults. Not an approval or permission tool.
+disable-model-invocation: true
 ---
 
 # Ask User — clarify intent, not permission

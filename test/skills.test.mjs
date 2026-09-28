@@ -39,7 +39,7 @@ test("checked-in skills are self-contained and every packaged file matches the l
   }
 });
 
-test("Pi exposes only contextual skills to model selection and keeps policy modes explicit-only", () => {
+test("optional Skills stay explicit-only and absent from the CORE prompt catalog", () => {
   const root = resolve(".");
   const { skills } = loadSkills({
     cwd: root,
@@ -48,18 +48,10 @@ test("Pi exposes only contextual skills to model selection and keeps policy mode
     includeDefaults: false,
   });
   const byName = new Map(skills.map((skill) => [skill.name, skill]));
-  const explicitOnly = skills.filter((skill) => skill.disableModelInvocation).map((skill) => skill.name).sort();
-  assert.deepEqual(explicitOnly, ["caveman", "ponytail", "security"]);
-  const promptSkills = formatSkillsForPrompt(skills);
-  for (const name of explicitOnly) {
-    assert.ok(byName.has(name), `${name} must remain registered for explicit invocation`);
-    assert.doesNotMatch(promptSkills, new RegExp(`<name>${name}</name>`));
-  }
-  assert.doesNotMatch(promptSkills, /ACTIVE EVERY RESPONSE|The ladder is a reflex/);
-  for (const name of ["ask-user", "pi-coordinator", "project-scouting", "requirement-check"]) {
-    assert.match(promptSkills, new RegExp(`<name>${name}</name>`));
-  }
-  assert.match(byName.get("pi-coordinator").description, /multi-part work/);
+  assert.equal(byName.has("pi-coordinator"), false, "Coordinator doctrine belongs to CORE, not a Skill");
+  assert.ok(skills.length > 0);
+  for (const skill of skills) assert.equal(skill.disableModelInvocation, true, `${skill.name} must require explicit invocation`);
+  assert.equal(formatSkillsForPrompt(skills), "", "optional Skill metadata must not change the CORE system prompt");
   assert.match(readFileSync(byName.get("security").filePath, "utf8"), /trust boundaries/i);
   assert.match(byName.get("requirement-check").description, /medium\/high-impact/);
 
@@ -74,17 +66,16 @@ test("Pi exposes only contextual skills to model selection and keeps policy mode
 
 test("scouting has one packaged execution path and doctrine describes the supported TaskOrder subset", () => {
   const scouting = readFileSync("skills/project-scouting/SKILL.md", "utf8");
-  const coordinator = readFileSync("skills/pi-coordinator/SKILL.md", "utf8");
   assert.match(scouting, /pi_harness_run_operation/);
   assert.match(scouting, /pi_harness_coordinate` tool is disabled/);
   assert.doesNotMatch(scouting, /scripts\/scout\.py|\.scout_report\.md.*exists/);
-  assert.match(coordinator, /Only the Harness Coordinator can dispatch, accept, reject, or judge TaskResults/);
-  assert.match(coordinator, /read-only TaskOrder must include at least one specific Acceptance Criterion/);
+  assert.match(readFileSync(".pi/agents/coordinator.md", "utf8"), /Only the Coordinator may accept a verified TaskResult/);
+  assert.match(readFileSync(".pi/agents/coordinator.md", "utf8"), /read-only TaskOrder/);
   const cavecrew = readFileSync("skills/cavecrew/SKILL.md", "utf8");
   assert.match(cavecrew, /Do not register or spawn named cavecrew agents/);
   assert.match(cavecrew, /Never treat a receipt as a TaskResult/);
   assert.match(readFileSync("skills/caveman/SKILL.md", "utf8"), /Never format or rewrite a Mission/);
-  assert.match(coordinator, /not acceptance/);
+  assert.match(readFileSync(".pi/agents/coordinator.md", "utf8"), /Operation completion does not complete the Mission/);
   const lock = JSON.parse(readFileSync("skills/skills.lock.json", "utf8"));
   assert.equal(Object.hasOwn(lock.skills, "skill-hub"), false);
 });

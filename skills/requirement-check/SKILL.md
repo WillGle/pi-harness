@@ -1,6 +1,7 @@
 ---
 name: requirement-check
 description: Check the basis and feasibility of consequential user requirements before committing to a solution. Use for most medium/high-impact requests, and for low-impact requests when context suggests missing domain knowledge, questionable standards, contradictory assumptions, or nonsensical requirements. Ask what standard or evidence the user relies on; if they do not know, investigate and explain before asking them to decide. Distinct from ask-user, which clarifies intended outcomes.
+disable-model-invocation: true
 ---
 
 # Requirement Check — establish a basis before acting

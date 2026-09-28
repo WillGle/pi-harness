@@ -1,6 +1,7 @@
 ---
 name: skill-creator
 description: Creates and updates Agent Skills for any AI coordinator with proper structure and best practices. Use when user wants to create new skill, update existing skill, learn SKILL.md authoring, validate a skill, or package skills for distribution. Includes automation scripts and authoring guidelines.
+disable-model-invocation: true
 ---
 
 # Skill Creator

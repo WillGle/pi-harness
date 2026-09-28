@@ -1,6 +1,7 @@
 ---
 name: cavecrew
 description: Compact execution/report profile for bounded Pi Harness delegations. Use when the user requests cavecrew or compressed subagent output. Pi Harness retains dispatch and lifecycle ownership.
+disable-model-invocation: true
 ---
 
 # Cavecrew reporting profile

@@ -407,11 +407,8 @@ test("Pi hides policy modes from ordinary prompts and expands them on explicit i
   try {
     await pi.prompt("Explain a closure briefly.");
     const system = messageText(fixture.provider.requests[0].body.messages.find((message) => message.role === "system"));
-    assert.match(system, /<name>pi-coordinator<\/name>/);
-    assert.match(system, /<name>requirement-check<\/name>/);
-    assert.match(system, /multi-part work/);
-    assert.match(system, /medium\/high-impact/);
-    assert.doesNotMatch(system, /<name>caveman<\/name>|<name>ponytail<\/name>|<name>security<\/name>/);
+    assert.doesNotMatch(system, /<available_skills>|<name>requirement-check<\/name>|<name>pi-coordinator<\/name>/);
+    assert.doesNotMatch(system, /multi-part work|medium\/high-impact/);
     assert.doesNotMatch(system, /ACTIVE EVERY RESPONSE|YAGNI only to additions outside it/);
 
     const invoke = async (name) => {

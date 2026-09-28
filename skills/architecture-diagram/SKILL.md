@@ -1,6 +1,7 @@
 ---
 name: architecture-diagram
 description: Create or edit readable, editable draw.io architecture diagrams of a repository, app, product or system. Use for project structure, components, dependencies, data flow and deployment, including requests like "vẽ sơ đồ kiến trúc" or "diagram this codebase". Do not use for ERD/UML/BPMN with formal notation or for charts.
+disable-model-invocation: true
 ---
 
 # Project architecture diagrams

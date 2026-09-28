@@ -156,6 +156,8 @@ The bridge supports ACP stdio MCP servers for `session/new` and `session/resume`
 
 ## Native feature boundaries
 
+CORE is complete and correct when no optional Skill is loaded or invoked. CORE owns authority, state, scheduling, lifecycle, verification, accountability, context retention, cache/token economics, and platform safety. A Skill may provide bounded execution reasoning, presentation, an Artifact, or an observation. A Skill must not grant authority, mutate Mission/Operation/TaskGraph/Attempt state, change Verification Status, complete a Mission, create ContextEdit eligibility, or control cache, compaction, capacity, or runtime budgets. The Coordinator doctrine is CORE code, prompts, and profiles. It is not a Skill. Optional Skills are explicit-only and do not add metadata to the default model system prompt.
+
 - Provider, model, authentication, local model servers, session tree, and compaction remain Pi-owned.
 - Memory writes occur only through explicit `/learn`; storage is bounded and private, with no autonomous write tool.
 - Precise editing is `pi_harness_hashlines` plus `pi_harness_patch` under the small SHA/range contract.
