@@ -55,21 +55,37 @@ A Worker finishing execution is not success by itself. Harness stores Evidence, 
 - Explicit TaskResult acceptance and bounded OperationReports.
 - Safe session switching, cancellation, and compaction lifecycle.
 
-Pi Harness also provides `/plan`, `/goal`, curated skills, and `pi-harness-acp`, an ACP v1 bridge for compatible clients.
+Pi Harness also provides `/plan`, `/goal`, and curated skills. The separate `pi-harness-acp` bridge is experimental and outside the supported product surface.
+
+## Platform support
+
+Pi Harness supports Linux CLI environments only. The supported interface is Pi running in a Linux terminal. Harness relies on Linux/POSIX process groups, signals, shell behavior, filesystem permissions, symlink semantics, and Git worktrees.
+
+macOS, Windows, WSL, GUI clients, and ACP/editor integrations are outside the supported platform contract unless they are separately scoped and runtime-verified. Unsupported hosts must fail closed. Harness must not weaken lifecycle, isolation, or verification guarantees when a required capability is missing.
+
+### Requirements
+
+- Linux
+- Node.js `>=22.19.0`
+- Pi `0.87.1`
+- Git
+- POSIX `sh`
+- ripgrep (`rg`)
+- npm for bootstrap and package installation
+
+`npm run doctor` checks the runtime, command prerequisites, filesystem safety, process groups, and disposable Git worktree support. Universal Ctags and ast-grep are optional. Code-intel tools use ripgrep when those tools are unavailable. A local Ubuntu 24.04 container with stock Pi 0.87.1 passed the workflow-equivalent gates. Remote Ubuntu CI and a generic Linux host remain unverified.
 
 ## Quick start
-
-Requirements: Node.js 22.19 or later and Pi 0.87.1.
 
 ```bash
 git clone https://github.com/WillGle/pi-harness.git
 cd pi-harness
 npm install
-npm run bootstrap -- --cli
+npm run bootstrap
 npm run doctor
 ```
 
-Then run `pi`. To install the ACP bridge and configure Zed, run `npm run bootstrap` without `--cli`; the Zed settings file must already exist. Zed 0.229.0 GUI prompt integration passed. The bridge's tested surface and unsupported features are documented in [UPSTREAM.md](packages/pi-harness-acp/UPSTREAM.md); this is not a full official ACP conformance claim.
+Then run `pi` in a Linux terminal. Bootstrap installs Pi Harness for the Pi CLI by default. The ACP bridge and Zed setup remain experimental ancillary integrations, are not supported surfaces, and require the explicit `npm run bootstrap -- --experimental-zed` option. See [UPSTREAM.md](packages/pi-harness-acp/UPSTREAM.md) for their tested limits; no full official ACP conformance claim is made.
 
 ## Architecture
 
@@ -77,7 +93,7 @@ See [target-architecture.md](target-architecture.md) for authority, lifecycle, s
 
 ## Status and limitations
 
-Managed Operations, bounded parallel Task waves, Evidence-backed verification, and session-safe cancellation are shipped. Dynamic TaskGraph expansion, automatic branch integration, automatic Mission completion, and persistent project intelligence are not shipped. The working implementation uses native stable prompts, deterministic Context GC, and availability-aware context telemetry; release closure and broader live scenario proof remain pending. Registered verification commands run with host permissions and environment. Git worktrees and process groups are not OS sandboxes. An Operation completing does not complete the Mission.
+Managed Operations, bounded parallel Task waves, Evidence-backed verification, and session-safe cancellation are shipped for Linux CLI environments only. Dynamic TaskGraph expansion, automatic branch integration, automatic Mission completion, and persistent project intelligence are not shipped. The working implementation uses native stable prompts, deterministic Context GC, and availability-aware context telemetry; release closure and broader live scenario proof remain pending. Registered verification commands run with host permissions and environment. Git worktrees and process groups are not OS sandboxes. An Operation completing does not complete the Mission.
 
 ## Development and testing
 

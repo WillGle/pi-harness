@@ -6,7 +6,7 @@ import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { defaultPiEnv } from "./helpers/default-pi.mjs";
 
-test("disposable install: exact tarball pack, bootstrap.mjs execution, unpacked package doctor, and Zed fingerprint protection", () => {
+test("disposable install: Linux CLI is the default and explicit experimental Zed setup preserves fingerprints", () => {
   const sandboxDir = mkdtempSync(join(tmpdir(), "pi-disposable-install-"));
   const fakeHome = join(sandboxDir, "home");
   const npmGlobalPrefix = join(fakeHome, ".npm-global");
@@ -106,7 +106,23 @@ test("disposable install: exact tarball pack, bootstrap.mjs execution, unpacked 
       },
       encoding: "utf8",
     });
-    assert.equal(bootstrapRun.status, 0, `scripts/bootstrap.mjs failed: ${bootstrapRun.stdout} ${bootstrapRun.stderr}`);
+    assert.equal(bootstrapRun.status, 0, `default CLI bootstrap failed: ${bootstrapRun.stdout} ${bootstrapRun.stderr}`);
+    assert.match(bootstrapRun.stdout, /installed for Linux Pi CLI/);
+    assert.deepEqual(readFileSync(zedSettingsPath, "utf8"), initialZedSettings, "default bootstrap must not mutate Zed settings");
+    assert.equal(existsSync(join(npmGlobalPrefix, "bin", "pi-harness-acp")), false, "default bootstrap must not install ACP");
+    assert.equal(existsSync(join(fakeHome, ".pi-harness", "zed-migration.json")), false, "default bootstrap must not create Zed migration state");
+
+    const experimentalBootstrapRun = spawnSync("node", [bootstrapScript, "--experimental-zed"], {
+      cwd: sandboxDir,
+      env: {
+        ...env,
+        PI_HARNESS_PKG: packageDir,
+        PI_HARNESS_ACP_PKG: acpPkgDir,
+      },
+      encoding: "utf8",
+    });
+    assert.equal(experimentalBootstrapRun.status, 0, `experimental Zed bootstrap failed: ${experimentalBootstrapRun.stdout} ${experimentalBootstrapRun.stderr}`);
+    assert.match(experimentalBootstrapRun.stderr, /experimental and outside the supported platform contract/);
 
     // Verify pi-harness-acp is executable on PATH
     const acpWhich = spawnSync("sh", ["-c", "command -v pi-harness-acp"], { env, encoding: "utf8" });
@@ -128,7 +144,7 @@ test("disposable install: exact tarball pack, bootstrap.mjs execution, unpacked 
     // 4. Verify fingerprint mismatch detection prevents corrupt overwrites
     // Tamper with Zed settings without updating migration baseline
     writeFileSync(zedSettingsPath, '{\n  "agent_servers": { "foreign": {} }\n}');
-    const tamperingRun = spawnSync("node", [bootstrapScript], {
+    const tamperingRun = spawnSync("node", [bootstrapScript, "--experimental-zed"], {
       cwd: sandboxDir,
       env: {
         ...env,
@@ -145,7 +161,7 @@ test("disposable install: exact tarball pack, bootstrap.mjs execution, unpacked 
 
     // 5. Run pi-harness doctor against the UNPACKED PACKAGE (not checkout)
     const unpackedDoctorBin = join(packageDir, "bin", "pi-harness.mjs");
-    const doctorRun = spawnSync("node", [unpackedDoctorBin, "doctor"], {
+    const doctorRun = spawnSync("node", [unpackedDoctorBin, "doctor", "--zed"], {
       cwd: sandboxDir,
       env,
       encoding: "utf8",
@@ -157,7 +173,12 @@ test("disposable install: exact tarball pack, bootstrap.mjs execution, unpacked 
     assert.equal(doctorJson.pi.ready, true);
     assert.equal(doctorJson.toolCalling, true);
     assert.equal(doctorJson.skills.verified, true);
-    assert.equal(doctorJson.acp, "available");
+    assert.deepEqual(doctorJson.platform, { required: "linux", actual: "linux", supported: true, missing: [], filesystem: { unix_permissions: true, nofollow: true }, process: { signals: true, process_groups: true } });
+    assert.deepEqual(doctorJson.filesystem, { unix_permissions: true, nofollow: true });
+    assert.equal(doctorJson.git_worktrees, true);
+    assert.ok(doctorJson.commands.sh && doctorJson.commands.git && doctorJson.commands.rg && doctorJson.commands.pi && doctorJson.commands.npm);
+    assert.equal(doctorJson.acp, "experimental/unsupported");
+    assert.equal(doctorJson.zed.supported, false);
     assert.equal(doctorJson.zed.ready, true);
   } finally {
     try {

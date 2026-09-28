@@ -1,4 +1,5 @@
 import { contextTelemetry, deterministicContextEdits, installStablePrompt, stablePromptSections } from "../lib/context-economics.mjs";
+import { assertSupportedPlatform } from "../lib/platform.mjs";
 import process from "node:process";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -33,6 +34,7 @@ const SKILLS = Object.keys(JSON.parse(readFileSync(resolve(dirname(fileURLToPath
 const fmtTokens = (count: number) => count < 1000 ? `${count}` : count < 1_000_000 ? `${(count / 1000).toFixed(count < 10_000 ? 1 : 0)}k` : `${(count / 1_000_000).toFixed(1)}M`;
 
 export default function harness(pi: Pi): void {
+  assertSupportedPlatform();
   const parallelLimit = parallelTaskLimit();
   let plan = planState();
   let goal: ReturnType<typeof goalState> | undefined;

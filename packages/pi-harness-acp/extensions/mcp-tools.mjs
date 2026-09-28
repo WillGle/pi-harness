@@ -4,6 +4,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { getDefaultEnvironment, StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { Type } from "typebox";
 import { createMcpPiToolNames } from "../lib/mcp-tools.mjs";
+import { assertLinuxCliSupported } from "../lib/platform.mjs";
 
 const CONFIG_ENV = "PI_HARNESS_ACP_MCP_CONFIG_FILE";
 const STATUS_ENV = "PI_HARNESS_ACP_MCP_STATUS_FILE";
@@ -42,7 +43,7 @@ function waitForClose(child, isClosed, timeoutMs) {
 }
 
 function processGroupExists(pgid) {
-  if (process.platform === "win32") return false;
+  if (process.platform !== "linux") return false;
   try {
     process.kill(-pgid, 0);
     return true;
@@ -71,7 +72,7 @@ function waitForProcessGroupExit(pgid, timeoutMs) {
 
 function signalOwnedProcess(child, signal) {
   try {
-    if (process.platform !== "win32" && child.pid) process.kill(-child.pid, signal);
+    if (process.platform === "linux" && child.pid) process.kill(-child.pid, signal);
     else child.kill(signal);
   } catch {
     try { child.kill(signal); } catch {}
@@ -93,7 +94,7 @@ class OwnedStdioClientTransport extends StdioClientTransport {
         stdio: ["pipe", "pipe", this._serverParams.stderr ?? "inherit"],
         shell: false,
         windowsHide: process.platform === "win32",
-        detached: process.platform !== "win32",
+        detached: process.platform === "linux",
         cwd: this._serverParams.cwd,
       });
       this.#ownedChild = this._process;
@@ -135,7 +136,7 @@ class OwnedStdioClientTransport extends StdioClientTransport {
       try { child.stdin?.end(); } catch {}
       await waitForClose(child, closed, 150);
       signalOwnedProcess(child, "SIGTERM");
-      if (process.platform !== "win32" && pgid) {
+      if (process.platform === "linux" && pgid) {
         if (!await waitForProcessGroupExit(pgid, 300)) signalOwnedProcess(child, "SIGKILL");
         if (!await waitForProcessGroupExit(pgid, 1_000)) throw new Error("MCP process-group cleanup failed.");
       } else {
@@ -269,6 +270,7 @@ function registerMcpTools(pi, connections) {
 }
 
 export default async function piHarnessAcpMcpExtension(pi) {
+  assertLinuxCliSupported();
   const configPath = process.env[CONFIG_ENV];
   if (!configPath) return;
   const statusPath = process.env[STATUS_ENV];

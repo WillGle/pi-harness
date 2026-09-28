@@ -25,6 +25,9 @@
   "engines": {
     "node": ">=22.19.0"
   },
+  "os": [
+    "linux"
+  ],
   "dependencies": {
     "@agentclientprotocol/sdk": "1.5.0",
     "@modelcontextprotocol/sdk": "1.30.0",

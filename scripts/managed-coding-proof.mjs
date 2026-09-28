@@ -7,6 +7,8 @@ import {createAgentSession,DefaultResourceLoader,SessionManager,SettingsManager,
 import harness from '../extensions/pi-harness.ts';
 import subagents from '../node_modules/@tintinweb/pi-subagents/dist/index.js';
 import {contextTelemetry,deterministicContextEdits,stablePromptSections} from '../lib/context-economics.mjs';
+import {assertSupportedPlatform} from '../lib/platform.mjs';
+assertSupportedPlatform();
 const root=dirname(dirname(fileURLToPath(import.meta.url)));
 const modelChoice=process.argv[2];
 const ledgerPath=process.argv[3];

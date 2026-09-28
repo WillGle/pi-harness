@@ -5,6 +5,9 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { assertSupportedPlatform } from "../lib/platform.mjs";
+
+assertSupportedPlatform();
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
@@ -68,9 +71,11 @@ function updateZed() {
   return backup;
 }
 
+const args = process.argv.slice(2);
+const experimentalZed = args.includes("--experimental-zed") || args.includes("--zed");
+if (experimentalZed && args.includes("--cli")) throw new Error("Choose either --cli or --experimental-zed, not both.");
+const packageArgs = args.filter((argument) => !["--cli", "--experimental-zed", "--zed"].includes(argument));
 requirePi();
-const cliOnly = process.argv[2] === "--cli";
-const packageArgs = process.argv.slice(cliOnly ? 3 : 2);
 const localAcp = join(root, "packages", "pi-harness-acp");
 const defaultPiPkg = existsSync(join(root, "extensions", "pi-harness.ts")) ? root : `${pkg.name}@${pkg.version}`;
 const defaultAcpPkg = existsSync(localAcp) ? localAcp : `@will/pi-harness-acp@${pkg.version}`;
@@ -78,11 +83,12 @@ const piPkg = process.env.PI_HARNESS_PKG || packageArgs[0] || defaultPiPkg;
 const acpPkg = process.env.PI_HARNESS_ACP_PKG || packageArgs[1] || defaultAcpPkg;
 const installed = command("pi", ["install", piPkg], { stdio: "inherit" });
 if (installed.status !== 0) process.exit(installed.status ?? 1);
-if (cliOnly) console.log("Pi Harness installed for Pi CLI.");
+if (!experimentalZed) console.log("Pi Harness installed for Linux Pi CLI.");
 else {
+  console.warn("ACP/Zed integration is experimental and outside the supported platform contract.");
   const acp = command("npm", ["install", "--global", acpPkg], { stdio: "inherit" });
   if (acp.status !== 0) process.exit(acp.status ?? 1);
   const backup = updateZed();
-  console.log(`Pi Harness installed. Zed backup: ${backup}`);
+  console.log(`Experimental ACP/Zed integration installed. Zed backup: ${backup}`);
 }
 console.log("Provider, model, authentication, aliases, secrets, and environment variables were not changed.");

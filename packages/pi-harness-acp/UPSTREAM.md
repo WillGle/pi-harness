@@ -1,5 +1,7 @@
 # Upstream provenance
 
+> **Support boundary:** Pi Harness supports Linux CLI only. This ACP bridge is an experimental ancillary integration, not a supported user-facing surface. The integration tests below do not establish ACP, GUI, or Zed platform support.
+
 This package is the current compatibility bridge derived from
 [`svkozak/pi-acp`](https://github.com/svkozak/pi-acp), pinned at
 `d1cffc047ab37a096ee70ca39cfc1de463db8d12` (retrieved 2026-09-17).
@@ -52,21 +54,22 @@ The bridge launches the absolute MCP command directly with `shell: false`. It
 uses the MCP SDK's safe inherited environment and applies the ACP request's
 explicit environment values. MCP commands run with the user's host permissions.
 This is trusted host execution, not an OS sandbox. The bridge ignores MCP stderr
-and returns generic errors for failed calls. On POSIX, the bridge terminates the
-MCP server's process group on session close and ACP shutdown. A server that
-detaches descendants can leave processes outside that group. On Windows, the
-bridge owns and terminates the direct MCP process.
+and returns generic errors for failed calls. The experimental bridge runs only
+on native Linux outside WSL and terminates the MCP server's process group on
+session close and ACP shutdown. A server that detaches descendants can leave
+processes outside that group. No Windows, macOS, or WSL behavior is supported.
 
 Session ownership is process-local; the bridge does not lock persisted session
 IDs across multiple ACP processes.
 
-The automated ACP lifecycle and subprocess tests pass, including stdio
-initialize/new/prompt/close/resume, tool execution, multiple servers, startup and
-malformed-response failures, child exit, cancellation, cleanup, output secrecy,
-and unsupported HTTP/SSE rejection. A packed ACP artifact includes the runtime
-extension and its declared dependencies. Zed 0.229.0 GUI testing with the
-registered `pi-harness` agent also passed: a prompt reached Pi and Zed displayed
-`ACP GUI check passed.`. These are integration results. No official ACP
+The automated experimental ACP lifecycle and subprocess tests pass, including
+stdio initialize/new/prompt/close/resume, tool execution, multiple servers,
+startup and malformed-response failures, child exit, cancellation, cleanup,
+output secrecy, and unsupported HTTP/SSE rejection. A packed ACP artifact
+includes the runtime extension and its declared dependencies. Zed 0.229.0 GUI
+testing with the registered `pi-harness` agent also passed as a historical
+integration check: a prompt reached Pi and Zed displayed `ACP GUI check passed.`.
+These results do not establish supported ACP or GUI operation. No official ACP
 conformance suite was found, so this is not a full official ACP conformance
 claim.
 

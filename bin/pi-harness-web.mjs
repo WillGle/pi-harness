@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { lookup } from "node:dns/promises";
 import { BlockList, isIP } from "node:net";
+import { assertSupportedPlatform } from "../lib/platform.mjs";
 
 export const MAX_BYTES = 1_000_000;
 export const TIMEOUT_MS = 10_000;
@@ -87,6 +88,7 @@ export function jinaReaderUrl(value) {
   return `${JINA_READER_URL}${url.href}`;
 }
 if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {
+  assertSupportedPlatform();
   if (!["search", "fetch"].includes(command) || !value) { console.error("Usage: pi-harness-web search <query> | fetch <url>"); process.exit(2); }
   try {
     try { process.loadEnvFile?.(); } catch {}

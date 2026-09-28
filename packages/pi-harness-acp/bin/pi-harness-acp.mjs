@@ -10,6 +10,9 @@ import { spawn } from "node:child_process";
 import * as acp from "@agentclientprotocol/sdk";
 import { decodeAcpPrompt } from "../lib/content.mjs";
 import { createPiRpc, PiRpcError } from "../lib/pi-rpc.mjs";
+import { assertLinuxCliSupported } from "../lib/platform.mjs";
+
+assertLinuxCliSupported();
 
 const VERSION = "1.0.0";
 const STATE_PATH = process.env.PI_HARNESS_ACP_STATE || join(homedir(), ".pi-harness", "acp-sessions.json");
@@ -133,7 +136,7 @@ function createMcpStartupFiles(servers) {
   if (servers.length === 0) return undefined;
   const directory = mkdtempSync(join(tmpdir(), "pi-harness-acp-mcp-"));
   try {
-    if (process.platform !== "win32") chmodSync(directory, 0o700);
+    if (process.platform === "linux") chmodSync(directory, 0o700);
     const configPath = join(directory, "servers.json");
     const statusPath = join(directory, "status.json");
     writeFileSync(configPath, JSON.stringify(servers), { mode: 0o600 });
