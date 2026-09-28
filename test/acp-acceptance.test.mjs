@@ -336,10 +336,11 @@ test("ACP legacy custom command and load methods are not advertised or accepted"
     await initialize(acp);
     const rejectedMcp = await acp.request("session/new", {
       cwd: process.cwd(),
-      mcpServers: [{ name: "untrusted", command: "/bin/false", args: [], env: [] }],
+      mcpServers: [{ type: "http", name: "remote", url: "https://mcp.example.invalid", headers: [] }],
     });
-    assert.ok(rejectedMcp.error, `unexpected MCP session response: ${JSON.stringify(rejectedMcp)}`);
-    assert.equal(existsSync(acp.pidPath), false, "unsupported MCP servers must be rejected before Pi starts");
+    assert.ok(rejectedMcp.error, `unexpected HTTP MCP session response: ${JSON.stringify(rejectedMcp)}`);
+    assert.equal(rejectedMcp.error.code, -32602);
+    assert.equal(existsSync(acp.pidPath), false, "unsupported HTTP MCP transport must be rejected before Pi starts");
     const session = await acp.request("session/new", { cwd: process.cwd(), mcpServers: [] });
     const legacyCommand = await acp.request("session/command", { sessionId: session.sessionId, command: "plan", args: "status" });
     assert.ok(legacyCommand.error);

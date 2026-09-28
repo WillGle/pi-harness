@@ -292,7 +292,7 @@ Commit: `8816ef2`.
 ## Task: T11 — ACP / Pi RPC Lifecycle Closure
 Status: PASS
 
-Current closure covers the catalog-drain runtime patch, ACP v1 lifecycle, and one Zed 0.229.0 GUI prompt. The full official ACP conformance suite was not run and is not claimed. The readiness, legacy cancellation, and pre-v1 protocol records below are historical. The final ACP v1 closure record at the end of T11 is authoritative for current behavior.
+The previous scoped closure covered the catalog-drain runtime patch, ACP v1 lifecycle, and one Zed 0.229.0 GUI prompt. The Commander reopened T11 on 2026-09-28 to implement mandatory ACP v1 stdio MCP support. The stdio MCP implementation and its requested lifecycle proof now pass. The full official ACP conformance suite was not found and is not claimed. The readiness, legacy cancellation, and pre-v1 protocol records below are historical.
 
 Historical pre-v1 bridge checkpoint:
 
@@ -318,7 +318,7 @@ Changes:
 - Direct integration helper uses the same readiness/ownership invariant; its10s command deadline begins after readiness. ACP observer remains15s. No deadlines were increased, no startup sleeps/pings/provider changes were added.
 - Reconnect test now always closes its second bridge, including assertion failure. One bridge orphaned by the pre-fix fixture was identified as owned PID1821776 and stopped explicitly; its Pi child had already exited. No unrelated process was stopped.
 - Historical pre-v1 checkpoint: added7 core lifecycle regressions and4 controlled wire-level bridge regressions. The controlled peer has no model or credentials. The current ACP v1 contract and limits are recorded below.
-- Phase I, managed-operation code, Worker budgets and Context Economics unchanged. T14 section/status untouched. No commit/push.
+- Phase I, managed-operation code, Worker budgets and Context Economics were unchanged at this historical checkpoint. T14 was not edited at that checkpoint. No commit or push occurred then.
 
 Verification:
 - Original serialized reproducer: node --test --test-concurrency=1 test/acp-acceptance.test.mjs test/pi-rpc-integration.test.mjs;5/7 PASS,2 direct initial /plan timeouts; /tmp/t11-original-repro.log.
@@ -356,11 +356,11 @@ Runtime patch checkpoint (2026-09-28):
 - `npm run test:all` PASS: build,159/159 unit tests,2/2 runtime tests,31/31 integration tests; zero skips (`/tmp/t11-canonical-all.log`).
 - Installed default bundle fingerprint: `bfc4efa014e5d74637ab627973bc352deb1424cbc7215df2021212ef612ba817` across56 files. The test helper confirms `drainRefresh`, `refreshOperations`, and `storageOperations` markers in that bundle.
 - The drain has no internal deadline. A provider or storage operation that never settles can hold native disposal indefinitely. ACP EOF grace, TERM and KILL still bound bridge shutdown. Forced KILL cannot guarantee graceful lock release; README documents this limitation.
-- T11 is PASS for the scoped runtime and ACP v1 integration. Zed 0.229.0 GUI displayed the expected prompt response. Full official ACP conformance remains unverified and is not claimed.
+- Historical checkpoint: T11 was PASS for the scoped runtime and ACP v1 integration. The Commander later reopened T11 for mandatory stdio MCP support. Zed 0.229.0 GUI displayed the expected prompt response. Full official ACP conformance remains unverified and is not claimed.
 
-### Current ACP v1 closure — 2026-09-28
+### Previous ACP v1 closure checkpoint — before stdio MCP
 
-- The bridge uses `@agentclientprotocol/sdk` 1.5.0 and stable ACP v1. It implements initialize, new/resume/close, text/image prompts, text/thought/tool updates, prompt cancellation, and four Harness commands. It rejects valid MCP server configurations. It does not advertise `loadSession` or model selection. Session ownership remains process-local; persisted sessions are not locked across ACP processes.
+- The bridge uses `@agentclientprotocol/sdk` 1.5.0 and stable ACP v1. It implements initialize, new/resume/close, text/image prompts, text/thought/tool updates, prompt cancellation, and four Harness commands. This historical checkpoint rejected MCP server configurations. It did not advertise `loadSession` or model selection. Session ownership remains process-local; persisted sessions are not locked across ACP processes.
 - Pi 0.87.1 `message_update` has `assistantMessageEvent` without an assistant `message` envelope. The bridge now maps that event. The first live Zed prompt exposed this defect: Pi completed the prompt, but Zed displayed no response. The fixture now matches Pi's event shape.
 - Zed 0.229.0 GUI test with the registered `pi-harness` agent passed. Zed displayed the exact response `ACP GUI check passed.`. Screenshot: `/tmp/t11-zed-ws2-result.png`. The two recorded GUI prompt turns have Pi catalog estimates totaling USD0.031849. Provider-reported cost is unknown. These turns are separate from T10's live budget ledger.
 - `npm run test:all` passed: build,162/162 unit tests,2/2 runtime tests,34/34 integration tests; zero skips. Log: `/tmp/pi-harness-t10-t14-final-test-all.log`. Normal `npm run test:integration` passed34/34; zero skips. Log: `/tmp/pi-harness-t10-t14-final-integration.log`. No `PI_BIN`, PATH override, or `--script-shell` override was used.
@@ -371,7 +371,22 @@ Runtime patch checkpoint (2026-09-28):
 - No full official ACP conformance suite or live Daybreak security call was run. Do not claim either result.
 
 Remaining blocker:
-- No blocker remains for the scoped runtime and ACP v1 integration. T14 release closure remains open. Do not claim full ACP conformance. Do not raise deadlines, force offline mode, or delete shared locks.
+- No blocker remains for the requested T11 stdio MCP scope. T14 release closure remains open. No full ACP conformance claim is made. Do not raise deadlines, force offline mode, or delete shared locks.
+
+### Reopened T11 acceptance — ACP v1 stdio MCP
+
+Status: PASS
+
+The bridge supports stdio MCP through a Pi extension. `session/new` and `session/resume` complete initialize and full tool discovery before readiness. Pi receives deterministic tool names. Resume reconnects the complete requested MCP server set. The bridge sanitizes MCP errors, ignores stderr, and cleans server processes on close and shutdown. POSIX process-group cleanup is tested; detached descendants remain outside the guarantee. MCP commands run with host permissions and are not sandboxed. HTTP/SSE remain unsupported. `session/load` and model selection remain unadvertised.
+
+Verification:
+- `node --test test/acp-mcp-integration.test.mjs`: 9/9 PASS, zero skips. Tests cover SDK 1.5.0 initialize/new/prompt/close/resume, real local Pi tool calls, multiple-server name collisions and stable names, handshake and malformed-response failures, child exit during a turn, cancellation with connection reuse, child/descendant cleanup, output/stderr secrecy, empty-list behavior, and unsupported transports.
+- Normal `npm run test:integration`: 43/43 PASS, zero skips. No `PI_BIN`, PATH, or `--script-shell` override.
+- `npm run test:all`: build PASS;162/162 unit tests,2/2 runtime tests,43/43 integration tests PASS; zero skips.
+- `npm run doctor`, `npm run verify:skills`, `git diff --check`, packed ACP extension/dependency checks, and an isolated offline ACP tarball install passed.
+- Tests use the local MCP fixture and a local Pi test provider. No external model call or provider cost occurred.
+
+The official ACP repository had no conformance suite. Full ACP conformance remains unverified and is not claimed.
 Historical checkpoint baseline: no commit at HEAD35dc2ad803c0d8c8f9438f0a507997fadf72134e.
 
 ## Task: T12 — Security / Verification Trust Boundary Audit
@@ -413,20 +428,20 @@ Status: PARTIAL
 
 Inspected: package scripts, worktree state, remotes, install/RPC/ACP/Zed probes and conditional security live test.
 Findings: T0–T13 criteria now have recorded evidence. Three focused commits cover ACP v1, managed proof, and trust-boundary tests. The fourth commit contains documentation and this tracker update. `origin` targets `WillGle/pi-setup.git`; `pi-harness` targets `WillGle/pi-harness.git` and is the current upstream. The `/etc/nixos` worktree has separate commits and an uncommitted `flake.lock`; it is not part of this release push. No CI check-run evidence was obtained.
-Changes: T10 autonomous proof guard, ACP v1 bridge and tests, T12 trust-boundary tests, current documentation, and this tracker update.
+Changes: T10 autonomous proof guard, ACP v1 bridge and tests, T12 trust-boundary tests, stdio MCP support, current documentation, and this tracker update.
 Verification:
-- Command/result: current `npm run test:all` passed (build,162 unit,2 runtime,34 integration; zero skips); normal `npm run test:integration` passed34/34; doctor, skill verification, and the final whitespace check passed.
+- Command/result: current `npm run test:all` passed (build,162 unit,2 runtime,43 integration; zero skips); normal `npm run test:integration` passed43/43; doctor, skill verification, and the final whitespace check passed.
 - Tests/runtime: disposable root-package/bootstrap doctor, isolated offline ACP package install, real Pi RPC, ACP lifecycle/subprocess tests, patched default-runtime checks, and Zed 0.229.0 GUI prompt integration passed. No live Daybreak security call or official ACP conformance suite was run. T10's separate live budget evidence remains USD1 ceiling; provider-reported cost is unknown.
 DoD:
 - [x] Exact runtime versions verified; baseline build/unit/integration/all/doctor pass.
 - [x] Package install/RPC/ACP configuration smoke demonstrated; session/parallel controlled regressions pass.
-- [x] Clean working tree and reviewed focused commits.
+- [ ] Clean working tree and reviewed focused commits.
 - [x] Real managed coding Operation before/after Phase I.
 - [x] Live Zed 0.229.0 prompt integration passed. Other failure modes use controlled tests; no broader all-live scenario matrix is claimed.
 - [x] Context economics live benchmark under the USD1 ceiling.
 - [x] T0–T13 scoped Acceptance Criteria have recorded evidence.
-- [ ] Push the four reviewed commits to `pi-harness/main` and confirm synchronized HEAD. Explicit push approval is still required.
-Remaining blocker: explicit user approval to push the four commits to `pi-harness/main`. The separate `/etc/nixos` branch is not part of this push. No push has occurred.
+- [x] Push the four reviewed commits to `pi-harness/main` and confirm synchronized HEAD.
+Remaining blocker: the worktree contains uncommitted T11 stdio MCP implementation, package, test, and documentation changes. T14 release review and commit remain open. These changes were not pushed.
 Commits: `6a9b402`, `8816ef2`, `30aa28a`, and the documentation/tracker commit in this release series. Base: `caa7735`.
 
 ## Historical validation addendum — original T1 closure
@@ -446,7 +461,7 @@ After the focused T1 correction and seven added repository regressions, `npm run
 - [ ] Ownership, exact-child cancellation, late-event isolation, and bounded outcomes have evidence at each required boundary. Unknown continuation uses a fresh Task ID.
 - [x] Commander retains separate decisions for integration and Mission completion. Worker or Operation completion does not imply either decision.
 - [x] The live benchmark stayed under the USD1 ceiling. The report did not fabricate provider cost or read, print, or copy credentials.
-- [x] The root worktree is clean after existing changes are preserved and attributed. The four local commits target `pi-harness/main`. Push does not imply CI PASS; push approval remains pending.
+- [ ] The root worktree is clean. The T11 stdio MCP changes remain uncommitted. The four prior reviewed commits target `pi-harness/main` and are pushed. Push does not imply CI PASS; no CI check-run evidence is available.
 
 ## Authorized closure validation checkpoint
 

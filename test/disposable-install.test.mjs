@@ -28,6 +28,9 @@ test("disposable install: exact tarball pack, bootstrap.mjs execution, unpacked 
   writeFileSync(zedSettingsPath, initialZedSettings);
 
   const baseEnv = defaultPiEnv();
+  const npmCacheResult = spawnSync("npm", ["config", "get", "cache"], { cwd: resolve("."), env: baseEnv, encoding: "utf8" });
+  assert.equal(npmCacheResult.status, 0, `npm cache lookup failed: ${npmCacheResult.stderr}`);
+  const npmCache = npmCacheResult.stdout.trim();
   const env = {
     ...baseEnv,
     HOME: fakeHome,
@@ -53,6 +56,43 @@ test("disposable install: exact tarball pack, bootstrap.mjs execution, unpacked 
     assert.equal(unpackResult.status, 0, `tar unpack failed: ${unpackResult.stderr}`);
     const packageDir = join(unpackDir, "package");
     assert.ok(existsSync(packageDir), "Unpacked package directory must exist");
+
+    // Pack the ACP workspace and verify its runtime MCP extension ships in the tarball.
+    const acpPackResult = spawnSync("npm", ["pack", "--workspace", "packages/pi-harness-acp", "--pack-destination", sandboxDir], {
+      cwd: rootDir,
+      encoding: "utf8",
+    });
+    assert.equal(acpPackResult.status, 0, `ACP npm pack failed: ${acpPackResult.stderr}`);
+    const acpTarballName = acpPackResult.stdout.trim().split("\n").pop().trim();
+    const acpTarballPath = join(sandboxDir, acpTarballName);
+    const acpUnpackDir = join(sandboxDir, "acp-unpacked");
+    mkdirSync(acpUnpackDir, { recursive: true });
+    const acpUnpackResult = spawnSync("tar", ["-xzf", acpTarballPath, "-C", acpUnpackDir], { encoding: "utf8" });
+    assert.equal(acpUnpackResult.status, 0, `ACP tar unpack failed: ${acpUnpackResult.stderr}`);
+    const acpPackageDir = join(acpUnpackDir, "package");
+    assert.ok(existsSync(join(acpPackageDir, "extensions", "mcp-tools.mjs")), "ACP tarball must include its MCP extension");
+    const acpPackageJson = JSON.parse(readFileSync(join(acpPackageDir, "package.json"), "utf8"));
+    assert.equal(acpPackageJson.dependencies["@modelcontextprotocol/sdk"], "1.30.0");
+    assert.equal(acpPackageJson.dependencies["cross-spawn"], "7.0.6");
+    assert.equal(acpPackageJson.dependencies.typebox, "1.3.7");
+
+    const acpInstallDir = join(sandboxDir, "acp-install");
+    mkdirSync(acpInstallDir, { recursive: true });
+    const acpInstall = spawnSync("npm", ["install", "--offline", "--prefix", acpInstallDir, acpTarballPath], {
+      cwd: sandboxDir,
+      env: { ...env, npm_config_offline: "true", npm_config_cache: npmCache },
+      encoding: "utf8",
+    });
+    assert.equal(acpInstall.status, 0, `offline ACP install failed: ${acpInstall.stdout} ${acpInstall.stderr}`);
+    const installedExtension = join(acpInstallDir, "node_modules", "@will", "pi-harness-acp", "extensions", "mcp-tools.mjs");
+    assert.ok(existsSync(installedExtension), "offline install must include the MCP extension");
+    const acpVersion = spawnSync(join(acpInstallDir, "node_modules", ".bin", "pi-harness-acp"), ["--version"], {
+      cwd: sandboxDir,
+      env,
+      encoding: "utf8",
+    });
+    assert.equal(acpVersion.status, 0, `installed ACP executable failed: ${acpVersion.stderr}`);
+    assert.equal(acpVersion.stdout.trim(), "1.0.0");
 
     // 3. Execute scripts/bootstrap.mjs directly in disposable sandbox
     const bootstrapScript = resolve("scripts/bootstrap.mjs");

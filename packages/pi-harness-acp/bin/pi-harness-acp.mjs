@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 /** ACP v1 bridge for Pi RPC sessions and Pi Harness commands. */
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { dirname, isAbsolute, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Readable, Writable } from "node:stream";
 import { spawn } from "node:child_process";
 import * as acp from "@agentclientprotocol/sdk";
@@ -32,7 +33,12 @@ function persist() {
     const merged = { ...stored };
     for (const [id, session] of sessions) {
       if (!session.isReady) continue;
-      merged[id] = { piSessionId: session.piSessionId, cwd: session.cwd, updatedAt: new Date().toISOString() };
+      merged[id] = {
+        piSessionId: session.piSessionId,
+        cwd: session.cwd,
+        mcpRequired: session.mcpRequired,
+        updatedAt: new Date().toISOString(),
+      };
     }
     writeFileSync(temporary, JSON.stringify(merged, null, 2), { mode: 0o600 });
     renameSync(temporary, STATE_PATH);
@@ -123,18 +129,75 @@ function onPiEvent(session, message) {
   if (update && session.client) void enqueueUpdate(session, session.client, update);
 }
 
-function spawnPi(sessionId, resumeId, cwd, client) {
+function createMcpStartupFiles(servers) {
+  if (servers.length === 0) return undefined;
+  const directory = mkdtempSync(join(tmpdir(), "pi-harness-acp-mcp-"));
+  try {
+    if (process.platform !== "win32") chmodSync(directory, 0o700);
+    const configPath = join(directory, "servers.json");
+    const statusPath = join(directory, "status.json");
+    writeFileSync(configPath, JSON.stringify(servers), { mode: 0o600 });
+    return { directory, configPath, statusPath };
+  } catch (error) {
+    rmSync(directory, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+function removeMcpStartupFiles(files) {
+  if (files) rmSync(files.directory, { recursive: true, force: true });
+}
+
+function validateMcpServers(servers = []) {
+  if (!Array.isArray(servers)) throw acp.RequestError.invalidParams("mcpServers must be an array.");
+  for (const server of servers) {
+    if (!server || typeof server !== "object" || Array.isArray(server)) {
+      throw acp.RequestError.invalidParams("Each MCP server must be an object.");
+    }
+    if (server.type === "http" || server.type === "sse" || server.type === "acp") {
+      throw acp.RequestError.invalidParams(`MCP transport '${server.type}' is not supported.`);
+    }
+    if (server.type !== undefined) {
+      throw acp.RequestError.invalidParams("Only MCP stdio servers are supported.");
+    }
+    if (typeof server.command !== "string" || !isAbsolute(server.command)) {
+      throw acp.RequestError.invalidParams("MCP stdio command must be an absolute executable path.");
+    }
+  }
+  return servers;
+}
+
+function spawnPi(sessionId, resumeId, cwd, client, mcpServers = []) {
   const id = resumeId || sessionId;
+  const sessionCwd = cwd || process.cwd();
+  const mcpFiles = createMcpStartupFiles(mcpServers);
   const piBin = process.env.PI_BIN || "pi";
   const piArgs = ["--mode", "rpc", "--session-id", id];
   if (process.env.PI_EXTRA_ARGS) piArgs.push(...process.env.PI_EXTRA_ARGS.split(/\s+/).filter(Boolean));
-  const child = spawn(piBin, piArgs, { stdio: ["pipe", "pipe", "pipe"], cwd: cwd || process.cwd() });
+  if (mcpFiles) piArgs.push("-e", fileURLToPath(new URL("../extensions/mcp-tools.mjs", import.meta.url)));
+  let child;
+  try {
+    child = spawn(piBin, piArgs, {
+      stdio: ["pipe", "pipe", "pipe"],
+      cwd: sessionCwd,
+      env: mcpFiles ? {
+        ...process.env,
+        PI_HARNESS_ACP_MCP_CONFIG_FILE: mcpFiles.configPath,
+        PI_HARNESS_ACP_MCP_STATUS_FILE: mcpFiles.statusPath,
+      } : process.env,
+    });
+  } catch (error) {
+    removeMcpStartupFiles(mcpFiles);
+    throw error;
+  }
   const session = {
     id: sessionId,
     child,
     piSessionId: id,
-    cwd: cwd || process.cwd(),
+    cwd: sessionCwd,
     client,
+    mcpFiles,
+    mcpRequired: mcpServers.length > 0,
     updateChain: Promise.resolve(),
     activeTurn: undefined,
     messageId: undefined,
@@ -146,12 +209,24 @@ function spawnPi(sessionId, resumeId, cwd, client) {
   session.ready = rpc.ready.then(state => {
     if (rpc.exited || sessions.get(sessionId) !== session) throw new PiRpcError("PI_RPC_EXITED");
     if (state.sessionId !== id) throw new PiRpcError("PI_RPC_SESSION_MISMATCH");
+    if (mcpFiles) {
+      let status;
+      try { status = JSON.parse(readFileSync(mcpFiles.statusPath, "utf8")); }
+      catch { throw new PiRpcError("ACP_MCP_STARTUP_FAILED"); }
+      if (status.ok !== true || status.serverCount !== mcpServers.length) throw new PiRpcError("ACP_MCP_STARTUP_FAILED");
+    }
     session.isReady = true;
-    stored[sessionId] = { piSessionId: id, cwd: session.cwd, updatedAt: new Date().toISOString() };
+    stored[sessionId] = {
+      piSessionId: id,
+      cwd: session.cwd,
+      mcpRequired: mcpServers.length > 0,
+      updatedAt: new Date().toISOString(),
+    };
     persist();
     return session;
   }).catch(async error => {
-    await rpc.stop({ abort: false });
+    await rpc.stop({ abort: false }).catch(() => {});
+    removeMcpStartupFiles(mcpFiles);
     throw error;
   });
   void session.ready.catch(() => {});
@@ -162,6 +237,7 @@ function spawnPi(sessionId, resumeId, cwd, client) {
       session.activeTurn.error ??= new Error("Pi session ended before the prompt completed.");
       session.activeTurn.resolveSettled();
     }
+    removeMcpStartupFiles(mcpFiles);
     persist();
   });
   return session;
@@ -177,6 +253,9 @@ async function ensureSession(sessionId, client, signal) {
   stored = loadStored();
   const saved = stored[sessionId];
   if (!saved) throw new Error(`Unknown session: ${sessionId}`);
+  if (saved.mcpRequired) {
+    throw acp.RequestError.invalidParams("Resume this MCP session with session/resume and its MCP server list before prompting.");
+  }
   const session = spawnPi(sessionId, saved.piSessionId, saved.cwd, client);
   await waitForSignal(session.ready, signal);
   return session;
@@ -194,20 +273,17 @@ function advertiseCommands(session, client) {
   void enqueueUpdate(session, client, update);
 }
 
-function requireNoMcpServers(servers = []) {
-  if (servers.length) throw new Error("Pi Harness ACP does not support MCP servers.");
-}
-
 async function newSession({ params, client, signal }) {
-  requireNoMcpServers(params.mcpServers);
+  const mcpServers = validateMcpServers(params.mcpServers);
   const sessionId = randomUUID();
-  const session = spawnPi(sessionId, undefined, params.cwd, client);
+  const session = spawnPi(sessionId, undefined, params.cwd, client, mcpServers);
   try {
     await waitForSignal(session.ready, signal);
   } catch (error) {
-    await session.rpc.stop();
+    await session.rpc.stop().catch(() => {});
     if (sessions.get(sessionId) === session) sessions.delete(sessionId);
     delete stored[sessionId];
+    removeMcpStartupFiles(session.mcpFiles);
     persist();
     throw error;
   }
@@ -216,12 +292,23 @@ async function newSession({ params, client, signal }) {
 }
 
 async function resumeSession({ params, client, signal }) {
-  requireNoMcpServers(params.mcpServers);
+  const mcpServers = validateMcpServers(params.mcpServers);
   stored = loadStored();
   const saved = stored[params.sessionId];
   if (!saved) throw new Error(`Unknown session: ${params.sessionId}`);
   if (saved.cwd !== params.cwd) throw new Error("Session working directory does not match.");
-  const session = sessions.get(params.sessionId) ?? spawnPi(params.sessionId, saved.piSessionId, saved.cwd, client);
+  let session = sessions.get(params.sessionId);
+  if (saved.mcpRequired && mcpServers.length === 0) {
+    throw acp.RequestError.invalidParams("Resume this MCP session with its MCP server list.");
+  }
+  if (session) {
+    if (session.activeTurn) await cancelTurn(session, session.activeTurn);
+    await session.rpc.stop();
+    if (sessions.get(params.sessionId) === session) sessions.delete(params.sessionId);
+    removeMcpStartupFiles(session.mcpFiles);
+    session = undefined;
+  }
+  session ??= spawnPi(params.sessionId, saved.piSessionId, saved.cwd, client, mcpServers);
   session.client = client;
   await waitForSignal(session.ready, signal);
   advertiseCommands(session, client);

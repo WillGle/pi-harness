@@ -41,15 +41,34 @@ Pi 0.87.1 serializes `message_update` without its assistant `message` envelope.
 The bridge uses `assistantMessageEvent` for those assistant-only updates. The
 controlled Pi RPC fixture uses the same shape.
 
-The package rejects MCP servers. It does not advertise `loadSession` or model
-selection. Pi owns provider, model, and authentication configuration. Session
-ownership is process-local; the bridge does not lock persisted session IDs across
-multiple ACP processes.
+The bridge supports ACP stdio MCP servers for `session/new` and
+`session/resume`. It completes each MCP initialize handshake and `tools/list`
+request before Pi RPC readiness. It registers deterministic Pi tool names and
+reconnects the requested server set on every resume. It rejects HTTP and SSE
+transports. It does not advertise `loadSession` or model selection. Pi owns
+provider, model, and authentication configuration.
 
-The automated ACP lifecycle and subprocess tests pass. Zed 0.229.0 GUI testing
-with the registered `pi-harness` agent also passed: a prompt reached Pi and Zed
-displayed `ACP GUI check passed.`. This is client integration evidence. It is
-not an official ACP conformance-suite result.
+The bridge launches the absolute MCP command directly with `shell: false`. It
+uses the MCP SDK's safe inherited environment and applies the ACP request's
+explicit environment values. MCP commands run with the user's host permissions.
+This is trusted host execution, not an OS sandbox. The bridge ignores MCP stderr
+and returns generic errors for failed calls. On POSIX, the bridge terminates the
+MCP server's process group on session close and ACP shutdown. A server that
+detaches descendants can leave processes outside that group. On Windows, the
+bridge owns and terminates the direct MCP process.
+
+Session ownership is process-local; the bridge does not lock persisted session
+IDs across multiple ACP processes.
+
+The automated ACP lifecycle and subprocess tests pass, including stdio
+initialize/new/prompt/close/resume, tool execution, multiple servers, startup and
+malformed-response failures, child exit, cancellation, cleanup, output secrecy,
+and unsupported HTTP/SSE rejection. A packed ACP artifact includes the runtime
+extension and its declared dependencies. Zed 0.229.0 GUI testing with the
+registered `pi-harness` agent also passed: a prompt reached Pi and Zed displayed
+`ACP GUI check passed.`. These are integration results. No official ACP
+conformance suite was found, so this is not a full official ACP conformance
+claim.
 
 ## RPC lifecycle boundary
 
