@@ -93,7 +93,7 @@ See [target-architecture.md](target-architecture.md) for authority, lifecycle, s
 
 ## Status and limitations
 
-Managed Operations, bounded parallel Task waves, Evidence-backed verification, and session-safe cancellation are shipped for Linux CLI environments only. Dynamic TaskGraph expansion, automatic branch integration, automatic Mission completion, and persistent project intelligence are not shipped. The working implementation uses native stable prompts, deterministic Context GC, and availability-aware context telemetry; release closure and broader live scenario proof remain pending. Registered verification commands run with host permissions and environment. Git worktrees and process groups are not OS sandboxes. An Operation completing does not complete the Mission.
+Coordinator-owned Task planning, bounded parallel Task waves, Evidence-backed verification, and session-safe cancellation are shipped for Linux CLI environments only. The Commander creates a task-less planning Operation. The Coordinator returns `plan_tasks` semantic proposals. Harness materializes IDs, Dependencies, and trusted execution policies atomically before it opens the TaskGraph for dispatch. Runtime TaskGraph expansion after that materialization, automatic branch integration, automatic Mission completion, and persistent project intelligence are not shipped. The working implementation uses native stable prompts, deterministic Context GC, and availability-aware context telemetry; #41 Linux CLI TUI stability remains a release blocker. Harness-owned verification commands run with host permissions and environment. Git worktrees and process groups are not OS sandboxes. An Operation completing does not complete the Mission.
 
 ## Development and testing
 

@@ -53,6 +53,15 @@ test("Commander-facing Operation tools cannot accept TaskResults or expose TaskR
   assert.ok(entries.some((entry) => entry.customType === OPERATION_ENTRY));
 });
 
+test("Commander creates a task-less planning Operation", async () => {
+  const entries = [], pi = makePi(entries);
+  const created = await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-plan", objective: "Implement safely.", allowed_policy_ids: ["worker-write"] });
+  assert.equal(created.planning, true);
+  const snapshot = entries.filter((entry) => entry.customType === TASK_GRAPH_ENTRY).at(-1).data;
+  assert.equal(Object.hasOwn(snapshot.operations["O-plan"], "required_task_ids"), false);
+  assert.deepEqual(snapshot.task_graphs["O-plan"].nodes, {});
+});
+
 test("legacy direct dispatch is disabled and cannot promote a TaskResult to the Commander", async () => {
   const pi = makePi([]);
   await assert.rejects(() => pi.tools.get("pi_harness_coordinate").execute("test", {

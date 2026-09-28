@@ -1,0 +1,55 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { createOperation, materializeOperation } from "../lib/operation.mjs";
+import { createTaskGraph, dispatchableTaskIds } from "../lib/task-graph.mjs";
+import { parseCoordinatorDecision, runOperation } from "../lib/operation-runner.mjs";
+
+const proposal = {
+  local_ref: "implement",
+  role: "worker",
+  scope: "Implement the requested change and preserve the Harness boundaries.",
+  dependencies: [],
+  acceptance_criteria: ["The requested change is implemented."],
+  execution_policy_id: "worker-write",
+};
+const decision = (action, fields = {}) => JSON.stringify({ version: 1, operation_id: "O-plan", action, reason: "Use the bounded plan.", ...fields });
+
+test("planning Operation has no Commander Task identities and has no dispatchable TaskOrder", () => {
+  const operation = createOperation({ operation_id: "O-plan", objective: "Implement safely.", planning: true, allowed_policy_ids: ["worker-write"] });
+  assert.equal(Object.hasOwn(operation, "required_task_ids"), false);
+  assert.deepEqual(createTaskGraph(operation).nodes, {});
+  assert.deepEqual(dispatchableTaskIds(createTaskGraph(operation), operation, 2), []);
+  assert.throws(() => createOperation({ operation_id: "O-bad", objective: "Implement safely.", planning: true, allowed_policy_ids: ["worker-write"], required_task_ids: ["Commander-task"] }), /cannot contain Commander Task identities/);
+});
+
+test("Harness materializes only bounded semantic proposals with trusted policy authority", () => {
+  const operation = createOperation({ operation_id: "O-plan", objective: "Implement safely.", planning: true, allowed_policy_ids: ["worker-write"] });
+  const materialized = materializeOperation(operation, [proposal]);
+  assert.deepEqual(materialized.operation.required_task_ids, ["T-O-plan-01"]);
+  assert.equal(materialized.operation.task_specs["T-O-plan-01"].permission, "write");
+  assert.equal(materialized.operation.task_specs["T-O-plan-01"].verification, "git diff --check");
+  assert.deepEqual(dispatchableTaskIds(materialized.graph, materialized.operation, 2), ["T-O-plan-01"]);
+  assert.throws(() => materializeOperation(operation, [{ ...proposal, permission: "write" }]), /unauthorized Task fields/);
+  assert.throws(() => materializeOperation(operation, [{ ...proposal, execution_policy_id: "arbitrary-shell" }]), /unauthorized execution policy/);
+});
+
+test("Coordinator plan_tasks materializes before a managed TaskOrder dispatches", async () => {
+  const operation = createOperation({ operation_id: "O-plan", objective: "Implement safely.", planning: true, allowed_policy_ids: ["worker-write"] });
+  assert.equal(parseCoordinatorDecision(decision("plan_tasks", { tasks: [proposal] }), operation).action, "plan_tasks");
+  let step = 0, dispatched;
+  const report = await runOperation(operation, {
+    turn: async () => [
+      decision("plan_tasks", { tasks: [proposal] }),
+      decision("dispatch", { task_id: "T-O-plan-01" }),
+      decision("accept_task", { task_id: "T-O-plan-01" }),
+    ][step++],
+    dispatch: async (task) => {
+      dispatched = task;
+      return { version: 1, operation_id: "O-plan", task_id: task.task_id, execution_status: "execution_complete", verification_status: "verified", evidence_refs: [] };
+    },
+  });
+  assert.equal(dispatched.task_id, "T-O-plan-01");
+  assert.equal(dispatched.verification, "git diff --check");
+  assert.equal(report.status, "complete");
+  assert.deepEqual(report.accepted_task_ids, ["T-O-plan-01"]);
+});

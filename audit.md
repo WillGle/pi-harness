@@ -6,6 +6,18 @@ The source findings below were reported against `main` at `2042b1a`. This sessio
 
 Linux verification ran in the local NixOS environment with Node.js `v22.22.2` and Pi `0.87.1`. The active Pi runtime is the project-patched Nix build. Ubuntu 24.04 GitHub Actions passed on commit `8196c5b96cc2c639d7b1c04624ab8dd82ec978cb` (run [#36453820891](https://github.com/WillGle/pi-harness/actions/runs/36453820891)). A separate Ubuntu 24.04 Docker run with Node.js `v22.19.0` and npm-installed stock Pi `0.87.1` passed the workflow-equivalent steps on the NixOS host kernel.
 
+## #19 — Coordinator-owned decomposition
+
+**Status: IMPLEMENTED; live managed coding proof remains unverified.**
+
+The public `pi_harness_operation` API now creates a task-less planning Operation. It accepts only the Operation objective, Constraints, Operation Acceptance Criteria, and an allowlist of Harness execution-policy IDs. It does not expose `required_task_ids`, `task_intents`, `task_specs`, Dependencies, permissions, or verification commands.
+
+The call path is `pi_harness_operation` → planning Operation → `pi_harness_run_operation` → Coordinator `plan_tasks` → `materializeOperation` → `createTaskGraph` → ID-only dispatch → managed Worker/Verifier → Coordinator acceptance → bounded OperationReport. Harness validates all semantic proposals, resolves policy authority locally, assigns deterministic TaskOrder IDs, validates the full Dependency graph, and persists the materialized Operation and TaskGraph before dispatch.
+
+The `worker-write` policy owns `permission: "write"` and the `git diff --check` gate. The Coordinator cannot replace a policy permission or command. Persisted legacy static Operations remain restorable for compatibility. The public API cannot create new static Operations.
+
+`npm run build`, `npm test` (177 tests), `npm run test:integration` (43 tests), and `npm run verify:skills` passed on this working tree. The added planning tests verify task-less creation, no pre-materialization dispatch, rejection of injected execution fields and unauthorized policies, atomic materialization, and managed ID-only dispatch. `scripts/managed-coding-proof.mjs` now drives the public planning API, but this session did not run a live provider-backed proof. Do not treat the unit and integration tests as that live proof.
+
 ## #40 — Linux CLI Platform Boundary
 
 **Status: PARTIAL — fail-closed enforcement is implemented; Ubuntu 24.04 GitHub Actions passed; a generic Linux host remains unverified.**

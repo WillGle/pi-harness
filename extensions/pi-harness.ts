@@ -372,29 +372,37 @@ export default function harness(pi: Pi): void {
   pi.registerTool?.({
     name: "pi_harness_operation", label: "Pi Harness Operation handoff",
     description: "Create an Operation or read a bounded Commander-safe status summary. Only the Harness Coordinator may dispatch TaskOrders, accept or reject TaskResults, or accept Operation Acceptance Criteria. Operation completion never completes the Mission.",
-    parameters: Type.Object({ action: Type.Union([Type.Literal("create"), Type.Literal("status")]), operation_id: Type.String(), objective: Type.Optional(Type.String()), required_task_ids: Type.Optional(Type.Array(Type.String())), acceptance_criteria: Type.Optional(Type.Array(Type.String())), dependencies: Type.Optional(Type.Record(Type.String(), Type.Array(Type.String()))), constraints: Type.Optional(Type.Array(Type.String())), task_intents: Type.Optional(Type.Record(Type.String(), Type.String())), task_specs: Type.Optional(Type.Record(Type.String(), Type.Object({ owner: Type.Union([Type.Literal("scout"), Type.Literal("research"), Type.Literal("worker")]), permission: Type.Union([Type.Literal("read"), Type.Literal("write")]), verification: Type.String(), acceptance_criteria: Type.Optional(Type.Array(Type.String())), review_evidence: Type.Optional(Type.Record(Type.String(), Type.Union([Type.Literal("diff"), Type.Literal("gate"), Type.Literal("execution"), Type.Literal("report")]))), review_profile: Type.Optional(Type.Record(Type.String(), Type.Union([Type.Literal("default"), Type.Literal("security")]))) }))), heads: Type.Optional(Type.Array(Type.Object({ head_id: Type.String(), domain: Type.String(), task_ids: Type.Array(Type.String()) }))) }),
-    execute: async (_id: string, input: { action: "create" | "status"; operation_id: string; objective?: string; required_task_ids?: string[]; acceptance_criteria?: string[]; dependencies?: Record<string, string[]>; constraints?: string[]; task_intents?: Record<string, string>; task_specs?: Record<string, { owner: string; permission: string; verification: string; acceptance_criteria?: string[]; review_evidence?: Record<string, string>; review_profile?: Record<string, string> }>; heads?: { head_id: string; domain: string; task_ids: string[] }[] }) => {
+    parameters: Type.Object({ action: Type.Union([Type.Literal("create"), Type.Literal("status")]), operation_id: Type.String(), objective: Type.Optional(Type.String()), acceptance_criteria: Type.Optional(Type.Array(Type.String())), allowed_policy_ids: Type.Optional(Type.Array(Type.String())), constraints: Type.Optional(Type.Array(Type.String())) }),
+    execute: async (_id: string, input: { action: "create" | "status"; operation_id: string; objective?: string; acceptance_criteria?: string[]; allowed_policy_ids?: string[]; constraints?: string[] }) => {
       const id = input.operation_id;
       const action = input.action as string;
       if (action !== "create" && action !== "status") throw new Error("Only the Harness Coordinator may accept or reject a TaskResult or Operation Acceptance Criterion");
       if (activeOperationRuns.has(id)) throw new Error("The Operation is running. The Commander must wait for the bounded OperationReport.");
       if (action === "create") {
         if (Object.hasOwn(operations, id)) throw new Error("Operation ID already exists");
-        const operation = createOperation({ operation_id: id, objective: input.objective, required_task_ids: input.required_task_ids, acceptance_criteria: input.acceptance_criteria, dependencies: input.dependencies, constraints: input.constraints, task_intents: input.task_intents, task_specs: input.task_specs });
-        if (operation.required_task_ids.some((taskId: string) => Object.values(operations).some((entry) => entry.required_task_ids.includes(taskId)))) throw new Error("A TaskOrder ID already belongs to another Operation");
+        // Persisted and direct-program legacy callers can still restore a static Operation.
+        // The public schema does not expose this compatibility path.
+        const legacy = input as any;
+        const operation = legacy.required_task_ids !== undefined
+          ? createOperation({ operation_id: id, objective: input.objective, required_task_ids: legacy.required_task_ids, acceptance_criteria: input.acceptance_criteria, dependencies: legacy.dependencies, constraints: input.constraints, task_intents: legacy.task_intents, task_specs: legacy.task_specs })
+          : createOperation({ operation_id: id, objective: input.objective, acceptance_criteria: input.acceptance_criteria, allowed_policy_ids: input.allowed_policy_ids ?? ["research-read", "scout-read", "worker-write"], constraints: input.constraints, planning: true });
+        if (!operation.planning && operation.required_task_ids.some((taskId: string) => Object.values(operations).some((entry: any) => entry.required_task_ids?.includes(taskId)))) throw new Error("A TaskOrder ID already belongs to another Operation");
         const graph = createTaskGraph(operation);
-        const registry = createHeadRegistry(operation, input.heads ?? []);
+        const registry = createHeadRegistry(operation, legacy.required_task_ids !== undefined ? (legacy.heads ?? []) : []);
         headRegistries = { ...headRegistries, [id]: registry };
         pi.appendEntry?.(HEAD_REGISTRY_ENTRY, headRegistries);
         operations = { ...operations, [id]: operation };
         taskGraphs = { ...taskGraphs, [id]: graph };
         pi.appendEntry?.(OPERATION_ENTRY, operations);
         persistScheduler();
-        return { content: [{ type: "text", text: JSON.stringify({ version: 1, operation_id: id, status: "open", summary: "The Commander registered the Operation. The Commander must start the Harness Coordinator." }) }] };
+        return { content: [{ type: "text", text: JSON.stringify(operation.planning
+          ? { version: 1, operation_id: id, status: "open", planning: true, summary: "The Commander registered a planning Operation. The Coordinator must materialize its TaskGraph before dispatch." }
+          : { version: 1, operation_id: id, status: "open", summary: "The Commander registered the legacy Operation. The Commander must start the Harness Coordinator." }) }] };
       }
       const operation = Object.hasOwn(operations, id) ? operations[id] : undefined;
       if (!operation) throw new Error("Unknown Operation");
       validateTaskGraph(taskGraphs[id], operation);
+      if (operation.planning) return { content: [{ type: "text", text: JSON.stringify({ version: 1, operation_id: id, status: "open", planning: true, summary: "The Operation awaits Coordinator plan_tasks materialization. No TaskOrder is available." }) }] };
       const blocked_task_ids = operation.required_task_ids.filter((taskId: string) => taskGraphs[id].nodes[taskId].scheduler_status === "blocked");
       const blockers = blocked_task_ids.map((taskId: string) => {
         const { blocked_action, required_condition } = taskGraphs[id].nodes[taskId].blocker;
