@@ -1,4 +1,6 @@
 import { contextTelemetry, deterministicContextEdits, installStablePrompt, stablePromptSections } from "../lib/context-economics.mjs";
+import { MISSION_ENTRY, attachOperation, createMission, legacyMissionId, missionIsClosable, missionSituationBoard, validateMissionOwnership } from "../lib/mission.mjs";
+import { reconcileAttemptLedger } from "../lib/attempt-ledger.mjs";
 import { assertSupportedPlatform } from "../lib/platform.mjs";
 import process from "node:process";
 import { randomUUID } from "node:crypto";
@@ -18,12 +20,12 @@ import { HEAD_REGISTRY_ENTRY, HEAD_STATE_ENTRY, createHeadRegistry, validateHead
 import { COORDINATOR_ENTRY, coordinatorState, parallelTaskLimit, runOperation } from "../lib/operation-runner.mjs";
 import { promoteTaskResult } from "../lib/communication.mjs";
 import { OPERATION_ENTRY, createOperation } from "../lib/operation.mjs";
-import { TASK_GRAPH_ENTRY, createTaskGraph, migrateTaskGraph, reconcileTaskGraph, validateTaskGraph } from "../lib/task-graph.mjs";
+import { TASK_GRAPH_ENTRY, createTaskGraph, migrateTaskGraph, reconcileTaskGraph, supersedeGraphTask, validateTaskGraph, waiveGraphTask } from "../lib/task-graph.mjs";
 import { findReferences, findSymbol } from "../lib/code-intel.mjs";
 import { readHashlines, replaceHashlines } from "../lib/precise-edit.mjs";
 import { Type } from "typebox";
 
-type Context = { cwd?: string; ui?: { notify?: (message: string, level: "info" | "warning" | "error") => void }; abort?: () => void };
+type Context = { cwd?: string; ui?: { notify?: (message: string, level: "info" | "warning" | "error") => void }; abort?: () => void; isIdle?: () => boolean };
 type Pi = Record<string, any>;
 
 const HARNESS_TOOLS = new Set(["pi_harness_goal", "pi_harness_coordinate", "pi_harness_operation", "pi_harness_run_operation", "pi_harness_cancel_operation", "pi_harness_patch"]);
@@ -39,6 +41,8 @@ export default function harness(pi: Pi): void {
   let plan = planState();
   let goal: ReturnType<typeof goalState> | undefined;
   let operations: Record<string, ReturnType<typeof createOperation>> = {};
+  let missions: Record<string, any> = {};
+  let attemptLedger: Record<string, any> = {};
   let coordinatorStates: Record<string, ReturnType<typeof coordinatorState>> = {};
   let taskGraphs: Record<string, ReturnType<typeof createTaskGraph>> = {};
   let headRegistries: Record<string, ReturnType<typeof createHeadRegistry>> = {};
@@ -59,6 +63,7 @@ export default function harness(pi: Pi): void {
   let continuationQueued = false;
   let continuationCount = 0;
   let invalidTerminalAttempts = 0;
+  let latestContextTelemetry: ReturnType<typeof contextTelemetry> | undefined;
   let goalGroupId: string | undefined;
 
   const say = (ctx: Context, message: string, level: "info" | "warning" | "error" = "info") => ctx.ui?.notify?.(message, level);
@@ -67,7 +72,16 @@ export default function harness(pi: Pi): void {
     if (goal) pi.appendEntry?.(GOAL_ENTRY, goal);
   };
   // One canonical session entry commits Operation and TaskGraph together.
-  const persistScheduler = () => pi.appendEntry?.(TASK_GRAPH_ENTRY, { version: 1, operations, task_graphs: taskGraphs });
+  const persistScheduler = () => {
+    attemptLedger = reconcileAttemptLedger(attemptLedger, operations, taskGraphs);
+    validateMissionOwnership(missions, operations, taskGraphs);
+    pi.appendEntry?.(TASK_GRAPH_ENTRY, { version: 2, missions, operations, task_graphs: taskGraphs, attempt_ledger: attemptLedger });
+    latestContextTelemetry = undefined;
+    maintenancePending = true;
+  };
+  const persistMission = () => pi.appendEntry?.(MISSION_ENTRY, missions);
+  const missionBoard = () => missionSituationBoard(missions, operations, taskGraphs);
+  const collectContextTelemetry = (entries: any[], usage: any) => contextTelemetry(entries, usage, { missions, operations, taskGraphs, attemptLedger });
   const saveCompactState = (event: Record<string, unknown> = {}) => pi.appendEntry?.(COMPACT_ENTRY, controlStateSummary({
     goal, plan, decisions: Array.isArray(event.decisions) ? event.decisions : [],
     changedFiles: Array.isArray(event.changedFiles) ? event.changedFiles : [],
@@ -88,7 +102,13 @@ export default function harness(pi: Pi): void {
   const cancelGoal = (ctx: Context) => {
     const groupId = goal?.status === "active" ? goalGroupId : undefined;
     for (const run of activeOperationRuns.values()) if (run.goalGroup && run.goalGroup === groupId) run.controller.abort();
-    if (goal?.status === "active") goal = transitionGoal(goal, "cancelled");
+    if (goal?.status === "active") {
+      const activeMission = Object.values(missions).find((mission: any) => mission.status === "active" && mission.objective === goal?.objective) as any;
+      goal = transitionGoal(goal, "cancelled");
+      if (activeMission) missions = { ...missions, [activeMission.mission_id]: createMission({ ...activeMission, status: "cancelled" }) };
+      maintenancePending = true;
+      persistMission(); persistScheduler();
+    }
     goalGroupId = undefined;
     continuationQueued = false;
     continuationCount = 0;
@@ -116,7 +136,7 @@ export default function harness(pi: Pi): void {
     if (continuationCount >= MAX_AUTOMATIC_CONTINUATIONS) return stopUnboundedGoal();
     continuationCount += 1;
     continuationQueued = true;
-    pi.sendUserMessage?.(`[GOAL ACTIVE] ${goal.objective}\nContinue until you call pi_harness_goal with a terminal state and concrete evidence.`, { deliverAs: "followUp" });
+    pi.sendUserMessage?.(`[PI_HARNESS_MISSION_CONTINUE]\nMission: ${goal.objective}\nContinue until you call pi_harness_goal with a terminal state and concrete evidence.`, { deliverAs: "followUp" });
   };
 
   pi.on?.("session_start", (_event: any, ctx: any) => {
@@ -126,6 +146,7 @@ export default function harness(pi: Pi): void {
     sessionEpoch++;
     stablePromptFingerprint = undefined; nativeCompactionImminent = false; sessionEnding = false;
     maintenancePending = false;
+    latestContextTelemetry = undefined;
     maintenanceArmed = true;
     maintenanceEpoch = 0;
     lastMaintenanceEpoch = -1;
@@ -141,12 +162,21 @@ export default function harness(pi: Pi): void {
     operations = schedulerSnapshot ? schedulerSnapshot.operations : restore(entries, OPERATION_ENTRY) ?? {};
     const legacyCoordinator = restore(entries, COORDINATOR_ENTRY) ?? {};
     taskGraphs = schedulerSnapshot ? schedulerSnapshot.task_graphs : Object.fromEntries(Object.entries(operations).map(([id, operation]) => [id, migrateTaskGraph(operation, legacyCoordinator[id]?.dispatch_counts)]));
-    for (const [id, operation] of Object.entries(operations)) {
+    missions = schedulerSnapshot?.missions ?? restore(entries, MISSION_ENTRY) ?? {};
+    for (const [id, operation] of Object.entries(operations) as [string, any][]) {
+      if (!operation.mission_id) {
+        const mission_id = legacyMissionId(id);
+        operations[id] = { ...operation, mission_id };
+        missions[mission_id] ??= createMission({ mission_id, objective: goal?.objective ?? operation.objective, status: goal?.status ?? "active", operation_ids: [] });
+        if (!missions[mission_id].operation_ids.includes(id)) missions = attachOperation(missions, mission_id, id);
+      }
       if (!taskGraphs[id]) throw new Error("TaskGraph is missing for a restored Operation");
-      validateTaskGraph(taskGraphs[id], operation);
-      taskGraphs[id] = reconcileTaskGraph(taskGraphs[id], operation);
+      validateTaskGraph(taskGraphs[id], operations[id]);
+      taskGraphs[id] = reconcileTaskGraph(taskGraphs[id], operations[id]);
     }
     if (Object.keys(taskGraphs).some((id) => !Object.hasOwn(operations, id))) throw new Error("TaskGraph has no owning Operation");
+    validateMissionOwnership(missions, operations, taskGraphs);
+    attemptLedger = reconcileAttemptLedger(schedulerSnapshot?.attempt_ledger ?? {}, operations, taskGraphs);
     coordinatorStates = Object.fromEntries(Object.entries(legacyCoordinator).map(([id, state]: [string, any]) => [id, {
       version: 1, operation_id: id, turns: state.turns ?? 0, decisions: (state.decisions ?? []).slice(-7), blocker: state.blocker ?? null,
       ...(state.consultations_since_progress !== undefined ? { consultations_since_progress: state.consultations_since_progress } : {}),
@@ -160,6 +190,7 @@ export default function harness(pi: Pi): void {
     }
     if (Object.keys(headStates).some((id) => !headRegistries[id] || Object.keys(headStates[id]).some((headId) => headId !== headStates[id][headId]?.head_id))) throw new Error("HeadState has no registered Head");
     if (Object.keys(coordinatorStates).length) pi.appendEntry?.(COORDINATOR_ENTRY, coordinatorStates);
+    if (Object.keys(missions).length) persistMission();
     if (Object.keys(operations).length) persistScheduler();
     proactivePolicy = restoreProactivePolicy(restore(entries, PROACTIVE_COMPACT_ENTRY));
     continuationCount = 0;
@@ -185,7 +216,7 @@ export default function harness(pi: Pi): void {
         dispose: unsubscribe,
         invalidate() {},
         render(width: number): string[] {
-          const metrics = contextTelemetry(ctx.sessionManager.getEntries(), ctx.getContextUsage?.());
+          const metrics = latestContextTelemetry ?? (latestContextTelemetry = collectContextTelemetry(ctx.sessionManager.getEntries(), ctx.getContextUsage?.()));
           const branch = footerData.getGitBranch();
           const left = theme.fg("dim", `${basename(ctx.cwd)}${branch ? ` / ${branch}` : ""}`);
           const model = `${ctx.model?.id ?? "no-model"} · ${ctx.thinkingLevel ?? "off"}`;
@@ -230,6 +261,7 @@ export default function harness(pi: Pi): void {
     persist();
     pi.appendEntry?.(PROACTIVE_COMPACT_ENTRY, proactivePolicy);
     pi.appendEntry?.(OPERATION_ENTRY, operations);
+    persistMission();
     pi.appendEntry?.(COORDINATOR_ENTRY, coordinatorStates);
     pi.appendEntry?.(HEAD_REGISTRY_ENTRY, headRegistries);
     pi.appendEntry?.(HEAD_STATE_ENTRY, headStates);
@@ -257,14 +289,26 @@ export default function harness(pi: Pi): void {
   });
   const maintainContext = (event: any, ctx: any) => {
     if (!maintenancePending || activeToolCalls.size || activeOperationRuns.size || hasActiveCoordinateTasks() || event.context?.pendingMessages?.length) return;
-    const collected = deterministicContextEdits(event.context?.contextEntries ?? [], { operations, taskGraphs, memory: loadProjectMemory(ctx.cwd ?? process.cwd()), existingEdits: event.entries ?? [] });
+    const projected = event.context?.contextEntries ?? [];
+    const collected = deterministicContextEdits(projected, { missions, operations, taskGraphs, memory: loadProjectMemory(ctx.cwd ?? process.cwd()), existingEdits: event.entries ?? [] });
+    const board = missionBoard();
+    const previousBoard = [...projected].reverse().find((entry: any) => entry.sourceEntry?.type === "custom_message" && entry.sourceEntry?.customType === "pi-harness-situation-board");
+    const previousContent = previousBoard?.messages?.[0]?.content;
+    const previousText = typeof previousContent === "string" ? previousContent : Array.isArray(previousContent) ? previousContent.filter((item: any) => item.type === "text").map((item: any) => item.text).join("") : undefined;
+    const boardEntries = !board
+      ? previousBoard?.sourceEntry?.id && !previousText?.startsWith("[Superseded Mission Situation Board")
+        ? [{ type: "context_edit", targetId: previousBoard.sourceEntry.id, replacement: { content: "[Superseded Mission Situation Board; terminal Mission state is durable.]" } }]
+        : []
+      : previousBoard?.sourceEntry?.id && previousText !== board
+        ? [{ type: "context_edit", targetId: previousBoard.sourceEntry.id, replacement: { content: board } }]
+        : previousBoard ? [] : [{ type: "custom_message", customType: "pi-harness-situation-board", content: board, display: false }];
     checkpoint();
     maintenancePending = false; maintenanceArmed = false; lastMaintenanceEpoch = maintenanceEpoch;
-    return { entries: [...event.entries, ...collected.edits, { type: "custom", customType: "pi-harness-context-maintenance", data: { version: 1, context_edits: collected.edits.length, gc_bytes_removed: collected.bytesRemoved } }] };
+    return { entries: [...event.entries, ...collected.edits, ...boardEntries, { type: "custom", customType: "pi-harness-context-maintenance", data: { version: 1, context_edits: collected.edits.length, situation_board_edits: boardEntries.length, gc_bytes_removed: collected.bytesRemoved, gc_entries_superseded_by_task: collected.gcEntries.task, gc_entries_superseded_by_operation: collected.gcEntries.operation, gc_entries_superseded_by_mission: collected.gcEntries.mission } }] };
   };
   pi.on?.("turn_end", maintainContext);
   pi.on?.("agent_before_settle", maintainContext);
-  pi.on?.("agent_settled", (_event: any, ctx: any) => { continuationQueued = false; pi.appendEntry?.("pi-harness-context-telemetry", contextTelemetry(ctx.sessionManager?.getEntries?.() ?? [], ctx.getContextUsage?.())); continueGoal(); });
+  pi.on?.("agent_settled", (_event: any, ctx: any) => { continuationQueued = false; latestContextTelemetry = collectContextTelemetry(ctx.sessionManager?.getEntries?.() ?? [], ctx.getContextUsage?.()); pi.appendEntry?.("pi-harness-context-telemetry", latestContextTelemetry); continueGoal(); });
   pi.on?.("tool_execution_start", (event: any) => { activeToolCalls.add(event.toolCallId); });
   pi.on?.("tool_execution_end", (event: any, ctx: any) => { activeToolCalls.delete(event.toolCallId); });
   pi.on?.("before_agent_start", (event: any, ctx: any) => {
@@ -282,7 +326,8 @@ export default function harness(pi: Pi): void {
   pi.on?.("session_shutdown", () => { sessionEnding = true; });
 
   pi.registerCommand?.("harness-context", { description: "Show context/cache/GC usage; missing provider metrics stay unknown", handler: async (_args: string, ctx: any) => {
-    say(ctx, JSON.stringify(contextTelemetry(ctx.sessionManager?.getEntries?.() ?? [], ctx.getContextUsage?.())));
+    latestContextTelemetry = collectContextTelemetry(ctx.sessionManager?.getEntries?.() ?? [], ctx.getContextUsage?.());
+    say(ctx, JSON.stringify(latestContextTelemetry));
   }});
 
   pi.registerCommand?.("harness-compact", { description: "Harness context maintenance: /harness-compact set <50-90>|status|disable (independent of /autocompact)", handler: async (args: string, ctx: Context) => {
@@ -305,7 +350,13 @@ export default function harness(pi: Pi): void {
     if (input === "cancel") return cancelGoal(ctx);
     if (plan.enabled) return say(ctx, "Disable plan mode before starting a goal.", "warning");
     if (goal?.status === "active") return say(ctx, "An active goal already exists; use /goal status or /goal cancel.", "warning");
-    try { goal = goalState(input); goalGroupId = randomUUID(); continuationCount = 0; invalidTerminalAttempts = 0; persist(); say(ctx, `Goal active: ${goal.objective}`); continueGoal(); } catch (error) { say(ctx, (error as Error).message, "error"); }
+    try {
+      goal = goalState(input); goalGroupId = randomUUID(); continuationCount = 0; invalidTerminalAttempts = 0;
+      const mission_id = `M-${randomUUID()}`;
+      missions = { ...missions, [mission_id]: createMission({ mission_id, objective: goal.objective }) };
+      maintenancePending = true;
+      persistMission(); persistScheduler(); persist(); if (ctx.isIdle?.() !== false) maintenancePending = false; say(ctx, `Goal active: ${goal.objective}`); continueGoal();
+    } catch (error) { say(ctx, (error as Error).message, "error"); }
   }});
   pi.registerCommand?.("skill-hub", { description: "Show the pinned curated-skill boundary", handler: async (_args: string, ctx: Context) => {
     say(ctx, "Curated skills are checksum-pinned. Do not install an additional skill without an explicit user request.");
@@ -333,8 +384,13 @@ export default function harness(pi: Pi): void {
     description: "Record the terminal state of the active goal. Evidence is mandatory; blocked and error also require a blocker.",
     parameters: Type.Object({ status: Type.Union([Type.Literal("complete"), Type.Literal("blocked"), Type.Literal("error")]), evidence: Type.String(), blocker: Type.Optional(Type.String()) }),
     execute: async (_id: string, input: { status: "complete" | "blocked" | "error"; evidence: string; blocker?: string }) => {
-      goal = transitionGoal(goal, input.status, input.evidence, input.blocker); continuationQueued = false; if (goal.status !== "active") goalGroupId = undefined; persist();
-      return { content: [{ type: "text", text: JSON.stringify({ status: goal.status, evidence: goal.evidence, blocker: goal.blocker }) }] };
+      const activeMission = Object.values(missions).find((mission: any) => mission.status === "active" && mission.objective === goal?.objective) as any;
+      if (input.status === "complete" && activeMission && !missionIsClosable(activeMission, operations, taskGraphs)) throw new Error("The Mission has unresolved obligations");
+      goal = transitionGoal(goal, input.status, input.evidence, input.blocker);
+      if (activeMission) missions = { ...missions, [activeMission.mission_id]: createMission({ ...activeMission, status: goal.status }) };
+      maintenancePending = true;
+      continuationQueued = false; if (goal.status !== "active") goalGroupId = undefined; persistMission(); persistScheduler(); persist();
+      return { content: [{ type: "text", text: JSON.stringify({ mission_id: activeMission?.mission_id, status: goal.status, evidence: goal.evidence, blocker: goal.blocker }) }] };
     },
   });
   pi.registerTool?.({
@@ -372,20 +428,26 @@ export default function harness(pi: Pi): void {
   pi.registerTool?.({
     name: "pi_harness_operation", label: "Pi Harness Operation handoff",
     description: "Create an Operation or read a bounded Commander-safe status summary. Only the Harness Coordinator may dispatch TaskOrders, accept or reject TaskResults, or accept Operation Acceptance Criteria. Operation completion never completes the Mission.",
-    parameters: Type.Object({ action: Type.Union([Type.Literal("create"), Type.Literal("status")]), operation_id: Type.String(), objective: Type.Optional(Type.String()), acceptance_criteria: Type.Optional(Type.Array(Type.String())), allowed_policy_ids: Type.Optional(Type.Array(Type.String())), constraints: Type.Optional(Type.Array(Type.String())) }),
-    execute: async (_id: string, input: { action: "create" | "status"; operation_id: string; objective?: string; acceptance_criteria?: string[]; allowed_policy_ids?: string[]; constraints?: string[] }) => {
+    parameters: Type.Object({ action: Type.Union([Type.Literal("create"), Type.Literal("status"), Type.Literal("supersede"), Type.Literal("waive")]), operation_id: Type.String(), objective: Type.Optional(Type.String()), acceptance_criteria: Type.Optional(Type.Array(Type.String())), allowed_policy_ids: Type.Optional(Type.Array(Type.String())), constraints: Type.Optional(Type.Array(Type.String())), task_id: Type.Optional(Type.String()), replacement_operation_id: Type.Optional(Type.String()), replacement_task_id: Type.Optional(Type.String()), authority: Type.Optional(Type.String()), reason: Type.Optional(Type.String()) }),
+    execute: async (_id: string, input: { action: "create" | "status" | "supersede" | "waive"; operation_id: string; objective?: string; acceptance_criteria?: string[]; allowed_policy_ids?: string[]; constraints?: string[]; task_id?: string; replacement_operation_id?: string; replacement_task_id?: string; authority?: string; reason?: string }) => {
       const id = input.operation_id;
       const action = input.action as string;
-      if (action !== "create" && action !== "status") throw new Error("Only the Harness Coordinator may accept or reject a TaskResult or Operation Acceptance Criterion");
+      if (!["create", "status", "supersede", "waive"].includes(action)) throw new Error("Only the Harness Coordinator may accept or reject a TaskResult or Operation Acceptance Criterion");
       if (activeOperationRuns.has(id)) throw new Error("The Operation is running. The Commander must wait for the bounded OperationReport.");
       if (action === "create") {
         if (Object.hasOwn(operations, id)) throw new Error("Operation ID already exists");
         // Persisted and direct-program legacy callers can still restore a static Operation.
         // The public schema does not expose this compatibility path.
         const legacy = input as any;
+        let mission = Object.values(missions).find((entry: any) => entry.status === "active" && entry.objective === goal?.objective) as any;
+        if (!mission) {
+          const mission_id = legacyMissionId(id);
+          mission = createMission({ mission_id, objective: goal?.objective ?? input.objective });
+          missions = { ...missions, [mission_id]: mission };
+        }
         const operation = legacy.required_task_ids !== undefined
-          ? createOperation({ operation_id: id, objective: input.objective, required_task_ids: legacy.required_task_ids, acceptance_criteria: input.acceptance_criteria, dependencies: legacy.dependencies, constraints: input.constraints, task_intents: legacy.task_intents, task_specs: legacy.task_specs })
-          : createOperation({ operation_id: id, objective: input.objective, acceptance_criteria: input.acceptance_criteria, allowed_policy_ids: input.allowed_policy_ids ?? ["research-read", "scout-read", "worker-write"], constraints: input.constraints, planning: true });
+          ? createOperation({ operation_id: id, mission_id: mission.mission_id, objective: input.objective, required_task_ids: legacy.required_task_ids, acceptance_criteria: input.acceptance_criteria, dependencies: legacy.dependencies, constraints: input.constraints, task_intents: legacy.task_intents, task_specs: legacy.task_specs })
+          : createOperation({ operation_id: id, mission_id: mission.mission_id, objective: input.objective, acceptance_criteria: input.acceptance_criteria, allowed_policy_ids: input.allowed_policy_ids ?? ["research-read", "scout-read", "worker-write"], constraints: input.constraints, planning: true });
         if (!operation.planning && operation.required_task_ids.some((taskId: string) => Object.values(operations).some((entry: any) => entry.required_task_ids?.includes(taskId)))) throw new Error("A TaskOrder ID already belongs to another Operation");
         const graph = createTaskGraph(operation);
         const registry = createHeadRegistry(operation, legacy.required_task_ids !== undefined ? (legacy.heads ?? []) : []);
@@ -393,16 +455,30 @@ export default function harness(pi: Pi): void {
         pi.appendEntry?.(HEAD_REGISTRY_ENTRY, headRegistries);
         operations = { ...operations, [id]: operation };
         taskGraphs = { ...taskGraphs, [id]: graph };
+        missions = attachOperation(missions, mission.mission_id, id);
+        persistMission();
         pi.appendEntry?.(OPERATION_ENTRY, operations);
         persistScheduler();
         return { content: [{ type: "text", text: JSON.stringify(operation.planning
-          ? { version: 1, operation_id: id, status: "open", planning: true, summary: "The Commander registered a planning Operation. The Coordinator must materialize its TaskGraph before dispatch." }
-          : { version: 1, operation_id: id, status: "open", summary: "The Commander registered the legacy Operation. The Commander must start the Harness Coordinator." }) }] };
+          ? { version: 1, mission_id: mission.mission_id, operation_id: id, status: "open", planning: true, summary: "The Commander registered a planning Operation. The Coordinator must materialize its TaskGraph before dispatch." }
+          : { version: 1, mission_id: mission.mission_id, operation_id: id, status: "open", summary: "The Commander registered the legacy Operation. The Commander must start the Harness Coordinator." }) }] };
       }
       const operation = Object.hasOwn(operations, id) ? operations[id] : undefined;
       if (!operation) throw new Error("Unknown Operation");
       validateTaskGraph(taskGraphs[id], operation);
-      if (operation.planning) return { content: [{ type: "text", text: JSON.stringify({ version: 1, operation_id: id, status: "open", planning: true, summary: "The Operation awaits Coordinator plan_tasks materialization. No TaskOrder is available." }) }] };
+      if (["supersede", "waive"].includes(action)) {
+        if (operation.planning || !input.task_id || !input.authority?.trim() || !input.reason?.trim()) throw new Error("Task supersession or waiver requires a materialized TaskOrder, authority, and reason");
+        let nextGraph;
+        if (action === "supersede") {
+          const replacement = input.replacement_operation_id && operations[input.replacement_operation_id];
+          if (!replacement || !input.replacement_task_id || replacement.mission_id !== operation.mission_id || !replacement.required_task_ids?.includes(input.replacement_task_id)) throw new Error("Task supersession requires a persisted replacement TaskOrder in the same Mission");
+          nextGraph = supersedeGraphTask(taskGraphs[id], operation, input.task_id, { authority: input.authority, reason: input.reason, replacement_mission_id: operation.mission_id, replacement_operation_id: replacement.operation_id, replacement_task_id: input.replacement_task_id });
+        } else nextGraph = waiveGraphTask(taskGraphs[id], operation, input.task_id, { authority: input.authority, reason: input.reason });
+        taskGraphs = { ...taskGraphs, [id]: nextGraph };
+        persistScheduler();
+        return { content: [{ type: "text", text: JSON.stringify({ version: 1, mission_id: operation.mission_id, operation_id: id, task_id: input.task_id, disposition: action === "supersede" ? "superseded" : "waived", situation_board: missionBoard() }) }] };
+      }
+      if (operation.planning) return { content: [{ type: "text", text: JSON.stringify({ version: 1, mission_id: operation.mission_id, operation_id: id, status: "open", planning: true, summary: "The Operation awaits Coordinator plan_tasks materialization. No TaskOrder is available.", situation_board: missionBoard() }) }] };
       const blocked_task_ids = operation.required_task_ids.filter((taskId: string) => taskGraphs[id].nodes[taskId].scheduler_status === "blocked");
       const blockers = blocked_task_ids.map((taskId: string) => {
         const { blocked_action, required_condition } = taskGraphs[id].nodes[taskId].blocker;
@@ -411,7 +487,7 @@ export default function harness(pi: Pi): void {
       const summary = operation.status === "complete"
         ? "The Coordinator accepted the Operation. The Commander must evaluate the Mission Definition of Done."
         : "The Operation remains open. The Commander must start or resume the Harness Coordinator.";
-      return { content: [{ type: "text", text: JSON.stringify({ version: 1, operation_id: id, status: operation.status, summary, blocked_task_ids, blockers }) }] };
+      return { content: [{ type: "text", text: JSON.stringify({ version: 1, mission_id: operation.mission_id, operation_id: id, status: operation.status, summary, blocked_task_ids, blockers, situation_board: missionBoard() }) }] };
     },
   });
   pi.registerTool?.({
@@ -441,21 +517,23 @@ export default function harness(pi: Pi): void {
         pi.appendEntry?.(COORDINATOR_ENTRY, coordinatorStates);
         persistScheduler();
       };
-      const recordUsage = (usage: any) => {
+      const recordUsage = (usage: any, provenance: Record<string, any> = {}) => {
         if (runEpoch !== sessionEpoch) return;
         const safe: Record<string, any> = {};
         for (const key of ["input", "output", "cacheRead", "cacheWrite", "totalTokens"]) if (Number.isFinite(usage?.[key]) && usage[key] >= 0) safe[key] = usage[key];
         if (Number.isFinite(usage?.cost?.total) && usage.cost.total >= 0) safe.cost = { total: usage.cost.total };
-        if (Object.keys(safe).length) pi.appendEntry?.("pi-harness-child-usage", { version: 1, usage: safe });
+        const task_id = provenance.task_id;
+        const attempt_id = task_id ? Object.values(attemptLedger).find((attempt: any) => attempt.operation_id === id && attempt.task_id === task_id && attempt.ordinal === taskGraphs[id]?.nodes?.[task_id]?.attempts)?.attempt_id : undefined;
+        if (Object.keys(safe).length) pi.appendEntry?.("pi-harness-child-usage", { version: 1, mission_id: operation.mission_id, operation_id: id, ...(task_id ? { task_id } : {}), ...(attempt_id ? { attempt_id } : {}), role: provenance.role ?? "coordinator", usage: safe });
       };
       try {
         const report = await runOperation(operation, {
-          turn: (prompt: string) => executeCoordinatorTurn(pi, prompt, { cwd: runCwd, onUsage: recordUsage, model: input.model, groupId: runId, signal: controller.signal }),
-          headTurn: (prompt: string) => executeCoordinatorTurn(pi, prompt, { cwd: runCwd, onUsage: recordUsage, role: "head", groupId: runId, signal: controller.signal }),
-          dispatch: async (task: any, progress: any) => promoteTaskResult(await executeCoordinateTask(pi, validateTask(task), { cwd: runCwd, onUsage: recordUsage, groupId: runId, signal: controller.signal, modelRegistry: ctx?.modelRegistry,
-            onVerificationStart: progress.onVerificationStart, timeout: managedTaskTimeout(task.owner), reviewerTimeout: managedTaskTimeout("reviewer") })),
+          turn: (prompt: string) => executeCoordinatorTurn(pi, prompt, { cwd: runCwd, onUsage: (usage: any) => recordUsage(usage, { role: "coordinator" }), model: input.model, groupId: runId, signal: controller.signal }),
+          headTurn: (prompt: string) => executeCoordinatorTurn(pi, prompt, { cwd: runCwd, onUsage: (usage: any) => recordUsage(usage, { role: "head" }), role: "head", groupId: runId, signal: controller.signal }),
+          dispatch: async (task: any, progress: any) => promoteTaskResult(await executeCoordinateTask(pi, validateTask(task), { cwd: runCwd, groupId: runId, signal: controller.signal, modelRegistry: ctx?.modelRegistry,
+            onVerificationStart: progress.onVerificationStart, timeout: managedTaskTimeout(task.owner), reviewerTimeout: managedTaskTimeout("reviewer"), onUsage: (usage: any, provenance: Record<string, any>) => recordUsage(usage, { task_id: task.task_id, ...provenance }) })),
           save,
-        }, { state: coordinatorStates[id] ?? coordinatorState(operation), graph: taskGraphs[id], registry: headRegistries[id], headStates: headStates[id] ?? {}, mission: goal?.status === "active" ? goal.objective : undefined, cwd: runCwd, onUsage: recordUsage, signal: controller.signal, parallelLimit });
+        }, { state: coordinatorStates[id] ?? coordinatorState(operation), graph: taskGraphs[id], registry: headRegistries[id], headStates: headStates[id] ?? {}, mission: operations[id].mission_id ? { mission_id: operations[id].mission_id, objective: missions[operations[id].mission_id]?.objective } : goal?.status === "active" ? goal.objective : undefined, cwd: runCwd, onUsage: recordUsage, signal: controller.signal, parallelLimit });
         return { content: [{ type: "text", text: JSON.stringify(report) }] };
       } finally { signal?.removeEventListener("abort", abort); if (activeOperationRuns.get(id)?.controller === controller) activeOperationRuns.delete(id); }
     },

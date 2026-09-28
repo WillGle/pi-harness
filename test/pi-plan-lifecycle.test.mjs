@@ -96,7 +96,7 @@ class DisposableProvider {
     const body = JSON.parse(raw);
     const messages = body.messages ?? [];
     const markerIndex = messages.reduce((latest, message, index) => {
-      if (message.role === "user" && (messageText(message).includes("CALL_") || messageText(message).includes("[GOAL ACTIVE]"))) return index;
+      if (message.role === "user" && (messageText(message).includes("CALL_") || messageText(message).includes("[PI_HARNESS_MISSION_CONTINUE]"))) return index;
       return latest;
     }, -1);
     const marker = markerIndex >= 0 ? messageText(messages[markerIndex]) : undefined;
@@ -111,7 +111,7 @@ class DisposableProvider {
 
     let toolName;
     let argumentsForTool;
-    if (this.mode === "invalid-terminal" && marker?.includes("[GOAL ACTIVE]") && !hasToolResultAfterMarker) {
+    if (this.mode === "invalid-terminal" && marker?.includes("[PI_HARNESS_MISSION_CONTINUE]") && !hasToolResultAfterMarker) {
       toolName = "pi_harness_goal";
       argumentsForTool = { status: "complete", evidence: "" };
     }

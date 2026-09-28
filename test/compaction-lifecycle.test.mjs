@@ -32,6 +32,7 @@ function fixture(entries = []) {
     const result=handlers.get("agent_before_settle")?.({entries:[],context:{contextEntries:session.buildSessionProjection().entries,pendingMessages:[]}},ctx);
     for(const draft of result?.entries??[]) {
       if(draft.type === "context_edit")session.appendContextEdit(draft.targetId,draft.replacement);
+      else if(draft.type === "custom_message")session.appendCustomMessageEntry(draft.customType,draft.content,draft.display,draft.details);
       else if(draft.type === "custom")session.appendCustomEntry(draft.customType,draft.data);
     }
     return result;
@@ -153,6 +154,25 @@ test("context maintenance waits until both parallel Task pipelines settle", asyn
     if (before === undefined) delete process.env.PI_HARNESS_EVIDENCE_DIR; else process.env.PI_HARNESS_EVIDENCE_DIR = before;
     rmSync(cwd, { force: true, recursive: true });
   }
+});
+
+test("Mission cannot complete while it owns an unresolved TaskOrder", async () => {
+  const f = fixture();
+  await f.command("goal", "Complete only after accountable work.");
+  await f.pi.tools.get("pi_harness_operation").execute("id", { action: "create", operation_id: "O-open", objective: "Inspect the source.", required_task_ids: ["T-open"] });
+  await assert.rejects(() => f.pi.tools.get("pi_harness_goal").execute("id", { status: "complete", evidence: "The Commander evaluated the Mission." }), /unresolved obligations/);
+});
+
+test("Mission Situation Board is a replaceable bounded context projection", async () => {
+  const f = fixture();
+  f.session.appendMessage({ role: "user", content: "Track this Mission.", timestamp: 1 });
+  await f.pi.tools.get("pi_harness_operation").execute("id", { action: "create", operation_id: "O-board", objective: "Inspect the source.", required_task_ids: ["T-board"] });
+  f.boundary();
+  const board = f.session.getEntries().find((entry) => entry.type === "custom_message" && entry.customType === "pi-harness-situation-board");
+  assert.ok(board);
+  assert.match(board.content, /Mission M-legacy-/);
+  assert.match(board.content, /TaskOrder T-board: ready/);
+  assert.equal(board.display, false);
 });
 
 test("native compaction satisfies pending request without a second Harness compaction", async () => {

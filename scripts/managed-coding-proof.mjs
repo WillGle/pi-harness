@@ -6,7 +6,7 @@ import {spawnSync} from 'node:child_process';
 import {createAgentSession,DefaultResourceLoader,SessionManager,SettingsManager,ModelRuntime} from '@earendil-works/pi-coding-agent';
 import harness from '../extensions/pi-harness.ts';
 import subagents from '../node_modules/@tintinweb/pi-subagents/dist/index.js';
-import {contextTelemetry,deterministicContextEdits,stablePromptSections} from '../lib/context-economics.mjs';
+import {contextTelemetry,deterministicContextEdits} from '../lib/context-economics.mjs';
 import {assertSupportedPlatform} from '../lib/platform.mjs';
 assertSupportedPlatform();
 const root=dirname(dirname(fileURLToPath(import.meta.url)));
@@ -122,11 +122,10 @@ try {
  writeFileSync(join(sandbox,'proof.json'),JSON.stringify(proof,null,2)+'\n');
  process.stdout.write(JSON.stringify({event:'proof_report',sandbox,operation_status:report.status,mission_status:mission.status,accepted_status:accepted.verification_status,semantic_review_status:accepted.semantic_verification?.status??'not_requested',evidence_count:accepted.evidence_refs.length,artifact_branch:branch,calls,aggregate_budget:ledger,usage:usages,provider_reported_cost:null})+'\n');
  if(process.argv.includes('--benchmark')) {
-   for(let i=0;i<12;i++) {
-     session.sessionManager.appendMessage({role:'user',content:'Historical bounded request '+i,timestamp:Date.now()});
-     session.sessionManager.appendCustomMessageEntry('pi-harness-context',stablePromptSections().pi_harness_contract,false);
-   }
-   const base=session.sessionManager.getEntries();
+   // The workload uses current managed Operation representations. Each blocked
+   // report becomes eligible only when the later complete OperationReport exists.
+   for(let i=0;i<12;i++)session.sessionManager.appendMessage({role:'toolResult',toolCallId:`benchmark-blocked-${i}`,toolName:'pi_harness_run_operation',content:[{type:'text',text:JSON.stringify({version:1,mission_id:state.operations[operationId].mission_id,operation_id:operationId,status:'blocked',summary:'Obsolete blocked OperationReport. '.repeat(400),blocker:'The historical TaskOrder was blocked.'})}],isError:false,timestamp:Date.now()+i});
+   session.sessionManager.appendMessage({role:'toolResult',toolCallId:'benchmark-complete',toolName:'pi_harness_run_operation',content:[{type:'text',text:JSON.stringify({version:1,mission_id:state.operations[operationId].mission_id,operation_id:operationId,status:'complete',accepted_task_ids:[taskId]})}],isError:false,timestamp:Date.now()+12});
    const beforeIndex=usages.length;
    await session.prompt('Benchmark: reply with exactly OK, no tools.');
    assert.equal(usages.length,beforeIndex+1);
@@ -143,7 +142,7 @@ try {
    assert.ok(afterUsage.input+afterUsage.cacheRead+afterUsage.cacheWrite<beforeUsage.input+beforeUsage.cacheRead+beforeUsage.cacheWrite);
    assert.ok(afterBytes<beforeBytes);assert.equal(collected.edits.length,12);
    assert.equal(JSON.stringify(state.operations),JSON.stringify(session.sessionManager.getEntries().filter(e=>e.customType==='pi-harness-task-graph-state').at(-1).data.operations));
-   const benchmark={workload:'12 historical exact Harness contracts, same OK request before/after deterministic GC',before_usage:beforeUsage,after_usage:afterUsage,before_context_bytes:beforeBytes,after_context_bytes:afterBytes,gc_bytes_removed:collected.bytesRemoved,context_edits:collected.edits.length,compaction_count:contextTelemetry(session.sessionManager.getEntries()).compaction_count,provider_reported_cost:null,aggregate_budget:ledger};
+   const benchmark={workload:'12 blocked managed OperationReports plus one later complete OperationReport, same OK request before/after deterministic promotion GC',before_usage:beforeUsage,after_usage:afterUsage,before_context_bytes:beforeBytes,after_context_bytes:afterBytes,gc_bytes_removed:collected.bytesRemoved,context_edits:collected.edits.length,compaction_count:contextTelemetry(session.sessionManager.getEntries()).compaction_count,provider_reported_cost:null,aggregate_budget:ledger};
    writeFileSync(join(sandbox,'benchmark.json'),JSON.stringify(benchmark,null,2)+'\n');
    process.stdout.write(JSON.stringify({event:'benchmark',sandbox,...benchmark})+'\n');
  }

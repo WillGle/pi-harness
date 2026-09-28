@@ -166,6 +166,32 @@ test("native ContextEdit GC shrinks future context, retains raw history and prot
   assert.equal(session.getEntries().filter(e=>e.type==="context_edit").length,2);
 });
 
+test("promotion GC supersedes a prior Harness continuation but preserves the current continuation",()=>{
+  const session=SessionManager.inMemory("/tmp/pi-continuation-gc-proof");
+  session.appendMessage({role:"user",content:"Start.",timestamp:1});
+  const old=session.appendMessage({role:"user",content:"[PI_HARNESS_MISSION_CONTINUE]\\nMission: "+"Long objective. ".repeat(100),timestamp:2});
+  const current=session.appendMessage({role:"user",content:"[PI_HARNESS_MISSION_CONTINUE]\\nMission: Current objective.",timestamp:3});
+  const collected=deterministicContextEdits(session.buildSessionProjection().entries);
+  assert.deepEqual(collected.edits.map((entry)=>entry.targetId),[old]);
+  assert.equal(collected.gcEntries.mission,1);
+  assert.equal(collected.edits[0].replacement.content.includes("Mission continuation"),true);
+  assert.ok(session.buildSessionProjection().entries.find((entry)=>entry.sourceEntry.id===current).messages.length);
+});
+
+test("promotion GC supersedes a blocked OperationReport only after a later complete OperationReport",()=>{
+  const session=SessionManager.inMemory("/tmp/pi-promotion-gc-proof");
+  session.appendMessage({role:"user",content:"Run the Operation.",timestamp:1});
+  const old=session.appendMessage({role:"toolResult",toolCallId:"old",toolName:"pi_harness_run_operation",content:[{type:"text",text:JSON.stringify({version:1,operation_id:"O-1",status:"blocked",blocker:"Old blocker."})}],isError:false,timestamp:2});
+  session.appendMessage({role:"toolResult",toolCallId:"new",toolName:"pi_harness_run_operation",content:[{type:"text",text:JSON.stringify({version:1,operation_id:"O-1",status:"complete",accepted_task_ids:["T-1"]})}],isError:false,timestamp:3});
+  session.appendMessage({role:"user",content:"Continue.",timestamp:4});
+  const operations={"O-1":{mission_id:"M-1",operation_id:"O-1",status:"complete",required_task_ids:["T-1"],accepted_task_ids:["T-1"],task_results:{"T-1":{execution_status:"execution_complete",verification_status:"verified"}}}};
+  const taskGraphs={"O-1":{nodes:{"T-1":{scheduler_status:"accepted"}}}};
+  const edits=deterministicContextEdits(session.buildSessionProjection().entries,{operations,taskGraphs});
+  assert.deepEqual(edits.edits.map((entry)=>entry.targetId),[old]);
+  assert.match(edits.edits[0].replacement.content,/later complete OperationReport/);
+  assert.equal(edits.gcEntries.operation,1);
+});
+
 test("telemetry records runtime metrics without inventing provider cost or missing token counts",()=>{
   const empty=contextTelemetry([],undefined);
   assert.equal(empty.input_tokens,null);assert.equal(empty.cache_hit_ratio,null);assert.equal(empty.provider_reported_cost,null);assert.equal(empty.runtime_catalog_cost,null);
@@ -175,4 +201,6 @@ test("telemetry records runtime metrics without inventing provider cost or missi
   assert.equal(result.total_tokens,94);assert.equal(result.cache_hit_ratio,60/90);assert.equal(result.runtime_catalog_cost,0.02);assert.equal(result.warming_runtime_catalog_cost,0.01);
   assert.equal(result.context_edits_count,1);assert.equal(result.compaction_count,1);assert.equal(result.gc_bytes_removed,100);assert.equal(result.gc_tokens_removed,null);
   assert.equal(result.context_tokens_estimated,100);assert.equal(result.provider_reported_cost,null);
+  const attributed=contextTelemetry([{customType:"pi-harness-child-usage",data:{mission_id:"M-1",operation_id:"O-1",task_id:"T-1",attempt_id:"A-O-1-T-1-01",role:"worker",usage:{input:3,output:2,cacheRead:1,cacheWrite:0,totalTokens:6,cost:{total:0.02}}}}]);
+  assert.deepEqual(attributed.usage_attribution,[{mission_id:"M-1",operation_id:"O-1",task_id:"T-1",attempt_id:"A-O-1-T-1-01",role:"worker",input_tokens:3,output_tokens:2,cache_read_tokens:1,cache_write_tokens:0,total_tokens:6,runtime_catalog_cost:0.02}]);
 });
