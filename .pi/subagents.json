@@ -1,5 +1,6 @@
 {
   "maxConcurrent": 4,
   "maxConcurrentForeground": 1,
+  "fleetView": false,
   "worktreeIsolation": true
 }
