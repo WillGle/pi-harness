@@ -1,5 +1,5 @@
 import { contextTelemetry, deterministicContextEdits, installStablePrompt, stablePromptSections } from "../lib/context-economics.mjs";
-import { MISSION_ENTRY, attachOperation, createMission, legacyMissionId, missionIsClosable, missionSituationBoard, validateMissionOwnership } from "../lib/mission.mjs";
+import { MISSION_ENTRY, attachOperation, createMission, missionIsClosable, missionSituationBoard, validateMissionOwnership } from "../lib/mission.mjs";
 import { reconcileAttemptLedger } from "../lib/attempt-ledger.mjs";
 import { assertSupportedPlatform } from "../lib/platform.mjs";
 import process from "node:process";
@@ -76,7 +76,6 @@ export default function harness(pi: Pi): void {
     attemptLedger = reconcileAttemptLedger(attemptLedger, operations, taskGraphs);
     validateMissionOwnership(missions, operations, taskGraphs);
     pi.appendEntry?.(TASK_GRAPH_ENTRY, { version: 2, missions, operations, task_graphs: taskGraphs, attempt_ledger: attemptLedger });
-    latestContextTelemetry = undefined;
     maintenancePending = true;
   };
   const persistMission = () => pi.appendEntry?.(MISSION_ENTRY, missions);
@@ -164,12 +163,10 @@ export default function harness(pi: Pi): void {
     taskGraphs = schedulerSnapshot ? schedulerSnapshot.task_graphs : Object.fromEntries(Object.entries(operations).map(([id, operation]) => [id, migrateTaskGraph(operation, legacyCoordinator[id]?.dispatch_counts)]));
     missions = schedulerSnapshot?.missions ?? restore(entries, MISSION_ENTRY) ?? {};
     for (const [id, operation] of Object.entries(operations) as [string, any][]) {
-      if (!operation.mission_id) {
-        const mission_id = legacyMissionId(id);
-        operations[id] = { ...operation, mission_id };
-        missions[mission_id] ??= createMission({ mission_id, objective: goal?.objective ?? operation.objective, status: goal?.status ?? "active", operation_ids: [] });
-        if (!missions[mission_id].operation_ids.includes(id)) missions = attachOperation(missions, mission_id, id);
-      }
+      // Legacy Operation state has no trustworthy parent link. Do not create a
+      // Mission or infer a child outcome during restore. The session must stop
+      // until an authorized, evidence-backed migration supplies ownership.
+      if (!operation.mission_id) throw new Error(`Legacy Operation ${id} has no persisted Mission ownership; restore fails closed`);
       if (!taskGraphs[id]) throw new Error("TaskGraph is missing for a restored Operation");
       validateTaskGraph(taskGraphs[id], operations[id]);
       taskGraphs[id] = reconcileTaskGraph(taskGraphs[id], operations[id]);
@@ -192,6 +189,9 @@ export default function harness(pi: Pi): void {
     if (Object.keys(coordinatorStates).length) pi.appendEntry?.(COORDINATOR_ENTRY, coordinatorStates);
     if (Object.keys(missions).length) persistMission();
     if (Object.keys(operations).length) persistScheduler();
+    // One restore-time scan seeds the footer. Later refreshes happen only at
+    // settlement boundaries, so render() never walks an unbounded session.
+    latestContextTelemetry = collectContextTelemetry(ctx.sessionManager?.getEntries?.() ?? [], ctx.getContextUsage?.());
     proactivePolicy = restoreProactivePolicy(restore(entries, PROACTIVE_COMPACT_ENTRY));
     continuationCount = 0;
     invalidTerminalAttempts = 0;
@@ -216,7 +216,9 @@ export default function harness(pi: Pi): void {
         dispose: unsubscribe,
         invalidate() {},
         render(width: number): string[] {
-          const metrics = latestContextTelemetry ?? (latestContextTelemetry = collectContextTelemetry(ctx.sessionManager.getEntries(), ctx.getContextUsage?.()));
+          // Rendering must be read-only. Telemetry is refreshed at authoritative
+          // settlement events, never by scanning the session from render().
+          const metrics = latestContextTelemetry ?? contextTelemetry([], ctx.getContextUsage?.(), { missions, operations, taskGraphs, attemptLedger });
           const branch = footerData.getGitBranch();
           const left = theme.fg("dim", `${basename(ctx.cwd)}${branch ? ` / ${branch}` : ""}`);
           const model = `${ctx.model?.id ?? "no-model"} · ${ctx.thinkingLevel ?? "off"}`;
@@ -224,15 +226,17 @@ export default function harness(pi: Pi): void {
           const first = truncateToWidth(left + " ".repeat(Math.max(1, width - visibleWidth(left) - visibleWidth(right))) + right, width);
 
           const usage = ctx.getContextUsage?.();
-          const percent = usage?.percent ?? 0;
+          const percent = Number.isFinite(usage?.percent) ? usage.percent : null;
           const cells = 12;
-          const filled = Math.max(0, Math.min(cells, Math.round(percent / 100 * cells)));
+          const filled = percent === null ? 0 : Math.max(0, Math.min(cells, Math.round(percent / 100 * cells)));
           const bar = theme.fg("accent", "█".repeat(filled)) + theme.fg("dim", "░".repeat(cells - filled));
-          const context = usage?.tokens == null ? `? / ${fmtTokens(usage?.contextWindow ?? ctx.model?.contextWindow ?? 0)}` : `${fmtTokens(usage.tokens)} / ${fmtTokens(usage.contextWindow)}`;
+          const window = usage?.contextWindow ?? ctx.model?.contextWindow;
+          const context = usage?.tokens == null ? `? / ${Number.isFinite(window) ? fmtTokens(window) : "?"}` : `${fmtTokens(usage.tokens)} / ${Number.isFinite(window) ? fmtTokens(window) : "?"}`;
           const cache = metrics.cache_hit_ratio === null ? "—" : `${(metrics.cache_hit_ratio * 100).toFixed(1)}%`;
           const tokens = (value: number | null) => value === null ? "?" : fmtTokens(value);
-          const cost = metrics.runtime_catalog_cost === null ? "?" : `${metrics.runtime_catalog_cost.toFixed(3)}`;
-          const details = `Context ${bar} ${context} · ${percent.toFixed(1)}%  I/O ↑${tokens(metrics.input_tokens)} ↓${tokens(metrics.output_tokens)}  Cache ${cache} W${tokens(metrics.cache_write_tokens)}  Est ${cost}`;
+          const money = (value: number | null) => value === null ? "?" : `$${value.toFixed(3)}`;
+          const warm = metrics.warming_requests === 0 && metrics.warming_runtime_catalog_cost === null ? "0/—" : `${metrics.warming_requests}/${money(metrics.warming_runtime_catalog_cost)}`;
+          const details = `Context ${bar} ${context} · ${percent === null ? "?" : percent.toFixed(1)}%  I/O ↑${tokens(metrics.input_tokens)} ↓${tokens(metrics.output_tokens)} · Cache ${cache} R${tokens(metrics.cache_read_tokens)} W${tokens(metrics.cache_write_tokens)} · Warm ${warm} · Est ${money(metrics.runtime_catalog_cost)}`;
           return [first, truncateToWidth(theme.fg("dim", details), width)];
         },
       };

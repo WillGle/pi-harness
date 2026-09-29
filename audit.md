@@ -6,6 +6,16 @@ The historical source findings below were reported against `main` at `2042b1a`. 
 
 The current GitHub baseline is `0b61e03`. Ubuntu 24.04 GitHub Actions passed on that commit. The current source also includes Mission accountability work after this audit addendum. It requires separate source and live managed-proof review. Linux verification in this addendum ran in the local NixOS environment with Node.js `v22.22.2` and Pi `0.87.1`. The active Pi runtime is the project-patched Nix build.
 
+## Current CORE review (2025-09-29)
+
+**Status: PARTIAL. #41 remains a release blocker. Live provider proof remains UNVERIFIED.**
+
+The current-source review found one restore-path accountability defect. A legacy `pi-harness-operation-state` entry without a persisted `mission_id` was silently assigned a synthetic Mission during `session_start`. This could invent Mission ownership from incomplete state. The restore path now fails closed. An authorized migration must first persist a valid Mission, Operation, and TaskGraph ownership link. The regression is `legacy Operation state without a persisted Mission ownership link fails closed`.
+
+The footer now uses only a restore-time telemetry snapshot and authoritative `agent_settled` refreshes. Its `render()` function does not scan session entries. It shows bounded Context, I/O, cache hit ratio with read/write tokens, warming count/cost, and runtime catalog cost. Missing provider values remain `?` or `—`. Footer telemetry does not request providers or control warming or compaction.
+
+This review did not reproduce or root-cause #41 through the full managed Harness matrix. It did not run a live provider-backed managed coding Mission because this Commander session has no active Harness Mission and no provider authorization. Do not claim these local tests as live proof.
+
 ## #19 — Coordinator-owned decomposition
 
 **Status: IMPLEMENTED; live managed coding proof remains unverified.**

@@ -356,24 +356,11 @@ const call = async (pi, tool, input, signal) => {
 };
 const startMission = (pi, objective) => pi.commands.get("goal").handler(objective, {});
 
-test("a legacy Operation entry migrates to TaskGraph without resetting accepted TaskResults", () => {
+test("legacy Operation state without a persisted Mission ownership link fails closed", () => {
   const operation = op();
   const verified = { version: 1, operation_id: "O-1", task_id: "T-1", execution_status: "execution_complete", verification_status: "verified", evidence_refs: [] };
-  const previous = { ...operation, accepted_task_ids: ["T-1"], task_results: { "T-1": verified } };
-  const pi = fakePi([{ customType: "pi-harness-operation-state", data: { "O-1": previous } }]);
-  const snapshot = pi.entries.filter((entry) => entry.customType === TASK_GRAPH_ENTRY).at(-1).data;
-  assert.equal(snapshot.task_graphs["O-1"].nodes["T-1"].scheduler_status, "accepted");
-  assert.equal(snapshot.task_graphs["O-1"].nodes["T-2"].scheduler_status, "ready");
-  assert.deepEqual(snapshot.operations["O-1"].accepted_task_ids, ["T-1"]);
-  const failed = { ...previous, task_results: { ...previous.task_results, "T-2": { ...verified, task_id: "T-2", verification_status: "failed" } }, rejected_task_ids: ["T-2"] };
-  const legacy = fakePi([
-    { customType: "pi-harness-operation-state", data: { "O-1": failed } },
-    { customType: "pi-harness-coordinator-state", data: { "O-1": { version: 1, operation_id: "O-1", turns: 3, decisions: [], blocker: null, dispatch_counts: { "T-2": 2 } } } },
-  ]);
-  const migrated = legacy.entries.filter((entry) => entry.customType === TASK_GRAPH_ENTRY).at(-1).data.task_graphs["O-1"];
-  assert.equal(migrated.nodes["T-2"].attempts, 2);
-  assert.equal(migrated.nodes["T-2"].scheduler_status, "exhausted");
-  assert.equal(Object.hasOwn(legacy.entries.filter((entry) => entry.customType === "pi-harness-coordinator-state").at(-1).data["O-1"], "dispatch_counts"), false);
+  const legacy = { ...operation, accepted_task_ids: ["T-1"], task_results: { "T-1": verified } };
+  assert.throws(() => fakePi([{ customType: "pi-harness-operation-state", data: { "O-1": legacy } }]), /no persisted Mission ownership; restore fails closed/);
 });
 
 test("timed-out parallel Task aborts only its child; late completion cannot change the TaskGraph", async () => {
