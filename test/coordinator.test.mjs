@@ -1,4 +1,4 @@
-import { runWorkerVerification } from "../lib/worker-gate.mjs";
+import { runWorkerVerification, validCommitMessage } from "../lib/worker-gate.mjs";
 import { mockSettlement } from "./helpers/mock-settlement.mjs";
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
@@ -112,7 +112,7 @@ function packageManagerFor(events, repo, mode = "read") {
             worktree,
             "commit",
             "-qm",
-            "Worker update\n\nScope: file.txt\nReason: package smoke",
+            `pi-agent: ${request.options.description}`,
           ]);
           await request.options.onBeforeWorktreeCleanup(worktree);
           if (mode === "worker-delayed-cleanup") await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
@@ -816,8 +816,8 @@ test("worker uses package worktree/concurrency options, runs the gate, preserves
   try {
     const result = await executeCoordinateTask({ events }, {
       owner: "worker",
-      scope: "file.txt",
-      verification: "grep 'worker-update' file.txt",
+      scope: "file.txt with a bounded synthetic scope description",
+      verification: "grep 'worker-update' file.txt && printf 'verification passed'",
       permission: "write",
       acceptance_criteria: ["The Worker verification command passes."],
     }, { cwd: repo, rpcTimeout: 1000, timeout: 1000 });
@@ -825,8 +825,9 @@ test("worker uses package worktree/concurrency options, runs the gate, preserves
     const request = fakePackage.calls.find((entry) => entry?.type === "worker");
     assert.equal(request.options.isBackground, true);
     assert.equal(request.options.isolation, "worktree");
-    assert.match(request.options.description, /Scope: file\.txt/);
+    assert.match(request.options.description, /Scope: file\.txt with a bounded synthetic scope \.\.\.\[truncated after 40 bytes\]/);
     assert.match(request.options.description, /Reason: grep 'worker-update' file\.txt/);
+    assert.doesNotMatch(request.options.description, /[\r\n]/u);
     assert.doesNotMatch(request.prompt, /create exactly one atomic commit/);
     assert.equal(result.success, true);
     assert.equal(result.gatePassed, true);
@@ -852,6 +853,13 @@ test("worker uses package worktree/concurrency options, runs the gate, preserves
     fakePackage.restore();
     rmSync(repo, { recursive: true, force: true });
   }
+});
+
+test("worker commit metadata may be inline in the package-generated subject", () => {
+  assert.equal(validCommitMessage("pi-agent: worker: file.txt · Scope: file.txt · Reason: grep file.txt", ""), true);
+  assert.equal(validCommitMessage("Worker update", "Scope: file.txt\nReason: grep file.txt"), true);
+  assert.equal(validCommitMessage("pi-agent: worker · Scope: file.txt", ""), false);
+  assert.equal(validCommitMessage("pi-agent: worker · Scope: \nReason: grep file.txt", ""), false);
 });
 
 test("deterministic Verifier defers semantic criteria and rejects a failed gate", async () => {
