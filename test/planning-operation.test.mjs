@@ -38,8 +38,12 @@ test("planning Coordinator instructions require semantic proposals, not pre-exis
   const operation = createOperation({ operation_id: "O-plan", objective: "Implement safely.", planning: true, allowed_policy_ids: ["worker-write"] });
   const prompt = coordinatorPrompt(operationBrief(operation, { version: 1, operation_id: "O-plan", turns: 0, decisions: [], blocker: null }));
   const profile = readFileSync(new URL("../.pi/agents/coordinator.md", import.meta.url), "utf8");
-  assert.match(prompt, /planning Operation\. Return plan_tasks with semantic Task proposals/);
+  assert.match(prompt, /planning Operation\. Return action "plan_tasks"/);
+  assert.match(prompt, /top-level "tasks" array, never "proposals"/);
+  assert.match(prompt, /Allowed policy-to-role mapping: \{"worker-write":"worker"\}/);
   assert.match(profile, /No TaskOrder ID or registered TaskSpec exists yet/);
+  assert.match(profile, /Put semantic proposals in the top-level `tasks` array, never `proposals`/);
+  assert.match(profile, /Set `role` to exactly `scout`, `research`, or `worker`/);
   assert.match(profile, /Do not use or require Task IDs, TaskSpecs, permissions, verification commands/);
   assert.match(profile, /If `OperationBrief\.planning` is false, use only registered Task IDs/);
   assert.match(profile, /Every `required_task_ids` value in the OperationBrief already has a Harness-registered TaskSpec/);
@@ -52,6 +56,8 @@ test("CoordinatorDecision rejects fenced JSON while preserving valid planning se
   assert.equal(parseCoordinatorDecision(valid, operation).action, "plan_tasks");
   assert.throws(() => parseCoordinatorDecision(`\`\`\`json\n${valid}\n\`\`\``, operation), /malformed JSON/);
   assert.throws(() => parseCoordinatorDecision(decision("plan_tasks", { tasks: [{ ...proposal, permission: "write" }] }), operation), /unauthorized Task fields/);
+  assert.throws(() => parseCoordinatorDecision(decision("plan_tasks", { tasks: [{ ...proposal, role: "Implement the add function and tests" }] }), operation), /role must be exactly scout, research, or worker/);
+  assert.throws(() => parseCoordinatorDecision(JSON.stringify({ ...JSON.parse(valid), proposals: proposal }), operation), /invalid or belongs to a foreign Operation/);
 });
 
 test("Coordinator plan_tasks materializes before a managed TaskOrder dispatches", async () => {
