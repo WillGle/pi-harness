@@ -51,14 +51,17 @@ test("semantic review selects one Evidence kind and validates every criterion", 
 });
 
 test("semantic review prompt separates criterion passed from top-level verified status", async () => {
-  const task = order("research", "T-status-contract");
+  const task = { ...order("research", "T-status-contract"), constraints: ["Use fixture.csv only."] };
   const report = storeEvidence({ cwd, taskId: task.task_id, kind: "report", content: "The selected report supports the criterion." });
   const input = resultFor(task, [report.reference]);
   const packet = verificationPacket(task, input, cwd);
   const prompt = formatVerificationOrder(packet);
-  assert.match(prompt, /top-level status must be verified when every criterion passed/);
-  assert.match(prompt, /top-level status is never passed/);
+  assert.match(prompt, /Constraints provide TaskOrder context; they are not additional Acceptance Criteria/);
+  assert.match(prompt, /Use passed, failed, blocked, or not_checked only for each criterion/);
+  assert.match(prompt, /top-level status is limited to verified, failed, or blocked/);
+  assert.match(prompt, /use verified when every criterion passed/);
   assert.throws(() => validateSemanticReview(task, packet, reviewerReply(packet, "passed", "passed")), /contradictory status/);
+  assert.throws(() => validateSemanticReview(task, packet, reviewerReply(packet, "not_checked", "not_checked")), /contradictory status/);
   const review = await reviewTask(task, input, cwd, async () => ({ status: "completed", result: reviewerReply(packet, "passed", "passed") }));
   assert.equal(review.status, "blocked");
   assert.equal(review.failure_code, "HARNESS_SEMANTIC_REVIEW_FAILED");
