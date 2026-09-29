@@ -26,18 +26,29 @@ test("durable Mission control snapshots are private, atomic, and locked to one w
 
 test("an abruptly ended Pi process releases its durable Mission lock", async () => {
   const moduleUrl = new URL("../lib/control-state-store.mjs", import.meta.url).href;
-  const source = `import { acquireControlLease } from ${JSON.stringify(moduleUrl)}; await acquireControlLease(process.cwd()); process.stdout.write("READY\\n"); setInterval(() => {}, 60_000);`;
+  const source = `import { acquireControlLease } from ${JSON.stringify(moduleUrl)}; const lease = await acquireControlLease(process.cwd()); process.stdout.write("READY " + lease.child.pid + "\\n"); setInterval(() => {}, 60_000);`;
   const child = spawn(process.execPath, ["--input-type=module", "-e", source], { cwd: process.cwd(), env: process.env, stdio: ["ignore", "pipe", "pipe"] });
   let output = "";
+  let leasePid;
   const ready = new Promise((resolve, reject) => {
     child.stdout.setEncoding("utf8");
-    child.stdout.on("data", (chunk) => { output += chunk; if (output.includes("READY\n")) resolve(); });
+    child.stdout.on("data", (chunk) => {
+      output += chunk;
+      const match = output.match(/READY (\d+)\n/);
+      if (match) { leasePid = Number(match[1]); resolve(); }
+    });
     child.once("error", reject);
-    child.once("exit", (code, signal) => { if (!output.includes("READY\n")) reject(new Error(`lock child exited before ready: ${code ?? signal}`)); });
+    child.once("exit", (code, signal) => { if (!leasePid) reject(new Error(`lock child exited before ready: ${code ?? signal}`)); });
   });
   await ready;
   child.kill("SIGKILL");
   await once(child, "exit");
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    try { process.kill(leasePid, 0); } catch (error) { if (error.code === "ESRCH") break; throw error; }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.throws(() => process.kill(leasePid, 0), { code: "ESRCH" }, "the flock-owned lease helper must exit after its Pi process dies");
   const resumedLease = await acquireControlLease(process.cwd());
   await resumedLease.release();
 });
