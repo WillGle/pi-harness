@@ -46,9 +46,11 @@ test("pi-subagents post-abort cleanup preserves partial work on an unintegrated 
 test("installed pi-subagents applies project capacity and isolates two concurrent Worker worktrees", async () => {
   const settings = loadSettings(process.cwd());
   const manager = new AgentManager(() => {}, 1);
-  applySettings(settings, { setMaxConcurrent: (n) => manager.setMaxConcurrent(n), setMaxConcurrentForeground: (n) => manager.setMaxConcurrentForeground(n), setWorktreeIsolation: () => {} });
+  let fleetView = true;
+  applySettings(settings, { setMaxConcurrent: (n) => manager.setMaxConcurrent(n), setMaxConcurrentForeground: (n) => manager.setMaxConcurrentForeground(n), setFleetView: (enabled) => { fleetView = enabled; }, setWorktreeIsolation: () => {} });
   assert.equal(manager.getMaxConcurrent(), 4);
   assert.equal(manager.getMaxConcurrentForeground(), 1);
+  assert.equal(fleetView, false);
   const cwd = mkdtempSync(join(tmpdir(), "pi-h-worktrees-"));
   const pi = { exec: async (_command, args, options) => {
     try { const { stdout, stderr } = await exec("git", args, { cwd: options.cwd }); return { stdout, stderr, code: 0, killed: false }; }
