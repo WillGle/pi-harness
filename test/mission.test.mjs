@@ -80,7 +80,7 @@ test("Attempt Ledger preserves an unknown child outcome when failure provenance 
   state.operations["O-1"] = terminalizeOperation(state.operations["O-1"], resolvedGraph, { status: "waived", authority_type: "commander", reason: "The remaining TaskOrders are waived." });
   assert.equal(missionIsClosable(state.missions["M-1"], state.operations, { ...state.taskGraphs, "O-1": resolvedGraph }, preserved), false, "an unresolved child outcome cannot be hidden by a Task waiver");
   const board = missionSituationBoard(state.missions, state.operations, state.taskGraphs, ledger);
-  assert.match(board, /Current Attempt: A-O-1-T-1-01 \(unknown\)/);
+  assert.match(board, /Unresolved Attempt A-O-1-T-1-01 for TaskOrder T-1: unknown/);
 });
 
 test("Situation Board retains unresolved obligations from a blocked Mission", () => {
@@ -89,6 +89,45 @@ test("Situation Board retains unresolved obligations from a blocked Mission", ()
   const board = missionSituationBoard(state.missions, state.operations, state.taskGraphs);
   assert.match(board, /Mission M-1\nStatus: blocked\./);
   assert.match(board, /TaskOrder T-1: ready/);
+});
+
+test("Situation Board keeps planning and materialized Operations distinct", () => {
+  const mission = createMission({ mission_id: "M-plan-board", objective: "Materialize semantic Tasks safely.", operation_ids: ["O-plan-board"] });
+  const operation = createOperation({ operation_id: "O-plan-board", mission_id: mission.mission_id, objective: "Plan source inspection.", allowed_policy_ids: ["research-read"], planning: true });
+  const graph = createTaskGraph(operation);
+  const board = missionSituationBoard({ [mission.mission_id]: mission }, { [operation.operation_id]: operation }, { [operation.operation_id]: graph });
+  assert.match(board, /Operation O-plan-board: open/);
+  assert.match(board, /awaiting semantic Task proposals; no Task IDs are materialized/);
+  assert.doesNotMatch(board, /TaskOrder/);
+});
+
+test("Situation Board bounds the total Mission, Operation, and Task projection", () => {
+  const missions = Object.fromEntries(Array.from({ length: 40 }, (_, index) => {
+    const mission_id = `M-${String(index).padStart(2, "0")}`;
+    return [mission_id, createMission({ mission_id, objective: "Retain bounded control state." })];
+  }));
+  const board = missionSituationBoard(missions, {}, {}, {});
+  assert.equal([...board.matchAll(/^Mission /gm)].length, 8);
+  assert.match(board, /32 additional Missions omitted/);
+
+  const mission = createMission({ mission_id: "M-tasks", objective: "Retain unresolved Task obligations.", operation_ids: ["O-1", "O-2"] });
+  const operations = {}, graphs = {};
+  for (const operation_id of mission.operation_ids) {
+    const required_task_ids = Array.from({ length: 20 }, (_, index) => `${operation_id}-T-${String(index + 1).padStart(2, "0")}`);
+    operations[operation_id] = createOperation({ operation_id, mission_id: mission.mission_id, objective: "Retain bounded Task obligations.", required_task_ids });
+    graphs[operation_id] = createTaskGraph(operations[operation_id]);
+  }
+  const taskBoard = missionSituationBoard({ [mission.mission_id]: mission }, operations, graphs, {});
+  assert.equal([...taskBoard.matchAll(/^TaskOrder /gm)].length, 32);
+  assert.match(taskBoard, /8 additional unresolved TaskOrders omitted/);
+});
+
+test("Situation Board enforces a character bound for oversized restored identifiers", () => {
+  const mission_id = `M-${"x".repeat(30_000)}`;
+  const mission = createMission({ mission_id, objective: "Retain a bounded projection." });
+  const board = missionSituationBoard({ [mission_id]: mission }, {}, {});
+  assert.ok(board.length <= 24_000);
+  assert.match(board, /truncated; remaining obligations stay in durable Mission state/);
 });
 
 test("supersession needs persisted replacement lineage and waiver is a terminal non-acceptance disposition", () => {
