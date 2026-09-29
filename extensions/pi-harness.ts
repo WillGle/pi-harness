@@ -8,7 +8,7 @@ import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import {
   COMPACT_ENTRY, GOAL_ENTRY, PLAN_ENTRY, READ_ONLY_TOOLS, controlStateSummary, goalState,
   isPlanAllowedTool, parsePlan, planState, restore, transitionGoal,
@@ -22,6 +22,7 @@ import { promoteTaskResult } from "../lib/communication.mjs";
 import { OPERATION_ENTRY, createOperation, terminalizeOperation } from "../lib/operation.mjs";
 import { TASK_GRAPH_ENTRY, createTaskGraph, migrateTaskGraph, reconcileTaskGraph, supersedeGraphTask, validateTaskGraph, waiveGraphTask } from "../lib/task-graph.mjs";
 import { findReferences, findSymbol } from "../lib/code-intel.mjs";
+import { buildStatusViewModel, formatExpandedStatus, formatStatusFooter } from "../lib/status-view-model.mjs";
 import { readHashlines, replaceHashlines } from "../lib/precise-edit.mjs";
 import { Type } from "typebox";
 
@@ -33,7 +34,39 @@ const PACKAGE_TOOLS = new Set(["Agent", "get_subagent_result", "steer_subagent",
 const MAX_AUTOMATIC_CONTINUATIONS = 25;
 const SKILLS = Object.keys(JSON.parse(readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "../skills/skills.lock.json"), "utf8")).skills).join(", ");
 
-const fmtTokens = (count: number) => count < 1000 ? `${count}` : count < 1_000_000 ? `${(count / 1000).toFixed(count < 10_000 ? 1 : 0)}k` : `${(count / 1_000_000).toFixed(1)}M`;
+class StatusOverlay {
+  private offset = 0;
+  private tui: any;
+  private theme: any;
+  private content: string[];
+  private done: () => void;
+  constructor(tui: any, theme: any, content: string[], done: () => void) {
+    this.tui = tui; this.theme = theme; this.content = content; this.done = done;
+  }
+  handleInput(data: string) {
+    if (matchesKey(data, "escape") || matchesKey(data, "return") || data === "q" || matchesKey(data, "ctrl+c")) return this.done();
+    const rows = Math.max(1, this.content.length - 16);
+    if (matchesKey(data, "down") || matchesKey(data, "pagedown")) this.offset = Math.min(rows, this.offset + (matchesKey(data, "pagedown") ? 12 : 1));
+    else if (matchesKey(data, "up") || matchesKey(data, "pageup")) this.offset = Math.max(0, this.offset - (matchesKey(data, "pageup") ? 12 : 1));
+    else return;
+    this.tui.requestRender();
+  }
+  invalidate() {}
+  render(width: number): string[] {
+    const innerWidth = Math.max(1, width - 2);
+    const wrapped = this.content.flatMap((row) => row ? wrapTextWithAnsi(row, innerWidth) : [""]);
+    const pageSize = 18;
+    const maxOffset = Math.max(0, wrapped.length - pageSize);
+    this.offset = Math.min(this.offset, maxOffset);
+    const content = wrapped.slice(this.offset, this.offset + pageSize).map((row) => truncateToWidth(row, innerWidth, "…"));
+    while (content.length < pageSize) content.push("");
+    const border = this.theme.fg("border", "│");
+    const top = this.theme.fg("border", `╭${"─".repeat(Math.max(0, width - 2))}╮`);
+    const bottom = this.theme.fg("border", `╰${"─".repeat(Math.max(0, width - 2))}╯`);
+    const title = this.theme.fg("accent", truncateToWidth(" Status · ↑/↓ scroll · Esc close ", innerWidth));
+    return [top, border + title + " ".repeat(Math.max(0, innerWidth - visibleWidth(title))) + border, ...content.map((row) => border + row + " ".repeat(Math.max(0, innerWidth - visibleWidth(row))) + border), bottom];
+  }
+}
 
 export default function harness(pi: Pi): void {
   assertSupportedPlatform();
@@ -70,8 +103,23 @@ export default function harness(pi: Pi): void {
   let latestContextTelemetry: ReturnType<typeof contextTelemetry> | undefined;
   let latestContextUsage: any;
   let goalGroupId: string | undefined;
+  let statusTui: any;
+  let statusViewModel = buildStatusViewModel();
 
   const say = (ctx: Context, message: string, level: "info" | "warning" | "error" = "info") => ctx.ui?.notify?.(message, level);
+  const statusFingerprint = (model: ReturnType<typeof buildStatusViewModel>) => JSON.stringify([
+    formatStatusFooter(model, 140), formatStatusFooter(model, 100), formatStatusFooter(model, 60), formatExpandedStatus(model),
+  ]);
+  const refreshStatusView = (requestRender = true) => {
+    const next = buildStatusViewModel({ missions, operations, taskGraphs, attemptLedger, coordinatorStates,
+      selectedMissionId, activeOperationId: activeOperationRuns.keys().next().value,
+      contextUsage: latestContextUsage, telemetry: latestContextTelemetry,
+      gcPending: maintenancePending, piCompacting: nativeCompactionImminent });
+    const changed = statusFingerprint(statusViewModel) !== statusFingerprint(next);
+    statusViewModel = next;
+    if (changed && requestRender) statusTui?.requestRender();
+    return changed;
+  };
   const persistControlState = () => {
     if (!controlLease) return;
     attemptLedger = reconcileAttemptLedger(attemptLedger, operations, taskGraphs);
@@ -102,11 +150,13 @@ export default function harness(pi: Pi): void {
     persistControlState();
     pi.appendEntry?.(TASK_GRAPH_ENTRY, { version: 2, missions, operations, task_graphs: taskGraphs, attempt_ledger: attemptLedger });
     maintenancePending = true;
+    refreshStatusView();
   };
   const persistMission = () => {
     if (goal?.mission_id) missionGoals = { ...missionGoals, [goal.mission_id]: goal };
     persistControlState();
     pi.appendEntry?.(MISSION_ENTRY, missions);
+    refreshStatusView();
   };
   const missionBoard = () => missionSituationBoard(missions, operations, taskGraphs, attemptLedger);
   const collectContextTelemetry = (entries: any[], usage: any) => contextTelemetry(entries, usage, { missions, operations, taskGraphs, attemptLedger });
@@ -187,6 +237,7 @@ export default function harness(pi: Pi): void {
     if (goalGroupId) cancelCoordinateTasks(goalGroupId);
     sessionTaskGroup = randomUUID();
     sessionEpoch++;
+    statusTui = undefined;
     selectedMissionId = undefined;
     resumedMissionId = undefined;
     controlStateRestored = false;
@@ -240,6 +291,7 @@ export default function harness(pi: Pi): void {
     // settlement boundaries, so render() never walks an unbounded session.
     latestContextUsage = ctx.getContextUsage?.();
     latestContextTelemetry = collectContextTelemetry(ctx.sessionManager?.getEntries?.() ?? [], latestContextUsage);
+    refreshStatusView(false);
     proactivePolicy = restoreProactivePolicy(restore(entries, PROACTIVE_COMPACT_ENTRY));
     continuationCount = 0;
     invalidTerminalAttempts = 0;
@@ -258,34 +310,15 @@ export default function harness(pi: Pi): void {
       },
     }));
 
-    ctx.ui.setFooter((tui: any, theme: any, footerData: any) => {
-      const unsubscribe = footerData.onBranchChange(() => tui.requestRender());
+    ctx.ui.setFooter((tui: any, theme: any) => {
+      statusTui = tui;
       return {
-        dispose: unsubscribe,
+        dispose() { if (statusTui === tui) statusTui = undefined; },
         invalidate() {},
         render(width: number): string[] {
-          // Rendering must be read-only. Telemetry is refreshed at authoritative
-          // settlement events, never by scanning the session from render().
-          const metrics = latestContextTelemetry ?? contextTelemetry([], latestContextUsage, { missions, operations, taskGraphs, attemptLedger });
-          const branch = footerData.getGitBranch();
-          const left = theme.fg("dim", `${basename(ctx.cwd)}${branch ? ` / ${branch}` : ""}`);
-          const model = `${ctx.model?.id ?? "no-model"} · ${ctx.thinkingLevel ?? "off"}`;
-          const right = theme.fg("dim", model);
-          const first = truncateToWidth(left + " ".repeat(Math.max(1, width - visibleWidth(left) - visibleWidth(right))) + right, width);
-
-          const usage = latestContextUsage;
-          const percent = Number.isFinite(usage?.percent) ? usage.percent : null;
-          const cells = 12;
-          const filled = percent === null ? 0 : Math.max(0, Math.min(cells, Math.round(percent / 100 * cells)));
-          const bar = theme.fg("accent", "█".repeat(filled)) + theme.fg("dim", "░".repeat(cells - filled));
-          const window = usage?.contextWindow ?? ctx.model?.contextWindow;
-          const context = usage?.tokens == null ? `? / ${Number.isFinite(window) ? fmtTokens(window) : "?"}` : `${fmtTokens(usage.tokens)} / ${Number.isFinite(window) ? fmtTokens(window) : "?"}`;
-          const cache = metrics.cache_hit_ratio === null ? "—" : `${(metrics.cache_hit_ratio * 100).toFixed(1)}%`;
-          const tokens = (value: number | null) => value === null ? "?" : fmtTokens(value);
-          const money = (value: number | null) => value === null ? "?" : `$${value.toFixed(3)}`;
-          const warm = metrics.warming_requests === 0 && metrics.warming_runtime_catalog_cost === null ? "0/—" : `${metrics.warming_requests}/${money(metrics.warming_runtime_catalog_cost)}`;
-          const details = `Context ${bar} ${context} · ${percent === null ? "?" : percent.toFixed(1)}%  I/O ↑${tokens(metrics.input_tokens)} ↓${tokens(metrics.output_tokens)} · Cache ${cache} R${tokens(metrics.cache_read_tokens)} W${tokens(metrics.cache_write_tokens)} · Warm ${warm} · Est ${money(metrics.runtime_catalog_cost)}`;
-          return [first, truncateToWidth(theme.fg("dim", details), width)];
+          // Render only the cached StatusViewModel. This path reads no session
+          // history and performs no lifecycle or telemetry aggregation.
+          return formatStatusFooter(statusViewModel, width, theme);
         },
       };
     });
@@ -318,27 +351,32 @@ export default function harness(pi: Pi): void {
     persistScheduler();
     saveCompactState(event);
   };
-  pi.on?.("session_before_compact", (event: any) => { nativeCompactionImminent = true; checkpoint(event); return { customInstructions: compactInstructions, replaceInstructions: false }; });
+  pi.on?.("session_before_compact", (event: any) => { nativeCompactionImminent = true; refreshStatusView(); checkpoint(event); refreshStatusView(); return { customInstructions: compactInstructions, replaceInstructions: false }; });
   pi.on?.("session_compact", (_event: any, ctx: any) => {
     nativeCompactionImminent = false;
     latestContextUsage = ctx?.getContextUsage?.();
     // Pi owns compaction; the checkpoint does not change Scheduler semantics.
     maintenancePending = false; lastMaintenanceEpoch = maintenanceEpoch; maintenanceArmed = false;
+    refreshStatusView();
   });
   pi.on?.("session_compact_failed", (_event: any, ctx: any) => {
     nativeCompactionImminent = false;
     latestContextUsage = ctx?.getContextUsage?.();
     maintenancePending = false; lastMaintenanceEpoch = maintenanceEpoch; maintenanceArmed = false;
+    refreshStatusView();
   });
   pi.on?.("context", (_event: any, ctx: any) => {
     latestContextUsage = ctx.getContextUsage?.();
-    if (!proactivePolicy.enabled) return;
-    const percent = latestContextUsage?.percent;
-    if (typeof percent !== "number" || !Number.isFinite(percent)) return;
-    if (percent < proactivePolicy.threshold_percent!) {
-      if (!maintenanceArmed) { maintenanceEpoch++; maintenanceArmed = true; }
-      maintenancePending = false;
-    } else if (maintenanceArmed && maintenanceEpoch > lastMaintenanceEpoch) maintenancePending = true;
+    if (proactivePolicy.enabled) {
+      const percent = latestContextUsage?.percent;
+      if (typeof percent === "number" && Number.isFinite(percent)) {
+        if (percent < proactivePolicy.threshold_percent!) {
+          if (!maintenanceArmed) { maintenanceEpoch++; maintenanceArmed = true; }
+          maintenancePending = false;
+        } else if (maintenanceArmed && maintenanceEpoch > lastMaintenanceEpoch) maintenancePending = true;
+      }
+    }
+    refreshStatusView();
   });
   const maintainContext = (event: any, ctx: any) => {
     if (!maintenancePending || activeToolCalls.size || activeOperationRuns.size || hasActiveCoordinateTasks() || event.context?.pendingMessages?.length) return;
@@ -357,11 +395,12 @@ export default function harness(pi: Pi): void {
         : previousBoard ? [] : [{ type: "custom_message", customType: "pi-harness-situation-board", content: board, display: false }];
     checkpoint();
     maintenancePending = false; maintenanceArmed = false; lastMaintenanceEpoch = maintenanceEpoch;
+    refreshStatusView();
     return { entries: [...event.entries, ...collected.edits, ...boardEntries, { type: "custom", customType: "pi-harness-context-maintenance", data: { version: 1, context_edits: collected.edits.length, situation_board_edits: boardEntries.length, gc_bytes_removed: collected.bytesRemoved, gc_entries_superseded_by_task: collected.gcEntries.task, gc_entries_superseded_by_operation: collected.gcEntries.operation, gc_entries_superseded_by_mission: collected.gcEntries.mission } }] };
   };
   pi.on?.("turn_end", maintainContext);
   pi.on?.("agent_before_settle", maintainContext);
-  pi.on?.("agent_settled", (_event: any, ctx: any) => { continuationQueued = false; latestContextUsage = ctx.getContextUsage?.(); latestContextTelemetry = collectContextTelemetry(ctx.sessionManager?.getEntries?.() ?? [], latestContextUsage); pi.appendEntry?.("pi-harness-context-telemetry", latestContextTelemetry); continueGoal(); });
+  pi.on?.("agent_settled", (_event: any, ctx: any) => { continuationQueued = false; latestContextUsage = ctx.getContextUsage?.(); latestContextTelemetry = collectContextTelemetry(ctx.sessionManager?.getEntries?.() ?? [], latestContextUsage); pi.appendEntry?.("pi-harness-context-telemetry", latestContextTelemetry); refreshStatusView(); continueGoal(); });
   pi.on?.("tool_execution_start", (event: any) => { activeToolCalls.add(event.toolCallId); });
   pi.on?.("tool_execution_end", (event: any, ctx: any) => { activeToolCalls.delete(event.toolCallId); });
   pi.on?.("before_agent_start", (event: any, ctx: any) => {
@@ -389,14 +428,26 @@ export default function harness(pi: Pi): void {
     const lease = controlLease;
     controlLease = undefined;
     selectedMissionId = undefined;
+    statusTui = undefined;
     if (lease) await lease.release();
   });
 
-  pi.registerCommand?.("harness-context", { description: "Show context/cache/GC usage; missing provider metrics stay unknown", handler: async (_args: string, ctx: any) => {
-    latestContextUsage = ctx.getContextUsage?.();
-    latestContextTelemetry = collectContextTelemetry(ctx.sessionManager?.getEntries?.() ?? [], latestContextUsage);
-    say(ctx, JSON.stringify(latestContextTelemetry));
-  }});
+  const showExpandedStatus = async (ctx: any) => {
+    const content = formatExpandedStatus(statusViewModel).split("\n");
+    if (ctx.mode === "tui" && ctx.ui?.custom) {
+      await ctx.ui.custom<void>((tui: any, theme: any, _keybindings: any, done: () => void) => new StatusOverlay(tui, theme, content, done), {
+        overlay: true, overlayOptions: { anchor: "center", width: "90%", maxHeight: 24 },
+      });
+    } else say(ctx, content.join("\n"));
+  };
+  pi.registerCommand?.("status", { description: "Show the current bounded Mission, execution, and Context Economics status", handler: async (_args: string, ctx: any) => showExpandedStatus(ctx) });
+  pi.registerCommand?.("harness-context", { description: "Show the current status projection", handler: async (_args: string, ctx: any) => showExpandedStatus(ctx) });
+  pi.registerTool?.({
+    name: "pi_harness_status", label: "Pi Harness status",
+    description: "Return the current bounded status projection. Use this read-only tool when the user asks what is running, what agents are doing, whether work is blocked, or for Context Economics status. It uses the cached StatusViewModel and does not inspect session history or child output.",
+    parameters: Type.Object({}),
+    execute: async () => ({ content: [{ type: "text", text: formatExpandedStatus(statusViewModel) }], details: undefined }),
+  });
 
   pi.registerCommand?.("harness-compact", { description: "Harness context maintenance: /harness-compact set <50-90>|status|disable (independent of /autocompact)", handler: async (args: string, ctx: Context) => {
     const input = args.trim();
@@ -405,6 +456,7 @@ export default function harness(pi: Pi): void {
       if (input === "disable") { proactivePolicy = { ...proactivePolicy, enabled: false }; maintenancePending = false; }
       else if (input.startsWith("set ")) { proactivePolicy = setProactiveThreshold(input.slice(4).trim()); maintenancePending = false; maintenanceArmed = true; maintenanceEpoch++; }
       else throw new Error("Use /harness-compact set <50-90>, status, or disable.");
+      refreshStatusView();
       pi.appendEntry?.(PROACTIVE_COMPACT_ENTRY, proactivePolicy);
       say(ctx, `Harness context maintenance ${proactivePolicy.enabled ? `set to ${proactivePolicy.threshold_percent}%` : "disabled"}. Pi-native auto-compaction is unchanged.`);
     } catch (error) { say(ctx, (error as Error).message, "error"); }
@@ -438,6 +490,7 @@ export default function harness(pi: Pi): void {
       maintenancePending = true;
       persistMission(); persistScheduler(); persist();
       if (ctx.isIdle?.() !== false) maintenancePending = false;
+      refreshStatusView();
       say(ctx, `Mission ${id} resumed. Its Task and Attempt state is unchanged.`);
       continueGoal();
     } catch (error) { say(ctx, (error as Error).message, "error"); }
@@ -612,6 +665,7 @@ export default function harness(pi: Pi): void {
       const runId = randomUUID();
       const runEpoch = sessionEpoch;
       activeOperationRuns.set(id, { controller, goalGroup: goal?.status === "active" ? goalGroupId : undefined });
+      refreshStatusView();
       const save = (nextOperation: ReturnType<typeof createOperation>, state: ReturnType<typeof coordinatorState>, graph: ReturnType<typeof createTaskGraph>) => {
         if (runEpoch !== sessionEpoch) return;
         validateTaskGraph(graph, nextOperation);
@@ -639,7 +693,10 @@ export default function harness(pi: Pi): void {
           save,
         }, { state: coordinatorStates[id] ?? coordinatorState(operation), graph: taskGraphs[id], mission: operations[id].mission_id ? { mission_id: operations[id].mission_id, objective: missions[operations[id].mission_id]?.objective } : goal?.status === "active" ? goal.objective : undefined, cwd: runCwd, onUsage: recordUsage, signal: controller.signal, parallelLimit });
         return { content: [{ type: "text", text: JSON.stringify(report) }] };
-      } finally { signal?.removeEventListener("abort", abort); if (activeOperationRuns.get(id)?.controller === controller) activeOperationRuns.delete(id); }
+      } finally {
+        signal?.removeEventListener("abort", abort);
+        if (activeOperationRuns.get(id)?.controller === controller) { activeOperationRuns.delete(id); refreshStatusView(); }
+      }
     },
   });
   pi.registerTool?.({
