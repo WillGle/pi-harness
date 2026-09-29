@@ -32,10 +32,10 @@ test("Mission closure requires a terminal Operation disposition", () => {
   assert.equal(missionIsClosable(planningMission, { "O-plan": planning }, { "O-plan": createTaskGraph(planning) }), false, "a planning Operation has no terminal disposition");
 
   const state = fixture();
-  let graph = waiveGraphTask(state.taskGraphs["O-1"], state.operations["O-1"], "T-1", { authority: "Commander", reason: "The requirement is removed." });
-  graph = waiveGraphTask(graph, state.operations["O-1"], "T-2", { authority: "Commander", reason: "The requirement is removed." });
+  let graph = waiveGraphTask(state.taskGraphs["O-1"], state.operations["O-1"], "T-1", { authority_type: "commander", reason: "The requirement is removed." });
+  graph = waiveGraphTask(graph, state.operations["O-1"], "T-2", { authority_type: "commander", reason: "The requirement is removed." });
   assert.equal(missionIsClosable(state.missions["M-1"], state.operations, { ...state.taskGraphs, "O-1": graph }), false, "resolved TaskOrders do not terminalize an open Operation");
-  state.operations["O-1"] = terminalizeOperation(state.operations["O-1"], graph, { status: "waived", authority: "Commander", reason: "All remaining TaskOrders are waived." });
+  state.operations["O-1"] = terminalizeOperation(state.operations["O-1"], graph, { status: "waived", authority_type: "commander", reason: "All remaining TaskOrders are waived." });
   assert.equal(missionIsClosable(state.missions["M-1"], state.operations, { ...state.taskGraphs, "O-1": graph }), true);
 });
 
@@ -60,6 +60,10 @@ test("Attempt Ledger preserves an unknown child outcome when failure provenance 
   const ledger = reconcileAttemptLedger({}, state.operations, state.taskGraphs);
   assert.equal(state.taskGraphs["O-1"].nodes["T-1"].blocker.failure_code, "HARNESS_SESSION_INTERRUPTED");
   assert.equal(ledger["A-O-1-T-1-01"].status, "unknown");
+  const superseded = supersedeGraphTask(state.taskGraphs["O-1"], state.operations["O-1"], "T-1", { authority_type: "commander", reason: "A replacement TaskOrder is registered.", replacement_mission_id: "M-1", replacement_operation_id: "O-replacement", replacement_task_id: "T-replacement" });
+  const preserved = reconcileAttemptLedger(ledger, state.operations, { ...state.taskGraphs, "O-1": superseded });
+  assert.equal(preserved["A-O-1-T-1-01"].status, "unknown", "Task supersession cannot rewrite an Attempt outcome");
+  assert.equal(preserved["A-O-1-T-1-01"].failure_code, "HARNESS_SESSION_INTERRUPTED");
   assert.equal(missionIsClosable(state.missions["M-1"], state.operations, state.taskGraphs, ledger), false);
   const board = missionSituationBoard(state.missions, state.operations, state.taskGraphs, ledger);
   assert.match(board, /Current Attempt: A-O-1-T-1-01 \(unknown\)/);
@@ -71,10 +75,13 @@ test("supersession needs persisted replacement lineage and waiver is a terminal 
   state.operations["O-2"] = replacement;
   state.taskGraphs["O-2"] = createTaskGraph(replacement);
   state.missions = attachOperation(state.missions, "M-1", "O-2");
-  const superseded = supersedeGraphTask(state.taskGraphs["O-1"], state.operations["O-1"], "T-1", { authority: "Commander", reason: "Replacement TaskOrder is registered.", replacement_mission_id: "M-1", replacement_operation_id: "O-2", replacement_task_id: "T-3" });
+  const superseded = supersedeGraphTask(state.taskGraphs["O-1"], state.operations["O-1"], "T-1", { authority_type: "commander", reason: "Replacement TaskOrder is registered.", replacement_mission_id: "M-1", replacement_operation_id: "O-2", replacement_task_id: "T-3" });
   assert.equal(superseded.nodes["T-1"].scheduler_status, "superseded");
   assert.equal(superseded.nodes["T-1"].disposition.replacement_task_id, "T-3");
-  const waived = waiveGraphTask(state.taskGraphs["O-1"], state.operations["O-1"], "T-1", { authority: "Commander", reason: "Requirement removed." });
+  assert.equal(superseded.nodes["T-1"].disposition.authority_type, "commander");
+  assert.match(superseded.nodes["T-1"].disposition.timestamp, /^\d{4}-\d{2}-\d{2}T/);
+  const waived = waiveGraphTask(state.taskGraphs["O-1"], state.operations["O-1"], "T-1", { authority_type: "commander", reason: "Requirement removed." });
   assert.equal(waived.nodes["T-1"].scheduler_status, "waived");
+  assert.throws(() => waiveGraphTask(state.taskGraphs["O-1"], state.operations["O-1"], "T-1", { authority_type: "worker", reason: "A Worker cannot waive a TaskOrder." }), /invalid Task disposition/);
   assert.equal(missionIsClosable(state.missions["M-1"], state.operations, { ...state.taskGraphs, "O-1": superseded }), false, "the replacement TaskOrder is unresolved");
 });

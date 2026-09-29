@@ -500,7 +500,14 @@ test("Pi RPC restart restores a managed Operation and its TaskGraph", async () =
   let pi;
   try {
     pi = fixture.spawn();
-    await pi.prompt("CALL_OPERATION_CREATE");
+    await pi.prompt("/goal Preserve the TaskGraph.");
+    const operationEvents = pi.events.length;
+    const queuedOperation = await pi.send({ type: "prompt", message: "CALL_OPERATION_CREATE", streamingBehavior: "followUp" });
+    assert.equal(queuedOperation.success, true);
+    await pi.waitFor((event) => event.type === "tool_execution_end" && event.toolName === "pi_harness_operation" && !event.isError && pi.events.indexOf(event) >= operationEvents);
+    const cancelled = await pi.send({ type: "prompt", message: "/goal cancel", streamingBehavior: "followUp" });
+    assert.equal(cancelled.success, true);
+    await pi.waitFor((event) => event.type === "extension_ui_request" && /^Goal cancelled/.test(event.message ?? ""));
     const beforeEntries = (await pi.send({ type: "get_entries" })).data.entries;
     const before = latestCustom(beforeEntries, TASK_GRAPH_ENTRY)?.data;
     assert.ok(before);
@@ -526,7 +533,14 @@ test("Pi plan mode survives real compaction and still blocks built-in and Harnes
   let pi;
   try {
     pi = fixture.spawn();
-    await pi.prompt("CALL_OPERATION_CREATE");
+    await pi.prompt("/goal Preserve the TaskGraph.");
+    const operationEvents = pi.events.length;
+    const queuedOperation = await pi.send({ type: "prompt", message: "CALL_OPERATION_CREATE", streamingBehavior: "followUp" });
+    assert.equal(queuedOperation.success, true);
+    await pi.waitFor((event) => event.type === "tool_execution_end" && event.toolName === "pi_harness_operation" && !event.isError && pi.events.indexOf(event) >= operationEvents);
+    const cancelled = await pi.send({ type: "prompt", message: "/goal cancel", streamingBehavior: "followUp" });
+    assert.equal(cancelled.success, true);
+    await pi.waitFor((event) => event.type === "extension_ui_request" && /^Goal cancelled/.test(event.message ?? ""));
     assert.equal(latestCustom((await pi.send({ type: "get_entries" })).data.entries, TASK_GRAPH_ENTRY)?.data.task_graphs["O-compact"].nodes["T-root"].scheduler_status, "ready");
     await pi.prompt("/plan on");
     await pi.prompt("/harness-compact set 73");

@@ -354,6 +354,7 @@ const call = async (pi, tool, input, signal) => {
   if (tool === "pi_harness_operation" && input.action === "create") input = { ...input, task_specs: input.task_specs ?? fixtureSpecs(input) };
   return JSON.parse((await pi.tools.get(tool).execute("id", input, signal)).content[0].text);
 };
+const startMission = (pi, objective) => pi.commands.get("goal").handler(objective, {});
 
 test("a legacy Operation entry migrates to TaskGraph without resetting accepted TaskResults", () => {
   const operation = op();
@@ -456,7 +457,7 @@ test("goal cancellation aborts the Coordinator turn; an unrelated turn is unaffe
 });
 
 test("switching sessions aborts the run without writing old Coordinator state into the new session", async () => {
-  const pi = fakePi();
+  const pi = fakePi(); await startMission(pi, "Check reports.");
   await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-1", objective: "Check reports.", required_task_ids: ["T-1"], task_intents: { "T-1": "Inspect `lib/coordinator.mjs`." } });
   let request;
   pi.events.on("subagents:rpc:spawn", (next) => {
@@ -476,7 +477,7 @@ test("switching sessions aborts the run without writing old Coordinator state in
 });
 
 test("Scheduler attempt budget survives Coordinator replacement and session restore", async () => {
-  const pi = fakePi();
+  const pi = fakePi(); await startMission(pi, "Inspect report.");
   await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-1", objective: "Inspect report.", required_task_ids: ["T-1"], task_intents: { "T-1": "Inspect `lib/coordinator.mjs`." } });
   let stage = 0, counter = 0;
   const steps = [
@@ -505,7 +506,7 @@ test("Scheduler attempt budget survives Coordinator replacement and session rest
 });
 
 test("old managed TaskResult cannot mutate a new session's TaskGraph", async () => {
-  const pi = fakePi();
+  const pi = fakePi(); await startMission(pi, "Old session.");
   await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-1", objective: "Old session.", task_specs: { "T-1": { owner: "research", permission: "read", verification: "Inspect report.", acceptance_criteria: ["The report identifies the requested source."] } }, required_task_ids: ["T-1"], task_intents: { "T-1": "Inspect old session." } });
   let workerRequest;
   pi.events.on("subagents:rpc:spawn", (request) => {
@@ -525,6 +526,7 @@ test("old managed TaskResult cannot mutate a new session's TaskGraph", async () 
   pi.sessionStart(nextEntries);
   assert.equal(workerRequest.options.signal.aborted, true);
   assert.equal((await oldRun).status, "blocked");
+  await startMission(pi, "New session.");
   await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-1", objective: "New session.", required_task_ids: ["T-1"] });
   const snapshot = pi.entries.filter((entry) => entry.customType === TASK_GRAPH_ENTRY).at(-1).data;
   assert.equal(snapshot.operations["O-1"].objective, "New session.");
@@ -554,7 +556,7 @@ test("goal cancellation aborts the active managed ExecutionUnit", async () => {
 });
 
 test("managed Operation cancellation aborts all claimed wave Tasks and blocks ghost-running nodes", async () => {
-  const pi = fakePi();
+  const pi = fakePi(); await startMission(pi, "Cancel wave.");
   await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-1", objective: "Cancel wave.", required_task_ids: ["T-1", "T-2"], task_intents: { "T-1": "Inspect `lib/coordinator.mjs`.", "T-2": "Inspect `lib/coordinator.mjs`." } });
   const active = [];
   pi.events.on("subagents:rpc:spawn", (req) => {
@@ -579,7 +581,7 @@ test("managed Operation cancellation aborts all claimed wave Tasks and blocks gh
 });
 
 test("late results from both old-session parallel Tasks cannot overwrite the new session", async () => {
-  const pi = fakePi();
+  const pi = fakePi(); await startMission(pi, "Old wave.");
   await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-OLD", objective: "Old wave.", required_task_ids: ["T-1", "T-2"], task_intents: { "T-1": "Inspect `lib/coordinator.mjs`.", "T-2": "Inspect `lib/coordinator.mjs`." } });
   const workers = [];
   pi.events.on("subagents:rpc:spawn", (req) => {
@@ -608,6 +610,7 @@ test("late results from both old-session parallel Tasks cannot overwrite the new
   pi.sessionStart(freshEntries);
   assert.equal(controllers[0].signal.aborted, true, "session_start aborts the old managed Operation controller");
   assert.ok(workers.every(({ req }) => req.options.signal.aborted), "session_start aborts both ExecutionUnits");
+  await startMission(pi, "New session sentinel.");
   await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-NEW", objective: "New session sentinel.", required_task_ids: ["T-NEW"], heads: [{ head_id: "H-NEW", domain: "testing", task_ids: ["T-NEW"] }] });
   const expectedEntries = structuredClone(freshEntries);
   const assertFresh = () => {
@@ -631,7 +634,7 @@ test("late results from both old-session parallel Tasks cannot overwrite the new
 });
 
 test("managed Coordinator receives Operation inputs and dispatches a registered Worker", async () => {
-  const pi = fakePi();
+  const pi = fakePi(); await startMission(pi, "Implement context economics.");
   const constraints = ["Do not bypass Coordinator.", "Do not change Scheduler authority."];
   const task_intents = { "T-1": "Implement stable prompt and deterministic context maintenance." };
   await call(pi, "pi_harness_operation", {
@@ -679,7 +682,7 @@ test("managed Coordinator receives Operation inputs and dispatches a registered 
 });
 
 test("serial Coordinator turns dispatch through Harness; Commander receives only OperationReport", async () => {
-  const pi = fakePi();
+  const pi = fakePi(); await startMission(pi, "Check reports.");
   const constraints = ["Do not bypass Coordinator.", "Do not change Scheduler authority."];
   const task_intents = { "T-1": "Inspect the first registered task.", "T-2": "Inspect the dependent registered task." };
   await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-1", objective: "Check reports.", required_task_ids: ["T-1", "T-2"], dependencies: { "T-2": ["T-1"] }, acceptance_criteria: ["The Coordinator checked the result."], constraints, task_intents });
@@ -737,7 +740,7 @@ test("serial Coordinator turns dispatch through Harness; Commander receives only
     for (const ref of result.evidence_refs) assert.deepEqual([readEvidence(ref).metadata.operation_id, readEvidence(ref).metadata.task_id], ["O-1", id]);
   }
   assert.ok(prompts.filter((_, i) => types[i] === "coordinator").every((text) => !text.includes("RAW PRIVATE REPORT")));
-  assert.equal(pi.entries.some((entry) => entry.customType === "pi-harness-goal-state"), false);
+  assert.equal(pi.entries.some((entry) => entry.customType === "pi-harness-goal-state"), true);
   const restored = fakePi(pi.entries);
   assert.equal(restored.entries.filter((entry) => entry.customType === "pi-harness-operation-state").at(-1).data["O-1"].status, "complete");
   const snapshot = restored.entries.filter((entry) => entry.customType === TASK_GRAPH_ENTRY).at(-1).data;

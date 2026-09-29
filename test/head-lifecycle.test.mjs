@@ -18,6 +18,7 @@ function fakePi(entries = []) {
   harness(pi); pi.start(entries); return pi;
 }
 const call = async (pi, name, input) => JSON.parse((await pi.tools.get(name).execute("id", input)).content[0].text);
+const startMission = (pi, objective = "Check domains.") => pi.commands.get("goal").handler(objective, {});
 const latest = (pi, name) => pi.entries.filter((entry) => entry.customType === name).at(-1)?.data;
 const create = { action: "create", operation_id: "O-G", objective: "Check domains.", required_task_ids: ["T-A", "T-B"], heads: [{ head_id: "H-A", domain: "architecture", task_ids: ["T-A"] }] };
 const coordinator = (action, extra = {}) => JSON.stringify({ version: 1, operation_id: "O-G", action, reason: "The Coordinator needs advice.", ...extra });
@@ -25,7 +26,7 @@ const head = JSON.stringify({ version: 1, operation_id: "O-G", head_id: "H-A", a
 const wait = async (condition) => { for (let i = 0; i < 100 && !condition(); i++) await new Promise((resolve) => setTimeout(resolve, 2)); assert.ok(condition()); };
 
 test("Operation setup persists bounded Task intents and shared constraints for Head context", async () => {
-  const pi = fakePi();
+  const pi = fakePi(); await startMission(pi);
   const result = await call(pi, "pi_harness_operation", { ...create, constraints: ["Do not integrate."], task_intents: { "T-A": "Inspect architecture.", "T-B": "Unrelated task." } });
   assert.equal(result.status, "open");
   assert.equal(result.constraints, undefined);
@@ -36,7 +37,7 @@ test("Operation setup persists bounded Task intents and shared constraints for H
 });
 
 test("Head Registry and bounded HeadState survive checkpoint and reload; no transcript persists", async () => {
-  const pi = fakePi(); await call(pi, "pi_harness_operation", create);
+  const pi = fakePi(); await startMission(pi); await call(pi, "pi_harness_operation", create);
   const registry = latest(pi, "pi-harness-head-registry-state");
   assert.deepEqual(registry["O-G"].heads["H-A"].task_ids, ["T-A"]);
   let turns = 0;
@@ -59,7 +60,7 @@ test("Head Registry and bounded HeadState survive checkpoint and reload; no tran
 });
 
 test("Session switch prevents old Head result from changing new session", async () => {
-  const pi = fakePi(); await call(pi, "pi_harness_operation", create);
+  const pi = fakePi(); await startMission(pi); await call(pi, "pi_harness_operation", create);
   let activeHead;
   let serial = 0;
   pi.events.on("subagents:rpc:spawn", (request) => {

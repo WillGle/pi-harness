@@ -3,6 +3,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import harness from "../extensions/pi-harness.ts";
 import { OPERATION_ENTRY } from "../lib/operation.mjs";
+import { MISSION_ENTRY, createMission } from "../lib/mission.mjs";
+import { GOAL_ENTRY, goalState } from "../lib/state.mjs";
 import { TASK_GRAPH_ENTRY } from "../lib/task-graph.mjs";
 
 function makePi(entries) {
@@ -26,6 +28,9 @@ function makePi(entries) {
 }
 
 async function call(pi, name, input) { return JSON.parse((await pi.tools.get(name).execute("test", input)).content[0].text); }
+function activeMissionEntries(objective) {
+  return [{ customType: GOAL_ENTRY, data: goalState(objective) }, { customType: MISSION_ENTRY, data: { "M-test": createMission({ mission_id: "M-test", objective }) } }];
+}
 
 test("Commander context receives the Harness language contract without skill selection", () => {
   const pi = makePi([]);
@@ -34,7 +39,7 @@ test("Commander context receives the Harness language contract without skill sel
 });
 
 test("Commander-facing Operation tools cannot accept TaskResults or expose TaskResult contents", async () => {
-  const entries = [];
+  const entries = activeMissionEntries("Inspect the Coordinator.");
   const pi = makePi(entries);
   const created = await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-test", objective: "Inspect the Coordinator.", required_task_ids: ["T-test"] });
   assert.equal(created.operation_id, "O-test");
@@ -54,23 +59,37 @@ test("Commander-facing Operation tools cannot accept TaskResults or expose TaskR
 });
 
 test("Commander records an explicit terminal Operation disposition after TaskOrder waiver", async () => {
-  const entries = [], pi = makePi(entries);
+  const entries = activeMissionEntries("Inspect the Coordinator."), pi = makePi(entries);
   await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-waive", objective: "Inspect the Coordinator.", required_task_ids: ["T-waive"] });
-  await call(pi, "pi_harness_operation", { action: "waive", operation_id: "O-waive", task_id: "T-waive", authority: "Commander", reason: "The requirement is removed." });
-  const terminal = await call(pi, "pi_harness_operation", { action: "waive_operation", operation_id: "O-waive", authority: "Commander", reason: "All remaining TaskOrders are waived." });
+  await call(pi, "pi_harness_operation", { action: "waive", operation_id: "O-waive", task_id: "T-waive", authority_type: "commander", reason: "The requirement is removed." });
+  const terminal = await call(pi, "pi_harness_operation", { action: "waive_operation", operation_id: "O-waive", authority_type: "commander", reason: "All remaining TaskOrders are waived." });
   assert.equal(terminal.status, "waived");
   const snapshot = entries.filter((entry) => entry.customType === TASK_GRAPH_ENTRY).at(-1).data;
   assert.equal(snapshot.operations["O-waive"].status, "waived");
-  assert.deepEqual(snapshot.operations["O-waive"].operation_disposition, { kind: "waived", authority: "Commander", reason: "All remaining TaskOrders are waived." });
+  assert.equal(snapshot.operations["O-waive"].operation_disposition.kind, "waived");
+  assert.equal(snapshot.operations["O-waive"].operation_disposition.authority_type, "commander");
+  assert.match(snapshot.operations["O-waive"].operation_disposition.timestamp, /^\d{4}-\d{2}-\d{2}T/);
 });
 
 test("Commander creates a task-less planning Operation", async () => {
-  const entries = [], pi = makePi(entries);
+  const entries = activeMissionEntries("Implement safely."), pi = makePi(entries);
   const created = await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-plan", objective: "Implement safely.", allowed_policy_ids: ["worker-write"] });
   assert.equal(created.planning, true);
   const snapshot = entries.filter((entry) => entry.customType === TASK_GRAPH_ENTRY).at(-1).data;
   assert.equal(Object.hasOwn(snapshot.operations["O-plan"], "required_task_ids"), false);
   assert.deepEqual(snapshot.task_graphs["O-plan"].nodes, {});
+});
+
+test("Commander cannot create an Operation without an active Mission", async () => {
+  const pi = makePi([]);
+  await assert.rejects(() => pi.tools.get("pi_harness_operation").execute("test", { action: "create", operation_id: "O-orphan", objective: "Inspect safely." }), /requires one active Mission/);
+});
+
+test("Commander creates an Operation from exactly one active Mission without a Goal", async () => {
+  const entries = [{ customType: MISSION_ENTRY, data: { "M-only": createMission({ mission_id: "M-only", objective: "Restore safely." }) } }];
+  const pi = makePi(entries);
+  const created = await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-restored", objective: "Restore safely.", required_task_ids: ["T-restored"] });
+  assert.equal(created.mission_id, "M-only");
 });
 
 test("legacy direct dispatch is disabled and cannot promote a TaskResult to the Commander", async () => {

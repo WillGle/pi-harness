@@ -157,7 +157,7 @@ export default function harness(pi: Pi): void {
     pi.setActiveTools?.(activeTools.filter((name: string) => !PACKAGE_TOOLS.has(name)));
     const entries = ctx.sessionManager?.getEntries?.() ?? [];
     plan = restore(entries, PLAN_ENTRY) ?? plan;
-    goal = restore(entries, GOAL_ENTRY) ?? goal;
+    goal = restore(entries, GOAL_ENTRY);
     const schedulerSnapshot = restore(entries, TASK_GRAPH_ENTRY);
     operations = schedulerSnapshot ? schedulerSnapshot.operations : restore(entries, OPERATION_ENTRY) ?? {};
     const legacyCoordinator = restore(entries, COORDINATOR_ENTRY) ?? {};
@@ -428,8 +428,8 @@ export default function harness(pi: Pi): void {
   pi.registerTool?.({
     name: "pi_harness_operation", label: "Pi Harness Operation handoff",
     description: "Create, terminalize, or read a bounded Commander-safe Operation summary. Only the Harness Coordinator may dispatch TaskOrders, accept or reject TaskResults, or accept Operation Acceptance Criteria. Operation completion never completes the Mission.",
-    parameters: Type.Object({ action: Type.Union([Type.Literal("create"), Type.Literal("status"), Type.Literal("supersede"), Type.Literal("waive"), Type.Literal("transfer"), Type.Literal("waive_operation")]), operation_id: Type.String(), objective: Type.Optional(Type.String()), acceptance_criteria: Type.Optional(Type.Array(Type.String())), allowed_policy_ids: Type.Optional(Type.Array(Type.String())), constraints: Type.Optional(Type.Array(Type.String())), task_id: Type.Optional(Type.String()), replacement_operation_id: Type.Optional(Type.String()), replacement_task_id: Type.Optional(Type.String()), authority: Type.Optional(Type.String()), reason: Type.Optional(Type.String()) }),
-    execute: async (_id: string, input: { action: "create" | "status" | "supersede" | "waive" | "transfer" | "waive_operation"; operation_id: string; objective?: string; acceptance_criteria?: string[]; allowed_policy_ids?: string[]; constraints?: string[]; task_id?: string; replacement_operation_id?: string; replacement_task_id?: string; authority?: string; reason?: string }) => {
+    parameters: Type.Object({ action: Type.Union([Type.Literal("create"), Type.Literal("status"), Type.Literal("supersede"), Type.Literal("waive"), Type.Literal("transfer"), Type.Literal("waive_operation")]), operation_id: Type.String(), objective: Type.Optional(Type.String()), acceptance_criteria: Type.Optional(Type.Array(Type.String())), allowed_policy_ids: Type.Optional(Type.Array(Type.String())), constraints: Type.Optional(Type.Array(Type.String())), task_id: Type.Optional(Type.String()), replacement_operation_id: Type.Optional(Type.String()), replacement_task_id: Type.Optional(Type.String()), authority_type: Type.Optional(Type.Union([Type.Literal("commander"), Type.Literal("user")])), reason: Type.Optional(Type.String()) }),
+    execute: async (_id: string, input: { action: "create" | "status" | "supersede" | "waive" | "transfer" | "waive_operation"; operation_id: string; objective?: string; acceptance_criteria?: string[]; allowed_policy_ids?: string[]; constraints?: string[]; task_id?: string; replacement_operation_id?: string; replacement_task_id?: string; authority_type?: "commander" | "user"; reason?: string }) => {
       const id = input.operation_id;
       const action = input.action as string;
       if (!["create", "status", "supersede", "waive", "transfer", "waive_operation"].includes(action)) throw new Error("Only the Harness Coordinator may accept or reject a TaskResult or Operation Acceptance Criterion");
@@ -439,12 +439,9 @@ export default function harness(pi: Pi): void {
         // Persisted and direct-program legacy callers can still restore a static Operation.
         // The public schema does not expose this compatibility path.
         const legacy = input as any;
-        let mission = Object.values(missions).find((entry: any) => entry.status === "active" && entry.objective === goal?.objective) as any;
-        if (!mission) {
-          const mission_id = legacyMissionId(id);
-          mission = createMission({ mission_id, objective: goal?.objective ?? input.objective });
-          missions = { ...missions, [mission_id]: mission };
-        }
+        const activeMissions = Object.values(missions).filter((entry: any) => entry.status === "active") as any[];
+        if (activeMissions.length !== 1) throw new Error("Operation creation requires one active Mission");
+        const mission = activeMissions[0];
         const operation = legacy.required_task_ids !== undefined
           ? createOperation({ operation_id: id, mission_id: mission.mission_id, objective: input.objective, required_task_ids: legacy.required_task_ids, acceptance_criteria: input.acceptance_criteria, dependencies: legacy.dependencies, constraints: input.constraints, task_intents: legacy.task_intents, task_specs: legacy.task_specs })
           : createOperation({ operation_id: id, mission_id: mission.mission_id, objective: input.objective, acceptance_criteria: input.acceptance_criteria, allowed_policy_ids: input.allowed_policy_ids ?? ["research-read", "scout-read", "worker-write"], constraints: input.constraints, planning: true });
@@ -467,20 +464,20 @@ export default function harness(pi: Pi): void {
       if (!operation) throw new Error("Unknown Operation");
       validateTaskGraph(taskGraphs[id], operation);
       if (["transfer", "waive_operation"].includes(action)) {
-        if (!input.authority?.trim() || !input.reason?.trim()) throw new Error("Operation terminal disposition requires authority and reason");
+        if (!input.authority_type || !input.reason?.trim()) throw new Error("Operation terminal disposition requires authority type and reason");
         const status = action === "transfer" ? "transferred" : "waived";
-        operations = { ...operations, [id]: terminalizeOperation(operation, taskGraphs[id], { status, authority: input.authority, reason: input.reason }) };
+        operations = { ...operations, [id]: terminalizeOperation(operation, taskGraphs[id], { status, authority_type: input.authority_type, reason: input.reason }) };
         persistScheduler();
         return { content: [{ type: "text", text: JSON.stringify({ version: 1, mission_id: operation.mission_id, operation_id: id, status, situation_board: missionBoard() }) }] };
       }
       if (["supersede", "waive"].includes(action)) {
-        if (operation.planning || !input.task_id || !input.authority?.trim() || !input.reason?.trim()) throw new Error("Task supersession or waiver requires a materialized TaskOrder, authority, and reason");
+        if (operation.planning || !input.task_id || !input.authority_type || !input.reason?.trim()) throw new Error("Task supersession or waiver requires a materialized TaskOrder, authority type, and reason");
         let nextGraph;
         if (action === "supersede") {
           const replacement = input.replacement_operation_id && operations[input.replacement_operation_id];
           if (!replacement || !input.replacement_task_id || replacement.mission_id !== operation.mission_id || !replacement.required_task_ids?.includes(input.replacement_task_id)) throw new Error("Task supersession requires a persisted replacement TaskOrder in the same Mission");
-          nextGraph = supersedeGraphTask(taskGraphs[id], operation, input.task_id, { authority: input.authority, reason: input.reason, replacement_mission_id: operation.mission_id, replacement_operation_id: replacement.operation_id, replacement_task_id: input.replacement_task_id });
-        } else nextGraph = waiveGraphTask(taskGraphs[id], operation, input.task_id, { authority: input.authority, reason: input.reason });
+          nextGraph = supersedeGraphTask(taskGraphs[id], operation, input.task_id, { authority_type: input.authority_type, reason: input.reason, replacement_mission_id: operation.mission_id, replacement_operation_id: replacement.operation_id, replacement_task_id: input.replacement_task_id });
+        } else nextGraph = waiveGraphTask(taskGraphs[id], operation, input.task_id, { authority_type: input.authority_type, reason: input.reason });
         taskGraphs = { ...taskGraphs, [id]: nextGraph };
         persistScheduler();
         return { content: [{ type: "text", text: JSON.stringify({ version: 1, mission_id: operation.mission_id, operation_id: id, task_id: input.task_id, disposition: action === "supersede" ? "superseded" : "waived", situation_board: missionBoard() }) }] };

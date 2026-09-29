@@ -2,9 +2,9 @@
 
 ## Scope and evidence
 
-The source findings below were reported against `main` at `2042b1a`. This session did not independently re-audit that source snapshot. Implementation work used checkout `main` at `4e9f270`, which includes one later ACP MCP commit, plus uncommitted working-tree changes.
+The historical source findings below were reported against `main` at `2042b1a`. They are not a current source snapshot.
 
-Linux verification ran in the local NixOS environment with Node.js `v22.22.2` and Pi `0.87.1`. The active Pi runtime is the project-patched Nix build. Ubuntu 24.04 GitHub Actions passed on commit `8196c5b96cc2c639d7b1c04624ab8dd82ec978cb` (run [#36453820891](https://github.com/WillGle/pi-harness/actions/runs/36453820891)). A separate Ubuntu 24.04 Docker run with Node.js `v22.19.0` and npm-installed stock Pi `0.87.1` passed the workflow-equivalent steps on the NixOS host kernel.
+The current GitHub baseline is `0b61e03`. Ubuntu 24.04 GitHub Actions passed on that commit. The current source also includes Mission accountability work after this audit addendum. It requires separate source and live managed-proof review. Linux verification in this addendum ran in the local NixOS environment with Node.js `v22.22.2` and Pi `0.87.1`. The active Pi runtime is the project-patched Nix build.
 
 ## #19 — Coordinator-owned decomposition
 

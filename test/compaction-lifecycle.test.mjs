@@ -172,18 +172,20 @@ test("Mission cannot complete while it owns an unmaterialized planning Operation
 
 test("Mission Situation Board is a replaceable bounded context projection", async () => {
   const f = fixture();
+  await f.command("goal", "Track this Mission.");
   f.session.appendMessage({ role: "user", content: "Track this Mission.", timestamp: 1 });
   await f.pi.tools.get("pi_harness_operation").execute("id", { action: "create", operation_id: "O-board", objective: "Inspect the source.", required_task_ids: ["T-board"] });
   f.boundary();
   const board = f.session.getEntries().find((entry) => entry.type === "custom_message" && entry.customType === "pi-harness-situation-board");
   assert.ok(board);
-  assert.match(board.content, /Mission M-legacy-/);
+  assert.match(board.content, /Mission M-/);
   assert.match(board.content, /TaskOrder T-board: ready/);
   assert.equal(board.display, false);
 });
 
 test("native compaction satisfies pending request without a second Harness compaction", async () => {
   const f = fixture();
+  await f.command("goal", "Preserve the TaskGraph.");
   await f.command("harness-compact", "set 75");
   await f.pi.tools.get("pi_harness_operation").execute("id", { action: "create", operation_id: "O-1", objective: "Inspect the source.", required_task_ids: ["T-1"] });
   f.setPercent(76); f.emit("context");

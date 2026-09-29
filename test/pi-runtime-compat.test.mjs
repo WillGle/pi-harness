@@ -204,3 +204,11 @@ test("telemetry records runtime metrics without inventing provider cost or missi
   const attributed=contextTelemetry([{customType:"pi-harness-child-usage",data:{mission_id:"M-1",operation_id:"O-1",task_id:"T-1",attempt_id:"A-O-1-T-1-01",role:"worker",usage:{input:3,output:2,cacheRead:1,cacheWrite:0,totalTokens:6,cost:{total:0.02}}}}]);
   assert.deepEqual(attributed.usage_attribution,[{mission_id:"M-1",operation_id:"O-1",task_id:"T-1",attempt_id:"A-O-1-T-1-01",role:"worker",input_tokens:3,output_tokens:2,cache_read_tokens:1,cache_write_tokens:0,total_tokens:6,runtime_catalog_cost:0.02}]);
 });
+
+test("Operation-to-Mission telemetry requires an explicit terminal Operation disposition",()=>{
+  const taskGraphs={"O-1":{nodes:{"T-1":{scheduler_status:"waived"}}}};
+  const open={"O-1":{operation_id:"O-1",status:"open",required_task_ids:["T-1"]}};
+  assert.equal(contextTelemetry([],undefined,{operations:open,taskGraphs}).promotions_operation_to_mission,0);
+  const waived={"O-1":{...open["O-1"],status:"waived",operation_disposition:{kind:"waived",authority_type:"commander",reason:"The requirement is removed.",timestamp:"2026-01-01T00:00:00.000Z"}}};
+  assert.equal(contextTelemetry([],undefined,{operations:waived,taskGraphs}).promotions_operation_to_mission,1);
+});
