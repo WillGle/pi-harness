@@ -17,7 +17,6 @@ import { appendProjectMemory, clearProjectMemory, loadProjectMemory } from "../l
 import { cancelCoordinateTasks, executeCoordinateTask, executeCoordinatorTurn, hasActiveCoordinateTasks, managedTaskTimeout, validateTask } from "../lib/coordinator.mjs";
 import { COMMANDER_LANGUAGE_POLICY } from "../lib/agent-english.mjs";
 import { PROACTIVE_COMPACT_ENTRY, proactiveCompactionPolicy, restoreProactivePolicy, setProactiveThreshold } from "../lib/compaction-policy.mjs";
-import { HEAD_REGISTRY_ENTRY, HEAD_STATE_ENTRY, createHeadRegistry, validateHeadRegistry, validateHeadState } from "../lib/domain-head.mjs";
 import { COORDINATOR_ENTRY, coordinatorState, parallelTaskLimit, runOperation } from "../lib/operation-runner.mjs";
 import { promoteTaskResult } from "../lib/communication.mjs";
 import { OPERATION_ENTRY, createOperation, terminalizeOperation } from "../lib/operation.mjs";
@@ -46,8 +45,6 @@ export default function harness(pi: Pi): void {
   let attemptLedger: Record<string, any> = {};
   let coordinatorStates: Record<string, ReturnType<typeof coordinatorState>> = {};
   let taskGraphs: Record<string, ReturnType<typeof createTaskGraph>> = {};
-  let headRegistries: Record<string, ReturnType<typeof createHeadRegistry>> = {};
-  let headStates: Record<string, Record<string, any>> = {};
   let missionGoals: Record<string, any> = {};
   let selectedMissionId: string | undefined;
   let controlLease: any;
@@ -80,7 +77,7 @@ export default function harness(pi: Pi): void {
     attemptLedger = reconcileAttemptLedger(attemptLedger, operations, taskGraphs);
     validateMissionOwnership(missions, operations, taskGraphs, attemptLedger);
     writeControlState({ missions, operations, task_graphs: taskGraphs, attempt_ledger: attemptLedger, mission_goals: missionGoals,
-      coordinator_states: coordinatorStates, head_registries: headRegistries, head_states: headStates }, controlLease, controlCwd);
+      coordinator_states: coordinatorStates }, controlLease, controlCwd);
   };
   const ensureControlLease = async (cwd = process.cwd()) => {
     const projectCwd = resolve(cwd ?? process.cwd());
@@ -235,16 +232,7 @@ export default function harness(pi: Pi): void {
     validateMissionOwnership(missions, operations, taskGraphs, attemptLedger);
     coordinatorStates = controlSnapshot?.coordinator_states ?? Object.fromEntries(Object.entries(legacyCoordinator).map(([id, state]: [string, any]) => [id, {
       version: 1, operation_id: id, turns: state.turns ?? 0, decisions: (state.decisions ?? []).slice(-7), blocker: state.blocker ?? null,
-      ...(state.consultations_since_progress !== undefined ? { consultations_since_progress: state.consultations_since_progress } : {}),
     }]));
-    headRegistries = controlSnapshot?.head_registries ?? restore(entries, HEAD_REGISTRY_ENTRY) ?? {};
-    headStates = controlSnapshot?.head_states ?? restore(entries, HEAD_STATE_ENTRY) ?? {};
-    for (const [id, registry] of Object.entries(headRegistries)) {
-      if (!operations[id]) throw new Error("Head Registry has no owning Operation");
-      validateHeadRegistry(registry, operations[id]);
-      for (const state of Object.values(headStates[id] ?? {})) validateHeadState(state, registry);
-    }
-    if (Object.keys(headStates).some((id) => !headRegistries[id] || Object.keys(headStates[id]).some((headId) => headId !== headStates[id][headId]?.head_id))) throw new Error("HeadState has no registered Head");
     if (Object.keys(coordinatorStates).length) pi.appendEntry?.(COORDINATOR_ENTRY, coordinatorStates);
     if (Object.keys(missions).length) persistMission();
     if (Object.keys(operations).length) persistScheduler();
@@ -327,8 +315,6 @@ export default function harness(pi: Pi): void {
     pi.appendEntry?.(OPERATION_ENTRY, operations);
     persistMission();
     pi.appendEntry?.(COORDINATOR_ENTRY, coordinatorStates);
-    pi.appendEntry?.(HEAD_REGISTRY_ENTRY, headRegistries);
-    pi.appendEntry?.(HEAD_STATE_ENTRY, headStates);
     persistScheduler();
     saveCompactState(event);
   };
@@ -566,9 +552,6 @@ export default function harness(pi: Pi): void {
           : createOperation({ operation_id: id, mission_id: mission.mission_id, objective: input.objective, acceptance_criteria: input.acceptance_criteria, allowed_policy_ids: input.allowed_policy_ids ?? ["research-read", "scout-read", "worker-write"], constraints: input.constraints, planning: true });
         if (!operation.planning && operation.required_task_ids.some((taskId: string) => Object.values(operations).some((entry: any) => entry.required_task_ids?.includes(taskId)))) throw new Error("A TaskOrder ID already belongs to another Operation");
         const graph = createTaskGraph(operation);
-        const registry = createHeadRegistry(operation, legacy.required_task_ids !== undefined ? (legacy.heads ?? []) : []);
-        headRegistries = { ...headRegistries, [id]: registry };
-        pi.appendEntry?.(HEAD_REGISTRY_ENTRY, headRegistries);
         operations = { ...operations, [id]: operation };
         taskGraphs = { ...taskGraphs, [id]: graph };
         missions = attachOperation(missions, mission.mission_id, id);
@@ -629,14 +612,12 @@ export default function harness(pi: Pi): void {
       const runId = randomUUID();
       const runEpoch = sessionEpoch;
       activeOperationRuns.set(id, { controller, goalGroup: goal?.status === "active" ? goalGroupId : undefined });
-      const save = (nextOperation: ReturnType<typeof createOperation>, state: ReturnType<typeof coordinatorState>, graph: ReturnType<typeof createTaskGraph>, nextHeads: Record<string, any>) => {
+      const save = (nextOperation: ReturnType<typeof createOperation>, state: ReturnType<typeof coordinatorState>, graph: ReturnType<typeof createTaskGraph>) => {
         if (runEpoch !== sessionEpoch) return;
         validateTaskGraph(graph, nextOperation);
         operations = { ...operations, [id]: nextOperation };
         taskGraphs = { ...taskGraphs, [id]: graph };
         coordinatorStates = { ...coordinatorStates, [id]: state };
-        headStates = { ...headStates, [id]: nextHeads };
-        pi.appendEntry?.(HEAD_STATE_ENTRY, headStates);
         pi.appendEntry?.(OPERATION_ENTRY, operations);
         pi.appendEntry?.(COORDINATOR_ENTRY, coordinatorStates);
         persistScheduler();
@@ -653,11 +634,10 @@ export default function harness(pi: Pi): void {
       try {
         const report = await runOperation(operation, {
           turn: (prompt: string) => executeCoordinatorTurn(pi, prompt, { cwd: runCwd, onUsage: (usage: any) => recordUsage(usage, { role: "coordinator" }), model: input.model, groupId: runId, signal: controller.signal }),
-          headTurn: (prompt: string) => executeCoordinatorTurn(pi, prompt, { cwd: runCwd, onUsage: (usage: any) => recordUsage(usage, { role: "head" }), role: "head", groupId: runId, signal: controller.signal }),
           dispatch: async (task: any, progress: any) => promoteTaskResult(await executeCoordinateTask(pi, validateTask(task), { cwd: runCwd, groupId: runId, signal: controller.signal, modelRegistry: ctx?.modelRegistry,
             onVerificationStart: progress.onVerificationStart, timeout: managedTaskTimeout(task.owner), reviewerTimeout: managedTaskTimeout("reviewer"), onUsage: (usage: any, provenance: Record<string, any>) => recordUsage(usage, { task_id: task.task_id, ...provenance }) })),
           save,
-        }, { state: coordinatorStates[id] ?? coordinatorState(operation), graph: taskGraphs[id], registry: headRegistries[id], headStates: headStates[id] ?? {}, mission: operations[id].mission_id ? { mission_id: operations[id].mission_id, objective: missions[operations[id].mission_id]?.objective } : goal?.status === "active" ? goal.objective : undefined, cwd: runCwd, onUsage: recordUsage, signal: controller.signal, parallelLimit });
+        }, { state: coordinatorStates[id] ?? coordinatorState(operation), graph: taskGraphs[id], mission: operations[id].mission_id ? { mission_id: operations[id].mission_id, objective: missions[operations[id].mission_id]?.objective } : goal?.status === "active" ? goal.objective : undefined, cwd: runCwd, onUsage: recordUsage, signal: controller.signal, parallelLimit });
         return { content: [{ type: "text", text: JSON.stringify(report) }] };
       } finally { signal?.removeEventListener("abort", abort); if (activeOperationRuns.get(id)?.controller === controller) activeOperationRuns.delete(id); }
     },

@@ -39,7 +39,7 @@ test("cancellation aborts both active Reviewers without a ghost-running Task", a
   });
   const operation = createOperation({ operation_id: "O-P", objective: "Review reports.", task_specs: Object.fromEntries(tasks.map(({task_id,scope,...spec})=>[task_id,spec])), required_task_ids: ["T-1", "T-2"], task_intents: { "T-1": "Review T-1", "T-2": "Review T-2" } });
   const run = runOperation(operation, {
-    turn: async () => JSON.stringify({ version: 1, operation_id: "O-P", action: "dispatch_batch", reason: "Both Tasks are ready.", tasks }),
+    turn: async () => JSON.stringify({ version: 1, operation_id: "O-P", action: "dispatch_batch", reason: "Both Tasks are ready.", task_ids: tasks.map(({ task_id }) => task_id) }),
     dispatch: (task) => executeCoordinateTask({ events }, task, { cwd: process.cwd(), groupId: "O-P", signal: controller.signal, timeout: 1500, rpcTimeout: 1000 }).then((record) => record.taskResult),
     save: (_op, _state, graph) => { last = graph; },
   }, { signal: controller.signal });
@@ -70,7 +70,7 @@ test("parallel default/security Reviewers see only their own Task Evidence and m
   const op = createOperation({ operation_id: "O-P", objective: "Review reports.", task_specs: Object.fromEntries(tasks.map(({task_id,scope,...spec})=>[task_id,spec])), required_task_ids: ["T-1", "T-2"], task_intents: { "T-1": "Review T-1.", "T-2": "Review T-2." } });
   try {
     const run = runOperation(op, {
-      turn: async (_prompt) => requested.length === 0 ? JSON.stringify({ version: 1, operation_id: "O-P", action: "dispatch_batch", reason: "Both Tasks are ready.", tasks })
+      turn: async (_prompt) => requested.length === 0 ? JSON.stringify({ version: 1, operation_id: "O-P", action: "dispatch_batch", reason: "Both Tasks are ready.", task_ids: tasks.map(({ task_id }) => task_id) })
         : JSON.stringify({ version: 1, operation_id: "O-P", action: "report", reason: "The Coordinator will accept each Task separately." }),
       dispatch: (task) => executeCoordinateTask({ events }, task, { cwd: process.cwd(), timeout: 1500, rpcTimeout: 1000, modelRegistry: { getAvailable: () => [{ provider: "openai", id: "gpt-daybreak-blue-latest" }] } }).then((record) => record.taskResult),
       save: (operation, _state, graph) => { final = { operation, graph }; },

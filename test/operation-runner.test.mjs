@@ -34,6 +34,7 @@ test("Coordinator packet contains bounded semantic state, not transcripts", () =
   assert.match(coordinatorPrompt(packet), /Harness uses each exact OperationBrief\.task_intents value as the scope/);
   assert.doesNotMatch(coordinatorPrompt(packet), /ASD-STE100-derived Agent English/, "stable Coordinator doctrine belongs in the Coordinator profile");
   assert.match(coordinatorPrompt(packet), /Harness resolves trusted registered TaskSpecs/);
+  assert.match(coordinatorPrompt(packet), /For dispatch return task_id only\. For dispatch_batch return task_ids/);
   assert.ok(!coordinatorPrompt(packet).includes("raw Worker transcript"));
   const profile = readFileSync(".pi/agents/coordinator.md", "utf8");
   assert.match(profile, /tools: read/);
@@ -90,29 +91,28 @@ test("pi-subagents 0.19.0 RPC cannot safely resume a completed Coordinator sessi
 });
 
 test("malformed or unauthorized CoordinatorDecision fails closed", () => {
-  for (const raw of ["not JSON", decision("dispatch", { task: task("UNKNOWN") }), decision("dispatch", { task: { ...task("T-1"), owner: "write Worker", permission: "write" } }), decision("dispatch", { task: { task_id: "T-1", owner: "research", scope: "Inspect.", permission: "read", verification: "Check." } }), decision("accept_task", { task_id: "UNKNOWN" }), decision("report", { mission_complete: true }), decision("accept_task", { task_id: "T-1", task: task("T-1") }), JSON.stringify({ version: 1, operation_id: "O-1", action: "block", blocked_action: "dispatch", required_condition: "the registered Task intent is available" }), JSON.stringify({ ...JSON.parse(decision("report")), operation_id: "O-foreign" })]) assert.throws(() => parseCoordinatorDecision(raw, op()));
+  for (const raw of ["not JSON", decision("dispatch", { task_id: "UNKNOWN" }), decision("dispatch", { task: task("T-1") }), decision("accept_task", { task_id: "UNKNOWN" }), decision("report", { mission_complete: true }), decision("accept_task", { task_id: "T-1", task: task("T-1") }), JSON.stringify({ version: 1, operation_id: "O-1", action: "block", blocked_action: "dispatch", required_condition: "the registered Task intent is available" }), JSON.stringify({ ...JSON.parse(decision("report")), operation_id: "O-foreign" })]) assert.throws(() => parseCoordinatorDecision(raw, op()));
   const state = coordinatorState(op());
   assert.deepEqual(Object.keys(state).sort(), ["blocker", "decisions", "operation_id", "turns", "version"]);
 });
 
-test("Coordinator decision repair is bounded; dispatch uses the registered intent and shared Constraints", async () => {
+test("Coordinator decision repair is bounded; ID-only dispatch uses the registered TaskSpec", async () => {
   const operation = createOperation({ operation_id: "O-1", objective: "Inspect the registered source.", required_task_ids: ["T-1"], task_specs: { "T-1": { owner: "research", permission: "read", verification: "Check the report.", acceptance_criteria: ["The report identifies the source."] } }, constraints: ["Do not run shell commands."], task_intents: { "T-1": "Inspect the exact registered source." } });
-  const validTask = { task_id: "T-1", owner: "research", scope: "Inspect the exact registered source.", permission: "read", verification: "Check the report.", acceptance_criteria: ["The report identifies the source."] };
-  assert.throws(() => parseCoordinatorDecision(decision("dispatch", { task: { ...validTask, scope: "Coordinator changed the exact scope." } }), operation), /registered Task intent/);
-  assert.throws(() => parseCoordinatorDecision(decision("dispatch", { task: { ...validTask, constraints: ["Coordinator added a Constraint."] } }), operation), /shared Operation Constraints/);
+  assert.throws(() => parseCoordinatorDecision(decision("dispatch", { task_id: "UNKNOWN" }), operation), /Unknown registered Task ID/);
+  assert.throws(() => parseCoordinatorDecision(decision("dispatch", { task_id: "T-1", task: task("T-1") }), operation), /invalid or belongs to a foreign Operation/);
   const unscoped = createOperation({ operation_id: "O-1", objective: "No registered intent.", required_task_ids: ["T-1"] });
-  assert.throws(() => parseCoordinatorDecision(decision("dispatch", { task: validTask }), unscoped), /registered Task intent/);
+  assert.throws(() => parseCoordinatorDecision(decision("dispatch", { task_id: "T-1" }), unscoped), /registered Task intent/);
 
   const prompts = [], snapshots = [];
   let dispatched;
   const report = await runOperation(operation, {
     turn: async (prompt) => {
       prompts.push(prompt);
-      if (prompts.length === 1) return decision("dispatch", { task: { ...validTask, scope: "Coordinator changed the exact scope." } });
+      if (prompts.length === 1) return decision("dispatch", { task_id: "UNKNOWN" });
       if (prompts.length === 2) {
-        assert.match(prompt, /Repair Required:.*registered Task intent/);
+        assert.match(prompt, /Repair Required:.*Unknown registered Task ID/);
         assert.ok(!prompt.includes("Coordinator changed the exact scope."));
-        return decision("dispatch", { task: validTask });
+        return decision("dispatch", { task_id: "T-1" });
       }
       return decision("accept_task", { task_id: "T-1" });
     },
@@ -208,7 +208,7 @@ test("Coordinator repairs consume the same persisted turn limit", async () => {
 test("Coordinator cannot dispatch an unregistered TaskOrder", async () => {
   let spawns = 0;
   const report = await runOperation(op(), {
-    turn: async () => decision("dispatch", { task: task("T-X") }),
+    turn: async () => decision("dispatch", { task_id: "T-X" }),
     dispatch: async () => { spawns++; throw new Error("an unregistered TaskOrder must not spawn"); },
   });
   assert.equal(report.status, "blocked");
@@ -218,7 +218,7 @@ test("Coordinator cannot dispatch an unregistered TaskOrder", async () => {
 
 test("Harness rejects Dependency bypass and unverified acceptance", async () => {
   const reports = [];
-  for (const proposed of [decision("dispatch", { task: task("T-2") }), decision("accept_task", { task_id: "T-1" }), decision("dispatch", { task: { ...task("T-1"), owner: "research", permission: "write" } })]) {
+  for (const proposed of [decision("dispatch", { task_id: "T-2" }), decision("accept_task", { task_id: "T-1" }), decision("dispatch", { task: { ...task("T-1"), owner: "research", permission: "write" } })]) {
     let spawns = 0;
     const report = await runOperation(op(), { turn: async () => proposed, dispatch: async () => { spawns++; throw Error("must not execute"); } });
     assert.equal(report.status, "blocked");
@@ -233,7 +233,7 @@ test("Verification Status enters verifying while Execution Status stays separate
   const snapshots = [];
   let turn = 0;
   const report = await runOperation(operation, {
-    turn: async () => turn++ === 0 ? decision("dispatch", { task: task("T-1") }) : decision("accept_task", { task_id: "T-1" }),
+    turn: async () => turn++ === 0 ? decision("dispatch", { task_id: "T-1" }) : decision("accept_task", { task_id: "T-1" }),
     dispatch: async (order, progress) => {
       progress.onVerificationStart();
       return { version: 1, operation_id: "O-1", task_id: order.task_id, execution_status: "execution_complete", verification_status: "verified", evidence_refs: [] };
@@ -272,7 +272,7 @@ test("timed-out Worker disposition is bounded and carried into the OperationRepo
   const child_disposition = { branch_status: "preserved", branch: "pi-agent-partial", commit_sha: "b".repeat(40), commit_count: 1, worktree_status: "unknown" };
   const snapshots = [];
   const report = await runOperation(operation, {
-    turn: async () => decision("dispatch", { task: { ...task("T-1"), owner: "worker", scope: operation.task_intents["T-1"], permission: "write" } }),
+    turn: async () => decision("dispatch", { task_id: "T-1" }),
     dispatch: async () => { throw Object.assign(new Error("private child details and /tmp/private/worktree"), { code: "HARNESS_CHILD_SETTLEMENT_TIMEOUT", child_disposition }); },
     save: (_operation, _state, graph) => snapshots.push(JSON.parse(JSON.stringify(graph))),
   });
@@ -287,7 +287,7 @@ test("cancelled Worker wave blocks promotion but retains the reported branch dis
   const operation = createOperation({ operation_id: "O-1", objective: "Cancel a partial Worker result.", task_specs: { "T-1": { ...fixtureSpecs({task_intents:{"T-1":"Inspect."}})["T-1"], owner: "worker", permission: "write" } }, required_task_ids: ["T-1"], task_intents: { "T-1": "Inspect the partial Worker branch." } });
   const controller = new AbortController();
   const report = await runOperation(operation, {
-    turn: async () => decision("dispatch", { task: { ...task("T-1"), owner: "worker", scope: operation.task_intents["T-1"], permission: "write" } }),
+    turn: async () => decision("dispatch", { task_id: "T-1" }),
     dispatch: async () => {
       controller.abort();
       return { failure_code: "HARNESS_CANCELLED", artifact_refs: ["pi-agent-partial"] };
@@ -317,7 +317,7 @@ test("Scheduler Blocker projection stays within the existing report size bound",
 test("an unbound child completion cannot become a managed TaskResult", async () => {
   const operation = createOperation({ operation_id: "O-1", objective: "Verify lineage.", required_task_ids: ["T-1"], task_intents: { "T-1": "Inspect `lib/coordinator.mjs`." } });
   const report = await runOperation(operation, {
-    turn: async () => decision("dispatch", { task: task("T-1") }),
+    turn: async () => decision("dispatch", { task_id: "T-1" }),
     dispatch: async () => ({ version: 1, operation_id: "O-foreign", task_id: "T-1", execution_status: "execution_complete", verification_status: "verified", evidence_refs: [] }),
   });
   assert.equal(report.status, "blocked");
@@ -328,7 +328,7 @@ test("an unbound child completion cannot become a managed TaskResult", async () 
 test("a rejected spawn is blocked as a confirmed child startup failure", async () => {
   const operation = createOperation({ operation_id: "O-1", objective: "Verify spawn failure.", required_task_ids: ["T-1"], task_intents: { "T-1": "Inspect `lib/coordinator.mjs`." } });
   const report = await runOperation(operation, {
-    turn: async () => decision("dispatch", { task: task("T-1") }),
+    turn: async () => decision("dispatch", { task_id: "T-1" }),
     dispatch: async () => { throw Object.assign(new Error("private startup detail"), { childOutcome: "spawn_rejected" }); },
   });
   assert.deepEqual(report.accepted_task_ids, []);
@@ -340,7 +340,7 @@ test("a child acknowledged after spawn timeout remains blocked without a TaskRes
   const operation = createOperation({ operation_id: "O-1", objective: "Verify late child outcome.", required_task_ids: ["T-1"], task_intents: { "T-1": "Inspect `lib/coordinator.mjs`." } });
   let restoredGraph;
   const report = await runOperation(operation, {
-    turn: async () => decision("dispatch", { task: task("T-1") }),
+    turn: async () => decision("dispatch", { task_id: "T-1" }),
     dispatch: async () => { throw Object.assign(new Error("bounded timeout"), { code: "HARNESS_RPC_TIMEOUT", childSettled: true, childStatus: "stopped" }); },
     save: (_operation, _state, graph) => { restoredGraph = JSON.parse(JSON.stringify(graph)); },
   });
@@ -354,7 +354,7 @@ test("a child acknowledged after spawn timeout remains blocked without a TaskRes
 test("a timed-out child remains blocked with bounded timeout provenance, not a TaskResult", async () => {
   const operation = createOperation({ operation_id: "O-1", objective: "Verify timeout.", required_task_ids: ["T-1"], task_intents: { "T-1": "Inspect `lib/coordinator.mjs`." } });
   const report = await runOperation(operation, {
-    turn: async () => decision("dispatch", { task: task("T-1") }),
+    turn: async () => decision("dispatch", { task_id: "T-1" }),
     dispatch: async () => { throw Object.assign(new Error("private child output"), { code: "HARNESS_CHILD_TERMINAL_TIMEOUT" }); },
   });
   assert.deepEqual(report.accepted_task_ids, []);
@@ -367,7 +367,7 @@ test("Harness bounds repeated failed TaskOrders without an infinite loop", async
   let spawns = 0;
   const report = await runOperation(createOperation({ operation_id: "O-1", objective: "Retry task.", required_task_ids: ["T-1"], task_intents: { "T-1": "Inspect `lib/coordinator.mjs`." } }), {
     turn: async (prompt) => JSON.parse(prompt.slice(prompt.indexOf('{"OperationBrief"'))).OperationBrief.result_available_task_ids.includes("T-1")
-      ? decision("reject_task", { task_id: "T-1" }) : decision("dispatch", { task: task("T-1") }),
+      ? decision("reject_task", { task_id: "T-1" }) : decision("dispatch", { task_id: "T-1" }),
     dispatch: async () => { spawns++; return { task_id: "T-1", operation_id: "O-1", execution_status: "execution_complete", verification_status: "failed", failure_code: "HARNESS_VERIFIER_FAILED", evidence_refs: [] }; },
   });
   assert.equal(spawns, 2);
@@ -437,7 +437,7 @@ test("timed-out parallel Task aborts only its child; late completion cannot chan
     const report = await runOperation(operation, {
       turn: async (prompt) => {
         const brief = JSON.parse(prompt.slice(prompt.indexOf('{"OperationBrief"'))).OperationBrief;
-        return brief.ready_task_ids.length === 2 ? decision("dispatch_batch", { tasks: [task("T-1"), task("T-2")] }) : decision("report");
+        return brief.ready_task_ids.length === 2 ? decision("dispatch_batch", { task_ids: ["T-1", "T-2"] }) : decision("report");
       },
       dispatch: async (selected) => (await executeCoordinateTask(pi, selected, { timeout: 100, rpcTimeout: 1000 })).taskResult,
       save: (nextOperation, _state, graph) => { operationSnapshot = nextOperation; graphSnapshot = graph; },
@@ -521,7 +521,7 @@ test("session shutdown invalidates late child callbacks before a new session res
   old.events.on("subagents:rpc:spawn", (request) => {
     const id = request.type === "coordinator" ? "shutdown-coordinator" : "shutdown-worker";
     old.events.emit(`subagents:rpc:spawn:reply:${request.requestId}`, { success: true, data: { id } });
-    if (request.type === "coordinator") queueMicrotask(() => old.events.emit("subagents:completed", { id, status: "completed", result: JSON.stringify({ version: 1, operation_id: "O-SHUTDOWN", action: "dispatch", reason: "Resume after a verified report.", task: { task_id: "T-SHUTDOWN", owner: "research", scope: "Inspect `lib/coordinator.mjs`.", permission: "read", verification: "Inspect report.", acceptance_criteria: ["The report identifies `lib/coordinator.mjs`."] } }) }));
+    if (request.type === "coordinator") queueMicrotask(() => old.events.emit("subagents:completed", { id, status: "completed", result: JSON.stringify({ version: 1, operation_id: "O-SHUTDOWN", action: "dispatch", reason: "Resume after a verified report.", task_id: "T-SHUTDOWN" }) }));
     else {
       workerRequest = request;
       request.options.signal.addEventListener("abort", () => old.events.emit("subagents:failed", { id, status: "stopped" }), { once: true });
@@ -551,7 +551,7 @@ test("Scheduler attempt budget remains intact after explicit durable Mission res
   const pi = fakePi(); await startMission(pi, "Inspect report.");
   await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-1", objective: "Inspect report.", required_task_ids: ["T-1"], task_intents: { "T-1": "Inspect `lib/coordinator.mjs`." } });
   let counter = 0;
-  const steps = [decision("dispatch", { task: task("T-1") }), decision("reject_task", { task_id: "T-1" }), decision("block", { blocked_action: "choose another report", required_condition: "the Coordinator checks an alternate source" })];
+  const steps = [decision("dispatch", { task_id: "T-1" }), decision("reject_task", { task_id: "T-1" }), decision("block", { blocked_action: "choose another report", required_condition: "the Coordinator checks an alternate source" })];
   pi.events.on("subagents:rpc:spawn", (req) => {
     const id = `agent-${++counter}`;
     pi.events.emit(`subagents:rpc:spawn:reply:${req.requestId}`, { success: true, data: { id } });
@@ -577,7 +577,7 @@ test("old managed TaskResult cannot mutate a durably resumed Mission", async () 
     const id = request.type === "coordinator" ? "old-coordinator" : "old-worker";
     pi.events.emit(`subagents:rpc:spawn:reply:${request.requestId}`, { success: true, data: { id } });
     if (request.type === "coordinator") {
-      queueMicrotask(() => pi.events.emit("subagents:completed", { id, status: "completed", result: decision("dispatch", { task: { ...task("T-1"), scope: "Inspect old session.", acceptance_criteria: ["The report identifies the requested source."] } }) }));
+      queueMicrotask(() => pi.events.emit("subagents:completed", { id, status: "completed", result: decision("dispatch", { task_id: "T-1" }) }));
     } else {
       workerRequest = request;
       request.options.signal.addEventListener("abort", () => pi.events.emit("subagents:failed", { id, status: "stopped" }), { once: true });
@@ -609,7 +609,7 @@ test("goal cancellation aborts the active managed ExecutionUnit", async () => {
   pi.events.on("subagents:rpc:spawn", (request) => {
     const id = request.type === "coordinator" ? "coord-1" : "worker-1";
     pi.events.emit(`subagents:rpc:spawn:reply:${request.requestId}`, { success: true, data: { id } });
-    if (request.type === "coordinator") queueMicrotask(() => pi.events.emit("subagents:completed", { id, status: "completed", result: decision("dispatch", { task: { task_id: "T-1", owner: "research", scope: "Inspect report.", permission: "read", verification: "Inspect report.", acceptance_criteria: ["The report identifies the requested source."] } }) }));
+    if (request.type === "coordinator") queueMicrotask(() => pi.events.emit("subagents:completed", { id, status: "completed", result: decision("dispatch", { task_id: "T-1" }) }));
     else { workerSignal = request.options.signal; workerSignal.addEventListener("abort", () => pi.events.emit("subagents:failed", { id, status: "stopped" }), { once: true }); }
   });
   const pending = call(pi, "pi_harness_run_operation", { operation_id: "O-1" });
@@ -629,7 +629,7 @@ test("managed Operation cancellation aborts all claimed wave Tasks and blocks gh
   pi.events.on("subagents:rpc:spawn", (req) => {
     const id = `agent-${active.length}-${req.type}`;
     pi.events.emit(`subagents:rpc:spawn:reply:${req.requestId}`, { success: true, data: { id } });
-    if (req.type === "coordinator") queueMicrotask(() => pi.events.emit("subagents:completed", { id, status: "completed", result: decision("dispatch_batch", { tasks: [task("T-1"), task("T-2")] }) }));
+    if (req.type === "coordinator") queueMicrotask(() => pi.events.emit("subagents:completed", { id, status: "completed", result: decision("dispatch_batch", { task_ids: ["T-1", "T-2"] }) }));
     else {
       active.push(req);
       req.options.signal.addEventListener("abort", () => pi.events.emit("subagents:failed", { id, status: "stopped" }), { once: true });
@@ -654,7 +654,7 @@ test("late results from both old-session parallel Tasks cannot overwrite the new
   pi.events.on("subagents:rpc:spawn", (req) => {
     const id = req.type === "coordinator" ? "old-coordinator" : `old-${workers.length + 1}`;
     pi.events.emit(`subagents:rpc:spawn:reply:${req.requestId}`, { success: true, data: { id } });
-    if (req.type === "coordinator") queueMicrotask(() => pi.events.emit("subagents:completed", { id, status: "completed", result: JSON.stringify({ version: 1, operation_id: "O-OLD", action: "dispatch_batch", reason: "Both Tasks are independent.", tasks: [task("T-1"), task("T-2")] }) }));
+    if (req.type === "coordinator") queueMicrotask(() => pi.events.emit("subagents:completed", { id, status: "completed", result: JSON.stringify({ version: 1, operation_id: "O-OLD", action: "dispatch_batch", reason: "Both Tasks are independent.", task_ids: ["T-1", "T-2"] }) }));
     else workers.push({ id, req }); // Hold terminal events even after abort to test late completions.
   });
   const NativeAbortController = globalThis.AbortController;
@@ -678,7 +678,7 @@ test("late results from both old-session parallel Tasks cannot overwrite the new
   assert.equal(controllers[0].signal.aborted, true, "session_start aborts the old managed Operation controller");
   assert.ok(workers.every(({ req }) => req.options.signal.aborted), "session_start aborts both ExecutionUnits");
   await startMission(pi, "New session sentinel.");
-  await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-NEW", objective: "New session sentinel.", required_task_ids: ["T-NEW"], heads: [{ head_id: "H-NEW", domain: "testing", task_ids: ["T-NEW"] }] });
+  await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-NEW", objective: "New session sentinel.", required_task_ids: ["T-NEW"] });
   const expectedEntries = structuredClone(freshEntries);
   const assertFresh = () => {
     assert.deepEqual(freshEntries, expectedEntries, "stale callbacks must not append or overwrite any new-session entry");
@@ -722,10 +722,7 @@ test("managed Coordinator receives Operation inputs and dispatches a registered 
         assert.deepEqual(packet.OperationBrief.ready_task_ids, ["T-1"]);
         pi.events.emit("subagents:completed", {
           id, status: "completed",
-          result: decision("dispatch", { task: {
-            task_id: "T-1", owner: "worker", scope: "Implement stable prompt and deterministic context maintenance.",
-            permission: "write", verification: "true",
-          } }),
+          result: decision("dispatch", { task_id: "T-1" }),
         });
       });
     } else if (request.type === "worker") {
@@ -776,9 +773,9 @@ test("serial Coordinator turns dispatch through Harness; Commander receives only
         assert.ok(!request.prompt.includes("RAW PRIVATE REPORT"));
         assert.ok(!request.prompt.includes("RAW REVIEWER OUTPUT"));
         const steps = [
-          () => decision("dispatch", { task: { ...task("T-1"), scope: task_intents["T-1"] } }),
+          () => decision("dispatch", { task_id: "T-1" }),
           () => decision("accept_task", { task_id: "T-1" }),
-          () => decision("dispatch", { task: { ...task("T-2"), scope: task_intents["T-2"] } }),
+          () => decision("dispatch", { task_id: "T-2" }),
           () => decision("accept_task", { task_id: "T-2" }),
           () => decision("accept_criterion", { criterion: "The Coordinator checked the result.", evidence_refs: [packet.OperationBrief.task_results["T-1"].evidence_refs[0]] }),
         ];
@@ -830,9 +827,10 @@ test("trusted TaskSpec resolves ID-only dispatch and rejects mechanical substitu
   assert.equal(report.status,"blocked");
   assert.equal(dispatched.verification,"Inspect report.");
   assert.equal(dispatched.permission,"read");
-  for (const mutation of [{verification:"printenv"},{owner:"worker",permission:"write"},{review_profile:{"The report identifies \u0060lib/coordinator.mjs\u0060.":"security"}}]) {
-    assert.throws(()=>parseCoordinatorDecision(decision("dispatch",{task:{...task("T-1"),...mutation}}),operation),/trusted TaskSpec/);
+  for (const mutation of [{ verification: "printenv" }, { owner: "worker", permission: "write" }, { review_profile: { "The report identifies \u0060lib/coordinator.mjs\u0060.": "security" } }]) {
+    assert.throws(() => parseCoordinatorDecision(decision("dispatch", { task_id: "T-1", ...mutation }), operation), /invalid or belongs to a foreign Operation/);
   }
+  assert.throws(() => parseCoordinatorDecision(decision("dispatch", { task_id: "T-1", task: task("T-1") }), operation), /invalid or belongs to a foreign Operation/);
   const legacy=registerOperation({operation_id:"O-1",objective:"Legacy",required_task_ids:["T-1"],task_intents:{"T-1":"Inspect."}});
   assert.throws(()=>parseCoordinatorDecision(decision("dispatch",{task_id:"T-1"}),legacy),/trusted registered TaskSpec/);
   assert.throws(()=>registerOperation({...operation,task_specs:{"FOREIGN":operation.task_specs["T-1"]}}),/unregistered/);

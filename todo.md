@@ -453,7 +453,7 @@ After the focused T1 correction and seven added repository regressions, `npm run
 - [x] **Historical startup timeout investigation:** the 2026-09-27 Pi 0.87.1 startup timeout cohort was traced to a catalog-refresh/physical-lock drain gap. The runtime patch and default-bundle fingerprint close this cohort. Do not assign this cause to failures outside the recorded cohort.
 - [x] **Live failure-mode disposition:** T10 includes package-backed cleanup-failure injection and a post-restart Operation/TaskGraph proof. Unknown worktree disposition stays unknown when cleanup evidence is missing.
 - [ ] **Worker resource enforcement beyond wall-clock:** the package supports `maxTurns`/usage callbacks, but Harness does not enforce Worker turn/token/tool-call/file-scope budgets. Keep this as follow-up work. Prompt file scope is not an OS sandbox.
-- [ ] **Legacy migration:** test Operations with only `task_intents`, persisted failure codes, Head and parallel compatibility when a complete TaskSpec is registered or the trust policy changes. Do not promote Coordinator-authored shell text into trusted commands.
+- [ ] **Legacy migration:** test Operations with only `task_intents`, persisted failure codes and parallel compatibility when a complete TaskSpec is registered or the trust policy changes. Do not promote Coordinator-authored shell text into trusted commands.
 
 ## Master tracker closure conditions
 

@@ -71,16 +71,16 @@ test("TaskGraph readiness is independent of slots; a batch claim is atomic", () 
 
 test("Coordinator validates all batch members before any Task starts", async () => {
   const operation = op({ "T-3": ["T-1"] });
-  for (const tasks of [[task("T-1")], [task("T-1"), task("T-1")], [task("T-1"), task("T-3")], [task("T-1"), task("foreign")]]) {
+  for (const task_ids of [["T-1"], ["T-1", "T-1"], ["T-1", "T-3"], ["T-1", "foreign"]]) {
     let starts = 0;
-    const report = await runOperation(operation, { turn: async () => decision("dispatch_batch", { tasks }), dispatch: async () => { starts++; return result("T-1"); } });
+    const report = await runOperation(operation, { turn: async () => decision("dispatch_batch", { task_ids }), dispatch: async () => { starts++; return result("T-1"); } });
     assert.equal(report.status, "blocked");
     assert.equal(starts, 0);
   }
-  assert.throws(() => parseCoordinatorDecision(decision("dispatch_batch", { tasks: [task("T-1")] }), operation));
-  assert.throws(() => parseCoordinatorDecision(decision("dispatch_batch", { tasks: [task("T-1"), task("T-1")] }), operation));
+  assert.throws(() => parseCoordinatorDecision(decision("dispatch_batch", { task_ids: ["T-1"] }), operation));
+  assert.throws(() => parseCoordinatorDecision(decision("dispatch_batch", { task_ids: ["T-1", "T-1"] }), operation));
   let starts = 0;
-  const serial = await runOperation(op(), { turn: async () => decision("dispatch_batch", { tasks: [task("T-1"), task("T-2")] }), dispatch: async () => { starts++; } }, { parallelLimit: 1 });
+  const serial = await runOperation(op(), { turn: async () => decision("dispatch_batch", { task_ids: ["T-1", "T-2"] }), dispatch: async () => { starts++; } }, { parallelLimit: 1 });
   assert.equal(serial.status, "blocked");
   assert.equal(starts, 0);
 });
@@ -97,14 +97,14 @@ test("independent Task pipelines overlap; each completion persists before the si
       if (turns === 1) {
         assert.equal(brief.parallel_limit, 2);
         assert.equal(brief.available_slots, 2);
-        return decision("dispatch_batch", { tasks: [task("T-1"), task("T-2")] });
+        return decision("dispatch_batch", { task_ids: ["T-1", "T-2"] });
       }
       if (brief.result_available_task_ids.includes("T-1") && !brief.accepted_task_ids.includes("T-1")) {
         orderedResults = Object.keys(brief.task_results);
         return decision("accept_task", { task_id: "T-1" });
       }
       if (brief.result_available_task_ids.includes("T-2") && !brief.accepted_task_ids.includes("T-2")) return decision("accept_task", { task_id: "T-2" });
-      return decision("dispatch", { task: task("T-3") });
+      return decision("dispatch", { task_id: "T-3" });
     },
     dispatch: (selected) => {
       if (selected.task_id !== "T-3") assert.deepEqual(snapshots.at(-1).running, ["T-1", "T-2"], "the batch claim must persist before either child starts");
@@ -135,7 +135,7 @@ test("one failed pipeline blocks only its Task; a successful sibling keeps its r
   const operation = op();
   let final;
   const report = await runOperation(operation, {
-    turn: async () => decision("dispatch_batch", { tasks: [task("T-1"), task("T-2")] }),
+    turn: async () => decision("dispatch_batch", { task_ids: ["T-1", "T-2"] }),
     dispatch: async ({ task_id }) => task_id === "T-1" ? result(task_id) : Promise.reject(Error("unknown child outcome")),
     save: (nextOperation, _state, graph) => { final = { operation: nextOperation, graph }; },
   });
@@ -153,10 +153,10 @@ test("a failed criterion retries only its own Task after the sibling is accepted
   const run = await runOperation(operation, {
     turn: async (prompt) => {
       const brief = JSON.parse(prompt.slice(prompt.indexOf('{"OperationBrief"'))).OperationBrief;
-      if (!brief.task_results["T-1"]) return decision("dispatch_batch", { tasks: [task("T-1"), task("T-2")] });
+      if (!brief.task_results["T-1"]) return decision("dispatch_batch", { task_ids: ["T-1", "T-2"] });
       if (!brief.rejected_task_ids.includes("T-1") && brief.task_results["T-1"].verification_status === "failed") return decision("reject_task", { task_id: "T-1" });
       if (!brief.accepted_task_ids.includes("T-2")) return decision("accept_task", { task_id: "T-2" });
-      if (brief.ready_task_ids.includes("T-1")) return decision("dispatch", { task: task("T-1") });
+      if (brief.ready_task_ids.includes("T-1")) return decision("dispatch", { task_id: "T-1" });
       return decision("report");
     },
     dispatch: async ({ task_id }) => { attempts[task_id]++; return result(task_id, task_id === "T-1" && attempts[task_id] === 1 ? "failed" : "verified"); },
@@ -172,7 +172,7 @@ test("a failed criterion retries only its own Task after the sibling is accepted
 test("a failed atomic claim persistence starts no Task", async () => {
   let starts = 0, saves = 0;
   const report = await runOperation(op(), {
-    turn: async () => decision("dispatch_batch", { tasks: [task("T-1"), task("T-2")] }),
+    turn: async () => decision("dispatch_batch", { task_ids: ["T-1", "T-2"] }),
     dispatch: async () => { starts++; },
     save: () => { if (++saves === 2) throw Error("store unavailable"); },
   });
@@ -184,7 +184,7 @@ test("cancellation stops the wave and leaves no running node", async () => {
   const controller = new AbortController(), tasks = new Map();
   let last;
   const run = runOperation(op(), {
-    turn: async () => decision("dispatch_batch", { tasks: [task("T-1"), task("T-2")] }),
+    turn: async () => decision("dispatch_batch", { task_ids: ["T-1", "T-2"] }),
     dispatch: ({ task_id }) => { const hold = deferred(); tasks.set(task_id, hold); controller.signal.addEventListener("abort", () => hold.reject(Error("cancelled")), { once: true }); return hold.promise; },
     save: (_operation, _state, graph) => { last = graph; },
   }, { signal: controller.signal });

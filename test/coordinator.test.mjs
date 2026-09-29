@@ -149,7 +149,7 @@ function packageManagerFor(events, repo, mode = "read") {
   };
 }
 
-for (const role of ["worker", "scout", "research", "coordinator", "head", "reviewer", "security-reviewer"]) {
+for (const role of ["worker", "scout", "research", "coordinator", "reviewer", "security-reviewer"]) {
   test(`${role}: failed spawn ACK drains an existing child before releasing ownership`, async () => {
     const events = new EventBus();
     const child = deferred();
@@ -174,7 +174,7 @@ for (const role of ["worker", "scout", "research", "coordinator", "head", "revie
       events.emit(`subagents:rpc:spawn:reply:${request.requestId}`, { success: false, error: "PRIVATE STARTUP ERROR" });
     });
     try {
-      const pending = ["coordinator", "head"].includes(role)
+      const pending = role === "coordinator"
         ? executeCoordinatorTurn({ events }, "Inspect.", { cwd: repo, role })
         : executeCoordinateTask({ events }, {
           owner: reviewing ? "research" : role, permission: role === "worker" ? "write" : "read", scope: "Inspect.", verification: "true",

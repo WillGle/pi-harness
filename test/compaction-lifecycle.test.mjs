@@ -99,8 +99,6 @@ test("explicit Mission resume gives the Commander the resume event and durable S
     attempt_ledger,
     mission_goals: { [mission_id]: goalState(objective) },
     coordinator_states: {},
-    head_registries: {},
-    head_states: {},
     version: CONTROL_STATE_VERSION,
     project_id: getProjectIdentifier(cwd),
     revision: 1,
