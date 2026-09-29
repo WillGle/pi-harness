@@ -1,5 +1,5 @@
 import { readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import spawn from "cross-spawn";
+import { spawn } from "node:child_process";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { getDefaultEnvironment, StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { Type } from "typebox";

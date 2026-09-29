@@ -73,7 +73,7 @@ test("disposable install: Linux CLI is the default and explicit experimental Zed
     assert.ok(existsSync(join(acpPackageDir, "extensions", "mcp-tools.mjs")), "ACP tarball must include its MCP extension");
     const acpPackageJson = JSON.parse(readFileSync(join(acpPackageDir, "package.json"), "utf8"));
     assert.equal(acpPackageJson.dependencies["@modelcontextprotocol/sdk"], "1.30.0");
-    assert.equal(acpPackageJson.dependencies["cross-spawn"], "7.0.6");
+    assert.equal(Object.hasOwn(acpPackageJson.dependencies, "cross-spawn"), false);
     assert.equal(acpPackageJson.dependencies.typebox, "1.3.7");
 
     const acpInstallDir = join(sandboxDir, "acp-install");
