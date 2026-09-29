@@ -19,7 +19,7 @@ import { PROACTIVE_COMPACT_ENTRY, proactiveCompactionPolicy, restoreProactivePol
 import { HEAD_REGISTRY_ENTRY, HEAD_STATE_ENTRY, createHeadRegistry, validateHeadRegistry, validateHeadState } from "../lib/domain-head.mjs";
 import { COORDINATOR_ENTRY, coordinatorState, parallelTaskLimit, runOperation } from "../lib/operation-runner.mjs";
 import { promoteTaskResult } from "../lib/communication.mjs";
-import { OPERATION_ENTRY, createOperation } from "../lib/operation.mjs";
+import { OPERATION_ENTRY, createOperation, terminalizeOperation } from "../lib/operation.mjs";
 import { TASK_GRAPH_ENTRY, createTaskGraph, migrateTaskGraph, reconcileTaskGraph, supersedeGraphTask, validateTaskGraph, waiveGraphTask } from "../lib/task-graph.mjs";
 import { findReferences, findSymbol } from "../lib/code-intel.mjs";
 import { readHashlines, replaceHashlines } from "../lib/precise-edit.mjs";
@@ -80,7 +80,7 @@ export default function harness(pi: Pi): void {
     maintenancePending = true;
   };
   const persistMission = () => pi.appendEntry?.(MISSION_ENTRY, missions);
-  const missionBoard = () => missionSituationBoard(missions, operations, taskGraphs);
+  const missionBoard = () => missionSituationBoard(missions, operations, taskGraphs, attemptLedger);
   const collectContextTelemetry = (entries: any[], usage: any) => contextTelemetry(entries, usage, { missions, operations, taskGraphs, attemptLedger });
   const saveCompactState = (event: Record<string, unknown> = {}) => pi.appendEntry?.(COMPACT_ENTRY, controlStateSummary({
     goal, plan, decisions: Array.isArray(event.decisions) ? event.decisions : [],
@@ -385,7 +385,7 @@ export default function harness(pi: Pi): void {
     parameters: Type.Object({ status: Type.Union([Type.Literal("complete"), Type.Literal("blocked"), Type.Literal("error")]), evidence: Type.String(), blocker: Type.Optional(Type.String()) }),
     execute: async (_id: string, input: { status: "complete" | "blocked" | "error"; evidence: string; blocker?: string }) => {
       const activeMission = Object.values(missions).find((mission: any) => mission.status === "active" && mission.objective === goal?.objective) as any;
-      if (input.status === "complete" && activeMission && !missionIsClosable(activeMission, operations, taskGraphs)) throw new Error("The Mission has unresolved obligations");
+      if (input.status === "complete" && activeMission && !missionIsClosable(activeMission, operations, taskGraphs, attemptLedger)) throw new Error("The Mission has unresolved obligations");
       goal = transitionGoal(goal, input.status, input.evidence, input.blocker);
       if (activeMission) missions = { ...missions, [activeMission.mission_id]: createMission({ ...activeMission, status: goal.status }) };
       maintenancePending = true;
@@ -427,12 +427,12 @@ export default function harness(pi: Pi): void {
   });
   pi.registerTool?.({
     name: "pi_harness_operation", label: "Pi Harness Operation handoff",
-    description: "Create an Operation or read a bounded Commander-safe status summary. Only the Harness Coordinator may dispatch TaskOrders, accept or reject TaskResults, or accept Operation Acceptance Criteria. Operation completion never completes the Mission.",
-    parameters: Type.Object({ action: Type.Union([Type.Literal("create"), Type.Literal("status"), Type.Literal("supersede"), Type.Literal("waive")]), operation_id: Type.String(), objective: Type.Optional(Type.String()), acceptance_criteria: Type.Optional(Type.Array(Type.String())), allowed_policy_ids: Type.Optional(Type.Array(Type.String())), constraints: Type.Optional(Type.Array(Type.String())), task_id: Type.Optional(Type.String()), replacement_operation_id: Type.Optional(Type.String()), replacement_task_id: Type.Optional(Type.String()), authority: Type.Optional(Type.String()), reason: Type.Optional(Type.String()) }),
-    execute: async (_id: string, input: { action: "create" | "status" | "supersede" | "waive"; operation_id: string; objective?: string; acceptance_criteria?: string[]; allowed_policy_ids?: string[]; constraints?: string[]; task_id?: string; replacement_operation_id?: string; replacement_task_id?: string; authority?: string; reason?: string }) => {
+    description: "Create, terminalize, or read a bounded Commander-safe Operation summary. Only the Harness Coordinator may dispatch TaskOrders, accept or reject TaskResults, or accept Operation Acceptance Criteria. Operation completion never completes the Mission.",
+    parameters: Type.Object({ action: Type.Union([Type.Literal("create"), Type.Literal("status"), Type.Literal("supersede"), Type.Literal("waive"), Type.Literal("transfer"), Type.Literal("waive_operation")]), operation_id: Type.String(), objective: Type.Optional(Type.String()), acceptance_criteria: Type.Optional(Type.Array(Type.String())), allowed_policy_ids: Type.Optional(Type.Array(Type.String())), constraints: Type.Optional(Type.Array(Type.String())), task_id: Type.Optional(Type.String()), replacement_operation_id: Type.Optional(Type.String()), replacement_task_id: Type.Optional(Type.String()), authority: Type.Optional(Type.String()), reason: Type.Optional(Type.String()) }),
+    execute: async (_id: string, input: { action: "create" | "status" | "supersede" | "waive" | "transfer" | "waive_operation"; operation_id: string; objective?: string; acceptance_criteria?: string[]; allowed_policy_ids?: string[]; constraints?: string[]; task_id?: string; replacement_operation_id?: string; replacement_task_id?: string; authority?: string; reason?: string }) => {
       const id = input.operation_id;
       const action = input.action as string;
-      if (!["create", "status", "supersede", "waive"].includes(action)) throw new Error("Only the Harness Coordinator may accept or reject a TaskResult or Operation Acceptance Criterion");
+      if (!["create", "status", "supersede", "waive", "transfer", "waive_operation"].includes(action)) throw new Error("Only the Harness Coordinator may accept or reject a TaskResult or Operation Acceptance Criterion");
       if (activeOperationRuns.has(id)) throw new Error("The Operation is running. The Commander must wait for the bounded OperationReport.");
       if (action === "create") {
         if (Object.hasOwn(operations, id)) throw new Error("Operation ID already exists");
@@ -466,6 +466,13 @@ export default function harness(pi: Pi): void {
       const operation = Object.hasOwn(operations, id) ? operations[id] : undefined;
       if (!operation) throw new Error("Unknown Operation");
       validateTaskGraph(taskGraphs[id], operation);
+      if (["transfer", "waive_operation"].includes(action)) {
+        if (!input.authority?.trim() || !input.reason?.trim()) throw new Error("Operation terminal disposition requires authority and reason");
+        const status = action === "transfer" ? "transferred" : "waived";
+        operations = { ...operations, [id]: terminalizeOperation(operation, taskGraphs[id], { status, authority: input.authority, reason: input.reason }) };
+        persistScheduler();
+        return { content: [{ type: "text", text: JSON.stringify({ version: 1, mission_id: operation.mission_id, operation_id: id, status, situation_board: missionBoard() }) }] };
+      }
       if (["supersede", "waive"].includes(action)) {
         if (operation.planning || !input.task_id || !input.authority?.trim() || !input.reason?.trim()) throw new Error("Task supersession or waiver requires a materialized TaskOrder, authority, and reason");
         let nextGraph;

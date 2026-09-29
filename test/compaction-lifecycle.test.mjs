@@ -163,6 +163,13 @@ test("Mission cannot complete while it owns an unresolved TaskOrder", async () =
   await assert.rejects(() => f.pi.tools.get("pi_harness_goal").execute("id", { status: "complete", evidence: "The Commander evaluated the Mission." }), /unresolved obligations/);
 });
 
+test("Mission cannot complete while it owns an unmaterialized planning Operation", async () => {
+  const f = fixture();
+  await f.command("goal", "Complete only after planning materializes accountable work.");
+  await f.pi.tools.get("pi_harness_operation").execute("id", { action: "create", operation_id: "O-planning", objective: "Plan the source inspection." });
+  await assert.rejects(() => f.pi.tools.get("pi_harness_goal").execute("id", { status: "complete", evidence: "The Commander evaluated the Mission." }), /unresolved obligations/);
+});
+
 test("Mission Situation Board is a replaceable bounded context projection", async () => {
   const f = fixture();
   f.session.appendMessage({ role: "user", content: "Track this Mission.", timestamp: 1 });

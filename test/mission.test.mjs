@@ -2,11 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { reconcileAttemptLedger, validateAttemptLedger } from "../lib/attempt-ledger.mjs";
 import { attachOperation, createMission, missionIsClosable, missionSituationBoard, validateMissionOwnership } from "../lib/mission.mjs";
-import { createOperation, recordTaskResult } from "../lib/operation.mjs";
-import { acceptGraphTask, claimTask, createTaskGraph, recordTaskGraphResult, supersedeGraphTask, waiveGraphTask } from "../lib/task-graph.mjs";
+import { createOperation, recordTaskResult, terminalizeOperation } from "../lib/operation.mjs";
+import { acceptGraphTask, claimTask, createTaskGraph, recordTaskGraphResult, reconcileTaskGraph, supersedeGraphTask, waiveGraphTask } from "../lib/task-graph.mjs";
 
 function fixture() {
-  const operation = createOperation({ operation_id: "O-1", mission_id: "M-1", objective: "Inspect the source.", required_task_ids: ["T-1", "T-2"], dependencies: { "T-2": ["T-1"] } });
+  const operation = createOperation({ operation_id: "O-1", mission_id: "M-1", objective: "Inspect the source.", required_task_ids: ["T-1", "T-2"], dependencies: { "T-2": ["T-1"] }, task_intents: { "T-1": "Inspect Mission closure.", "T-2": "Inspect the dependent closure path." }, task_specs: { "T-1": { owner: "research", permission: "read", verification: "Inspect the Mission closure source.", acceptance_criteria: ["The report identifies the closure rule."] }, "T-2": { owner: "research", permission: "read", verification: "Inspect the dependent closure source.", acceptance_criteria: ["The report identifies the dependent rule."] } } });
   const missions = { "M-1": createMission({ mission_id: "M-1", objective: "Keep obligations accountable.", operation_ids: ["O-1"] }) };
   return { missions, operations: { "O-1": operation }, taskGraphs: { "O-1": createTaskGraph(operation) } };
 }
@@ -20,7 +20,23 @@ test("Mission ownership rejects an unowned Operation and keeps unresolved Tasks 
   assert.match(board, /Mission M-1/);
   assert.match(board, /TaskOrder T-1: ready/);
   assert.match(board, /TaskOrder T-2: pending/);
+  assert.match(board, /Intent: Inspect Mission closure/);
+  assert.match(board, /Dependencies: T-1/);
+  assert.match(board, /Acceptance Criteria: The report identifies the closure rule/);
   assert.doesNotMatch(board, /Evidence|stdout|transcript/);
+});
+
+test("Mission closure requires a terminal Operation disposition", () => {
+  const planning = createOperation({ operation_id: "O-plan", mission_id: "M-plan", objective: "Plan safely.", planning: true, allowed_policy_ids: ["research-read"] });
+  const planningMission = createMission({ mission_id: "M-plan", objective: "Plan safely.", operation_ids: ["O-plan"] });
+  assert.equal(missionIsClosable(planningMission, { "O-plan": planning }, { "O-plan": createTaskGraph(planning) }), false, "a planning Operation has no terminal disposition");
+
+  const state = fixture();
+  let graph = waiveGraphTask(state.taskGraphs["O-1"], state.operations["O-1"], "T-1", { authority: "Commander", reason: "The requirement is removed." });
+  graph = waiveGraphTask(graph, state.operations["O-1"], "T-2", { authority: "Commander", reason: "The requirement is removed." });
+  assert.equal(missionIsClosable(state.missions["M-1"], state.operations, { ...state.taskGraphs, "O-1": graph }), false, "resolved TaskOrders do not terminalize an open Operation");
+  state.operations["O-1"] = terminalizeOperation(state.operations["O-1"], graph, { status: "waived", authority: "Commander", reason: "All remaining TaskOrders are waived." });
+  assert.equal(missionIsClosable(state.missions["M-1"], state.operations, { ...state.taskGraphs, "O-1": graph }), true);
 });
 
 test("Attempt Ledger records a claimed Attempt before completion and retains terminal accounting", () => {
@@ -35,6 +51,18 @@ test("Attempt Ledger records a claimed Attempt before completion and retains ter
   assert.equal(ledger["A-O-1-T-1-01"].status, "execution_complete");
   assert.deepEqual(ledger["A-O-1-T-1-01"].evidence_refs, ["evidence://project/opaque"]);
   assert.throws(() => validateAttemptLedger({ ...ledger, bad: { ...ledger["A-O-1-T-1-01"], attempt_id: "bad", task_id: "T-other" } }, state.operations, state.taskGraphs), /owning TaskOrder/);
+});
+
+test("Attempt Ledger preserves an unknown child outcome when failure provenance has a code", () => {
+  const state = fixture();
+  state.taskGraphs["O-1"] = claimTask(state.taskGraphs["O-1"], state.operations["O-1"], "T-1");
+  state.taskGraphs["O-1"] = reconcileTaskGraph(state.taskGraphs["O-1"], state.operations["O-1"]);
+  const ledger = reconcileAttemptLedger({}, state.operations, state.taskGraphs);
+  assert.equal(state.taskGraphs["O-1"].nodes["T-1"].blocker.failure_code, "HARNESS_SESSION_INTERRUPTED");
+  assert.equal(ledger["A-O-1-T-1-01"].status, "unknown");
+  assert.equal(missionIsClosable(state.missions["M-1"], state.operations, state.taskGraphs, ledger), false);
+  const board = missionSituationBoard(state.missions, state.operations, state.taskGraphs, ledger);
+  assert.match(board, /Current Attempt: A-O-1-T-1-01 \(unknown\)/);
 });
 
 test("supersession needs persisted replacement lineage and waiver is a terminal non-acceptance disposition", () => {

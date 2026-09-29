@@ -53,6 +53,17 @@ test("Commander-facing Operation tools cannot accept TaskResults or expose TaskR
   assert.ok(entries.some((entry) => entry.customType === OPERATION_ENTRY));
 });
 
+test("Commander records an explicit terminal Operation disposition after TaskOrder waiver", async () => {
+  const entries = [], pi = makePi(entries);
+  await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-waive", objective: "Inspect the Coordinator.", required_task_ids: ["T-waive"] });
+  await call(pi, "pi_harness_operation", { action: "waive", operation_id: "O-waive", task_id: "T-waive", authority: "Commander", reason: "The requirement is removed." });
+  const terminal = await call(pi, "pi_harness_operation", { action: "waive_operation", operation_id: "O-waive", authority: "Commander", reason: "All remaining TaskOrders are waived." });
+  assert.equal(terminal.status, "waived");
+  const snapshot = entries.filter((entry) => entry.customType === TASK_GRAPH_ENTRY).at(-1).data;
+  assert.equal(snapshot.operations["O-waive"].status, "waived");
+  assert.deepEqual(snapshot.operations["O-waive"].operation_disposition, { kind: "waived", authority: "Commander", reason: "All remaining TaskOrders are waived." });
+});
+
 test("Commander creates a task-less planning Operation", async () => {
   const entries = [], pi = makePi(entries);
   const created = await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-plan", objective: "Implement safely.", allowed_policy_ids: ["worker-write"] });
