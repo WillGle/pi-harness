@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { taskOrder, taskResult, promoteTaskResult } from "../lib/communication.mjs";
 import { storeEvidence, readEvidence } from "../lib/evidence.mjs";
-import { reviewTask, verificationPacket, validateSemanticReview, acceptedFindings } from "../lib/semantic-verifier.mjs";
+import { formatVerificationOrder, reviewTask, verificationPacket, validateSemanticReview, acceptedFindings } from "../lib/semantic-verifier.mjs";
 import { executeCoordinateTask, cancelCoordinateTasks, hasActiveCoordinateTasks, securityReviewModel } from "../lib/coordinator.mjs";
 
 const root = mkdtempSync(join(tmpdir(), "pi-semantic-test-"));
@@ -19,8 +19,8 @@ function order(role = "worker", taskId = "T-1") {
   return taskOrder({ owner: role, task_id: taskId, scope: "Review `lib/coordinator.mjs`.", verification: "npm test", permission: role === "worker" ? "write" : "read", acceptance_criteria: ["The Coordinator retains the cancellation condition."] });
 }
 function resultFor(orderValue, evidenceRefs) { return { task_id: orderValue.task_id, changed_paths: ["lib/coordinator.mjs"], evidence_refs: evidenceRefs }; }
-function reviewerReply(packet, status = "passed") {
-  return JSON.stringify({ version: 1, task_id: packet.task_id, status: status === "passed" ? "verified" : status === "failed" ? "failed" : "blocked", summary: "The semantic Verifier checked the criterion.", criteria: packet.acceptance_criteria.map((criterion) => ({ criterion, status, finding: "The semantic Verifier checked the selected Evidence.", evidence_refs: status === "passed" ? [packet.evidence[0].reference] : [] })) });
+function reviewerReply(packet, status = "passed", topLevelStatus = status === "passed" ? "verified" : status === "failed" ? "failed" : "blocked") {
+  return JSON.stringify({ version: 1, task_id: packet.task_id, status: topLevelStatus, summary: "The semantic Verifier checked the criterion.", criteria: packet.acceptance_criteria.map((criterion) => ({ criterion, status, finding: "The semantic Verifier checked the selected Evidence.", evidence_refs: status === "passed" ? [packet.evidence[0].reference] : [] })) });
 }
 
 test("semantic review selects one Evidence kind and validates every criterion", async () => {
@@ -48,6 +48,20 @@ test("semantic review selects one Evidence kind and validates every criterion", 
   assert.equal(taskResult(task, { ...record, gatePassed: false }, { semanticVerification: review }).verification_status, "failed");
   assert.equal(taskResult(task, record, { evidenceError: true, semanticVerification: review }).verification_status, "failed");
   assert.equal(taskResult(task, record).verification_status, "not_verified");
+});
+
+test("semantic review prompt separates criterion passed from top-level verified status", async () => {
+  const task = order("research", "T-status-contract");
+  const report = storeEvidence({ cwd, taskId: task.task_id, kind: "report", content: "The selected report supports the criterion." });
+  const input = resultFor(task, [report.reference]);
+  const packet = verificationPacket(task, input, cwd);
+  const prompt = formatVerificationOrder(packet);
+  assert.match(prompt, /top-level status must be verified when every criterion passed/);
+  assert.match(prompt, /top-level status is never passed/);
+  assert.throws(() => validateSemanticReview(task, packet, reviewerReply(packet, "passed", "passed")), /contradictory status/);
+  const review = await reviewTask(task, input, cwd, async () => ({ status: "completed", result: reviewerReply(packet, "passed", "passed") }));
+  assert.equal(review.status, "blocked");
+  assert.equal(review.failure_code, "HARNESS_SEMANTIC_REVIEW_FAILED");
 });
 
 test("malformed, unresolved, truncated or tampered Evidence fails closed", async () => {
