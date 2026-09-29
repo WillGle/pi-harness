@@ -36,7 +36,17 @@ test("Mission closure requires a terminal Operation disposition", () => {
   graph = waiveGraphTask(graph, state.operations["O-1"], "T-2", { authority_type: "commander", reason: "The requirement is removed." });
   assert.equal(missionIsClosable(state.missions["M-1"], state.operations, { ...state.taskGraphs, "O-1": graph }), false, "resolved TaskOrders do not terminalize an open Operation");
   state.operations["O-1"] = terminalizeOperation(state.operations["O-1"], graph, { status: "waived", authority_type: "commander", reason: "All remaining TaskOrders are waived." });
-  assert.equal(missionIsClosable(state.missions["M-1"], state.operations, { ...state.taskGraphs, "O-1": graph }), true);
+  assert.equal(missionIsClosable(state.missions["M-1"], state.operations, { ...state.taskGraphs, "O-1": graph }), false, "a waived Operation is terminal but does not satisfy successful Mission completion");
+});
+
+test("Mission completion rejects unresolved obligations and Task IDs with multiple Operation owners", () => {
+  const state = fixture();
+  assert.throws(() => validateMissionOwnership({ "M-1": createMission({ mission_id: "M-1", objective: "Keep obligations accountable.", status: "complete", operation_ids: ["O-1"] }) }, state.operations, state.taskGraphs), /Complete Mission has unresolved/);
+  const duplicate = createOperation({ operation_id: "O-2", mission_id: "M-1", objective: "Reuse an owned Task ID.", required_task_ids: ["T-1"] });
+  state.operations["O-2"] = duplicate;
+  state.taskGraphs["O-2"] = createTaskGraph(duplicate);
+  state.missions = attachOperation(state.missions, "M-1", "O-2");
+  assert.throws(() => validateMissionOwnership(state.missions, state.operations, state.taskGraphs), /multiple owning Operations/);
 });
 
 test("Attempt Ledger records a claimed Attempt before completion and retains terminal accounting", () => {
@@ -65,8 +75,20 @@ test("Attempt Ledger preserves an unknown child outcome when failure provenance 
   assert.equal(preserved["A-O-1-T-1-01"].status, "unknown", "Task supersession cannot rewrite an Attempt outcome");
   assert.equal(preserved["A-O-1-T-1-01"].failure_code, "HARNESS_SESSION_INTERRUPTED");
   assert.equal(missionIsClosable(state.missions["M-1"], state.operations, state.taskGraphs, ledger), false);
+  let resolvedGraph = waiveGraphTask(state.taskGraphs["O-1"], state.operations["O-1"], "T-1", { authority_type: "commander", reason: "The obligation is waived while its child outcome remains unknown." });
+  resolvedGraph = waiveGraphTask(resolvedGraph, state.operations["O-1"], "T-2", { authority_type: "commander", reason: "The remaining obligation is waived." });
+  state.operations["O-1"] = terminalizeOperation(state.operations["O-1"], resolvedGraph, { status: "waived", authority_type: "commander", reason: "The remaining TaskOrders are waived." });
+  assert.equal(missionIsClosable(state.missions["M-1"], state.operations, { ...state.taskGraphs, "O-1": resolvedGraph }, preserved), false, "an unresolved child outcome cannot be hidden by a Task waiver");
   const board = missionSituationBoard(state.missions, state.operations, state.taskGraphs, ledger);
   assert.match(board, /Current Attempt: A-O-1-T-1-01 \(unknown\)/);
+});
+
+test("Situation Board retains unresolved obligations from a blocked Mission", () => {
+  const state = fixture();
+  state.missions["M-1"] = createMission({ ...state.missions["M-1"], status: "blocked" });
+  const board = missionSituationBoard(state.missions, state.operations, state.taskGraphs);
+  assert.match(board, /Mission M-1\nStatus: blocked\./);
+  assert.match(board, /TaskOrder T-1: ready/);
 });
 
 test("supersession needs persisted replacement lineage and waiver is a terminal non-acceptance disposition", () => {

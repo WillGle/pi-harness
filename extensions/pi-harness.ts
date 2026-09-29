@@ -74,7 +74,7 @@ export default function harness(pi: Pi): void {
   // One canonical session entry commits Operation and TaskGraph together.
   const persistScheduler = () => {
     attemptLedger = reconcileAttemptLedger(attemptLedger, operations, taskGraphs);
-    validateMissionOwnership(missions, operations, taskGraphs);
+    validateMissionOwnership(missions, operations, taskGraphs, attemptLedger);
     pi.appendEntry?.(TASK_GRAPH_ENTRY, { version: 2, missions, operations, task_graphs: taskGraphs, attempt_ledger: attemptLedger });
     maintenancePending = true;
   };
@@ -172,8 +172,8 @@ export default function harness(pi: Pi): void {
       taskGraphs[id] = reconcileTaskGraph(taskGraphs[id], operations[id]);
     }
     if (Object.keys(taskGraphs).some((id) => !Object.hasOwn(operations, id))) throw new Error("TaskGraph has no owning Operation");
-    validateMissionOwnership(missions, operations, taskGraphs);
     attemptLedger = reconcileAttemptLedger(schedulerSnapshot?.attempt_ledger ?? {}, operations, taskGraphs);
+    validateMissionOwnership(missions, operations, taskGraphs, attemptLedger);
     coordinatorStates = Object.fromEntries(Object.entries(legacyCoordinator).map(([id, state]: [string, any]) => [id, {
       version: 1, operation_id: id, turns: state.turns ?? 0, decisions: (state.decisions ?? []).slice(-7), blocker: state.blocker ?? null,
       ...(state.consultations_since_progress !== undefined ? { consultations_since_progress: state.consultations_since_progress } : {}),
