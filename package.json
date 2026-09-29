@@ -39,6 +39,7 @@
     "lib/",
     "packages/pi-harness-acp/",
     "scripts/bootstrap.mjs",
+    "scripts/context-economics-benchmark.mjs",
     "scripts/verify-skills.mjs",
     "skills/ask-user/SKILL.md",
     "skills/architecture-diagram/SKILL.md",
@@ -107,6 +108,7 @@
     "test:integration": "node --test test/acp-rpc-lifecycle.test.mjs test/parallel-package-integration.test.mjs test/integration.test.mjs test/acp-acceptance.test.mjs test/acp-mcp-integration.test.mjs test/pi-rpc-integration.test.mjs test/pi-plan-lifecycle.test.mjs test/zed-smoke.test.mjs test/disposable-install.test.mjs",
     "test:all": "npm run build && npm run test && npm run test:runtime && npm run test:integration",
     "verify:skills": "node scripts/verify-skills.mjs",
+    "benchmark:context": "node scripts/context-economics-benchmark.mjs",
     "bootstrap": "node scripts/bootstrap.mjs",
     "doctor": "node bin/pi-harness.mjs doctor"
   },
