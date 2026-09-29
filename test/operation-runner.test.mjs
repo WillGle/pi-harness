@@ -11,7 +11,7 @@ import { createOperation as registerOperation } from "../lib/operation.mjs";
 import { coordinatorPrompt, coordinatorState, MAX_COORDINATOR_TURNS, operationBrief, operationReport, parseCoordinatorDecision, runOperation } from "../lib/operation-runner.mjs";
 import { cancelCoordinateTasks, executeCoordinateTask, executeCoordinatorTurn, hasActiveCoordinateTasks } from "../lib/coordinator.mjs";
 import { blockGraphTask, createTaskGraph, TASK_GRAPH_ENTRY, validateTaskGraph } from "../lib/task-graph.mjs";
-import { readEvidence } from "../lib/evidence.mjs";
+import { readEvidence, storeEvidence } from "../lib/evidence.mjs";
 
 const dir = mkdtempSync(join(tmpdir(), "pi-phasee-test-"));
 const prior = process.env.PI_HARNESS_EVIDENCE_DIR;
@@ -126,6 +126,48 @@ test("Coordinator decision repair is bounded; dispatch uses the registered inten
   assert.deepEqual(dispatched.constraints, ["Do not run shell commands."]);
   assert.equal(dispatched.scope, "Inspect the exact registered source.");
   assert.ok(snapshots.includes(1) && snapshots.includes(2) && snapshots.includes(3));
+});
+
+test("Coordinator repairs a repeated Operation Acceptance Criterion", async () => {
+  const operation = createOperation({
+    operation_id: "O-1",
+    objective: "Accept the synthetic report.",
+    required_task_ids: ["T-1"],
+    acceptance_criteria: ["The report has six rows.", "The report sum is 90."],
+    task_intents: { "T-1": "Create and verify the synthetic report." },
+  });
+  const evidence = storeEvidence({ cwd: process.cwd(), missionId: "M-1", operationId: "O-1", taskId: "T-1", kind: "report", content: "The report has six rows and the sum is 90." });
+  let turn = 0;
+  const report = await runOperation(operation, {
+    turn: async (prompt) => {
+      turn++;
+      if (turn === 1) return decision("dispatch", { task_id: "T-1" });
+      if (turn === 2) return decision("accept_task", { task_id: "T-1" });
+      if (turn === 3) return decision("accept_criterion", { criterion: "The report has six rows.", evidence_refs: [evidence.reference] });
+      if (turn === 4) {
+        assert.match(prompt, /Never repeat an accepted criterion/);
+        const packet = JSON.parse(prompt.slice(prompt.indexOf('{"OperationBrief"')));
+        assert.ok(Object.hasOwn(packet.OperationBrief.criterion_evidence, "The report has six rows."));
+        return decision("accept_criterion", { criterion: "The report has six rows.", evidence_refs: [evidence.reference] });
+      }
+      if (turn === 5) {
+        assert.match(prompt, /Repair Required:.*already accepted Operation Acceptance Criterion/);
+        return decision("accept_criterion", { criterion: "The report sum is 90.", evidence_refs: [evidence.reference] });
+      }
+      throw new Error("Unexpected Coordinator turn");
+    },
+    dispatch: async () => ({
+      version: 1,
+      operation_id: "O-1",
+      task_id: "T-1",
+      execution_status: "execution_complete",
+      verification_status: "verified",
+      evidence_refs: [evidence.reference],
+    }),
+  });
+
+  assert.equal(report.status, "complete");
+  assert.equal(turn, 5);
 });
 
 test("Coordinator RPC failure exposes only a bounded failure code", async () => {
