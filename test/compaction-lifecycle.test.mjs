@@ -1,9 +1,16 @@
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { stablePromptSections } from "../lib/context-economics.mjs";
+import { reconcileAttemptLedger } from "../lib/attempt-ledger.mjs";
+import { CONTROL_STATE_VERSION, readControlState } from "../lib/control-state-store.mjs";
+import { getProjectIdentifier } from "../lib/memory.mjs";
+import { createMission, validateMissionOwnership } from "../lib/mission.mjs";
+import { acceptTaskResult, createOperation, recordTaskResult } from "../lib/operation.mjs";
+import { acceptGraphTask, claimTask, createTaskGraph, recordTaskGraphResult } from "../lib/task-graph.mjs";
+import { goalState } from "../lib/state.mjs";
 import { mockSettlement } from "./helpers/mock-settlement.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { executeCoordinateTask } from "../lib/coordinator.mjs";
@@ -12,8 +19,8 @@ import { PROACTIVE_COMPACT_ENTRY, setProactiveThreshold } from "../lib/compactio
 import { randomUUID } from "node:crypto";
 import { trackControlPi } from "./helpers/control-state-isolation.mjs";
 
-function fixture(entries = []) {
-  const cwd = join(tmpdir(), `pi-maintenance-fixture-${randomUUID()}`);
+function fixture(entries = [], existingCwd = undefined) {
+  const cwd = existingCwd ?? join(tmpdir(), `pi-maintenance-fixture-${randomUUID()}`);
   const session = SessionManager.inMemory(cwd);
   for(const entry of entries)session.appendCustomEntry(entry.customType,entry.data);
   const handlers = new Map(), commands = new Map(), tools = new Map(), notices = [], compactions = [], continuations = [];
@@ -57,6 +64,70 @@ test("70% is a configurable soft GC trigger, never a Harness compaction threshol
   for(const value of ["49","91","73.5","abc"])assert.throws(()=>setProactiveThreshold(value));
   const restored=fixture(f.pi.entries);await restored.command("harness-compact","status");assert.match(restored.pi.notices.at(-1).message,/enabled at 73%/);
   await restored.command("harness-compact","disable");restored.setPercent(95);restored.emit("context");restored.emit("agent_settled");assert.equal(restored.maintenance().length,1);assert.equal(restored.pi.compactions.length,0);
+});
+
+test("explicit Mission resume gives the Commander the resume event and durable Situation Board", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "pi-mission-resume-"));
+  const mission_id = "M-resume";
+  const operation_id = "O-resume";
+  const task_id = "T-resume-01";
+  const objective = "Complete the accepted Mission.";
+  const mission = createMission({ mission_id, objective, operation_ids: [operation_id] });
+  let operation = createOperation({
+    operation_id,
+    mission_id,
+    objective: "Verify the accepted artifact.",
+    required_task_ids: [task_id],
+    task_intents: { [task_id]: "Create the verified artifact." },
+    task_specs: { [task_id]: { owner: "worker", permission: "write", verification: "git diff --check", acceptance_criteria: ["The artifact is verified."] } },
+  });
+  let graph = claimTask(createTaskGraph(operation), operation, task_id);
+  operation = recordTaskResult(operation, { version: 1, operation_id, task_id, execution_status: "execution_complete", verification_status: "verified", evidence_refs: [] });
+  graph = recordTaskGraphResult(graph, operation, task_id);
+  const acceptedOperation = acceptTaskResult(operation, task_id);
+  graph = acceptGraphTask(graph, operation, acceptedOperation, task_id);
+  operation = acceptedOperation;
+  const operations = { [operation_id]: operation };
+  const taskGraphs = { [operation_id]: graph };
+  const attempt_ledger = reconcileAttemptLedger({}, operations, taskGraphs);
+  const missions = { [mission_id]: mission };
+  validateMissionOwnership(missions, operations, taskGraphs, attempt_ledger);
+  const snapshot = {
+    missions,
+    operations,
+    task_graphs: taskGraphs,
+    attempt_ledger,
+    mission_goals: { [mission_id]: goalState(objective) },
+    coordinator_states: {},
+    head_registries: {},
+    head_states: {},
+    version: CONTROL_STATE_VERSION,
+    project_id: getProjectIdentifier(cwd),
+    revision: 1,
+    updated_at: new Date().toISOString(),
+  };
+  const controlDir = process.env.PI_HARNESS_CONTROL_DIR;
+  mkdirSync(controlDir, { recursive: true, mode: 0o700 });
+  writeFileSync(join(controlDir, `${snapshot.project_id}.json`), JSON.stringify(snapshot), { mode: 0o600 });
+
+  const f = fixture([], cwd);
+  try {
+    await f.command("mission", `resume ${mission_id}`);
+    const continuation = f.pi.continuations.at(-1);
+    assert.match(continuation, new RegExp(`Mission ${mission_id} was explicitly resumed by ID in this Pi session\\.`));
+    assert.match(continuation, /The fresh-session resume requirement is satisfied/);
+    assert.match(continuation, new RegExp(`Current Mission Situation Board:\\nMission ${mission_id}\\nStatus: active\\.\\nClosable: true\\.\\nOperation ${operation_id}: complete\\.`));
+    assert.match(continuation, /Do not recreate completed Operations or accepted Tasks/);
+
+    const resumed = readControlState(cwd);
+    assert.equal(resumed.missions[mission_id].status, "active");
+    assert.equal(resumed.operations[operation_id].status, "complete");
+    assert.equal(resumed.task_graphs[operation_id].nodes[task_id].scheduler_status, "accepted");
+    assert.equal(resumed.attempt_ledger[`A-${operation_id}-${task_id}-01`].status, "execution_complete");
+  } finally {
+    await f.pi.shutdown();
+    rmSync(cwd, { recursive: true, force: true });
+  }
 });
 
 test("92.5% long active turn waits for safe boundary, GC shrinks context, native Pi owns reserve",async()=>{

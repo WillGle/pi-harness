@@ -68,6 +68,8 @@ export default function harness(pi: Pi): void {
   let continuationQueued = false;
   let continuationCount = 0;
   let invalidTerminalAttempts = 0;
+  let resumedMissionId: string | undefined;
+  let controlStateRestored = false;
   let latestContextTelemetry: ReturnType<typeof contextTelemetry> | undefined;
   let latestContextUsage: any;
   let goalGroupId: string | undefined;
@@ -166,7 +168,21 @@ export default function harness(pi: Pi): void {
     if (continuationCount >= MAX_AUTOMATIC_CONTINUATIONS) return stopUnboundedGoal();
     continuationCount += 1;
     continuationQueued = true;
-    pi.sendUserMessage?.(`[PI_HARNESS_MISSION_CONTINUE]\nMission: ${goal.objective}\nContinue until you call pi_harness_goal with a terminal state and concrete evidence.`, { deliverAs: "followUp" });
+    const resumed = resumedMissionId === selectedMissionId;
+    resumedMissionId = undefined;
+    const mission = missions[selectedMissionId];
+    const situation = missionSituationBoard({ [selectedMissionId]: mission }, operations, taskGraphs, attemptLedger);
+    const message = [
+      "[PI_HARNESS_MISSION_CONTINUE]",
+      resumed ? `Mission ${selectedMissionId} was explicitly resumed by ID in this Pi session.` : undefined,
+      resumed && controlStateRestored ? "The fresh-session resume requirement is satisfied; do not report it as pending." : undefined,
+      `Mission: ${goal.objective}`,
+      "Current Mission Situation Board:",
+      situation,
+      "Use this persisted state. Do not recreate completed Operations or accepted Tasks.",
+      "Continue until you call pi_harness_goal with a terminal state and concrete evidence.",
+    ].filter(Boolean).join("\n");
+    pi.sendUserMessage?.(message, { deliverAs: "followUp" });
   };
 
   pi.on?.("session_start", async (_event: any, ctx: any) => {
@@ -175,6 +191,8 @@ export default function harness(pi: Pi): void {
     sessionTaskGroup = randomUUID();
     sessionEpoch++;
     selectedMissionId = undefined;
+    resumedMissionId = undefined;
+    controlStateRestored = false;
     goal = undefined;
     stablePromptFingerprint = undefined; nativeCompactionImminent = false; sessionEnding = false;
     maintenancePending = false;
@@ -196,6 +214,7 @@ export default function harness(pi: Pi): void {
     plan = restore(entries, PLAN_ENTRY) ?? plan;
     const restoredGoal = restore(entries, GOAL_ENTRY);
     const controlSnapshot = readControlState(controlCwd);
+    controlStateRestored = Boolean(controlSnapshot);
     missionGoals = controlSnapshot?.mission_goals ?? (restoredGoal?.mission_id ? { [restoredGoal.mission_id]: restoredGoal } : {});
     const schedulerSnapshot = restore(entries, TASK_GRAPH_ENTRY);
     operations = controlSnapshot ? controlSnapshot.operations : schedulerSnapshot ? schedulerSnapshot.operations : restore(entries, OPERATION_ENTRY) ?? {};
@@ -380,6 +399,7 @@ export default function harness(pi: Pi): void {
     activeOperationRuns.clear();
     goalGroupId = undefined;
     continuationQueued = false;
+    resumedMissionId = undefined;
     const lease = controlLease;
     controlLease = undefined;
     selectedMissionId = undefined;
@@ -423,6 +443,7 @@ export default function harness(pi: Pi): void {
       await ensureControlLease(ctx.cwd);
       if (goalGroupId) cancelCoordinateTasks(goalGroupId);
       selectedMissionId = id;
+      resumedMissionId = id;
       if (mission.status !== "active") missions = { ...missions, [id]: createMission({ ...mission, status: "active" }) };
       const previousGoal = missionGoals[id];
       goal = { ...goalState(mission.objective, "active", Array.isArray(previousGoal?.evidence) ? previousGoal.evidence : []), mission_id: id };
@@ -448,6 +469,7 @@ export default function harness(pi: Pi): void {
       selectedMissionId = mission_id;
       missionGoals = { ...missionGoals, [mission_id]: goal };
       goalGroupId = randomUUID(); continuationCount = 0; invalidTerminalAttempts = 0;
+      resumedMissionId = undefined;
       missions = { ...missions, [mission_id]: createMission({ mission_id, objective: goal.objective }) };
       maintenancePending = true;
       persistMission(); persistScheduler(); persist(); if (ctx.isIdle?.() !== false) maintenancePending = false; say(ctx, `Goal active: ${goal.objective}`); continueGoal();
