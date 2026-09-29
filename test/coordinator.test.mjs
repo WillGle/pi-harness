@@ -751,6 +751,7 @@ test("public task validation keeps scout and research read-only", () => {
   assert.deepEqual(JSON.parse(readFileSync(".pi/subagents.json", "utf8")), {
     maxConcurrent: 4,
     maxConcurrentForeground: 1,
+    fleetView: false,
     worktreeIsolation: true,
   });
   for (const role of ["scout", "research"]) {

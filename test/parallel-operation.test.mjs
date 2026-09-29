@@ -25,9 +25,11 @@ test("Harness policy and package capacity are bounded independently", () => {
     process.env.PI_HARNESS_MAX_PARALLEL_TASKS = "5";
     assert.throws(() => harness({}), /PI_HARNESS_MAX_PARALLEL_TASKS/);
   } finally { if (saved === undefined) delete process.env.PI_HARNESS_MAX_PARALLEL_TASKS; else process.env.PI_HARNESS_MAX_PARALLEL_TASKS = saved; }
-  assert.deepEqual(JSON.parse(readFileSync(".pi/subagents.json", "utf8")), { maxConcurrent: 4, maxConcurrentForeground: 1, worktreeIsolation: true });
+  assert.deepEqual(JSON.parse(readFileSync(".pi/subagents.json", "utf8")), { maxConcurrent: 4, maxConcurrentForeground: 1, fleetView: false, worktreeIsolation: true });
   const manager = new AgentManager(() => {}, 1);
-  applySettings(loadSettings(process.cwd()), { setMaxConcurrent: (n) => manager.setMaxConcurrent(n), setMaxConcurrentForeground: (n) => manager.setMaxConcurrentForeground(n), setWorktreeIsolation: () => {} });
+  let fleetView = true;
+  applySettings(loadSettings(process.cwd()), { setMaxConcurrent: (n) => manager.setMaxConcurrent(n), setMaxConcurrentForeground: (n) => manager.setMaxConcurrentForeground(n), setFleetView: (enabled) => { fleetView = enabled; }, setWorktreeIsolation: () => {} });
+  assert.equal(fleetView, false, "the project setting must disable the duplicate FleetView roster");
   assert.equal(manager.getMaxConcurrent(), 4, "installed pi-subagents must apply the project background cap");
   assert.equal(manager.getMaxConcurrentForeground(), 1);
   manager.runningBackground = 3;
