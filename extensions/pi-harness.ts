@@ -69,6 +69,7 @@ export default function harness(pi: Pi): void {
   let continuationCount = 0;
   let invalidTerminalAttempts = 0;
   let latestContextTelemetry: ReturnType<typeof contextTelemetry> | undefined;
+  let latestContextUsage: any;
   let goalGroupId: string | undefined;
 
   const say = (ctx: Context, message: string, level: "info" | "warning" | "error" = "info") => ctx.ui?.notify?.(message, level);
@@ -178,6 +179,7 @@ export default function harness(pi: Pi): void {
     stablePromptFingerprint = undefined; nativeCompactionImminent = false; sessionEnding = false;
     maintenancePending = false;
     latestContextTelemetry = undefined;
+    latestContextUsage = undefined;
     maintenanceArmed = true;
     maintenanceEpoch = 0;
     lastMaintenanceEpoch = -1;
@@ -229,7 +231,8 @@ export default function harness(pi: Pi): void {
     if (Object.keys(operations).length) persistScheduler();
     // One restore-time scan seeds the footer. Later refreshes happen only at
     // settlement boundaries, so render() never walks an unbounded session.
-    latestContextTelemetry = collectContextTelemetry(ctx.sessionManager?.getEntries?.() ?? [], ctx.getContextUsage?.());
+    latestContextUsage = ctx.getContextUsage?.();
+    latestContextTelemetry = collectContextTelemetry(ctx.sessionManager?.getEntries?.() ?? [], latestContextUsage);
     proactivePolicy = restoreProactivePolicy(restore(entries, PROACTIVE_COMPACT_ENTRY));
     continuationCount = 0;
     invalidTerminalAttempts = 0;
@@ -256,14 +259,14 @@ export default function harness(pi: Pi): void {
         render(width: number): string[] {
           // Rendering must be read-only. Telemetry is refreshed at authoritative
           // settlement events, never by scanning the session from render().
-          const metrics = latestContextTelemetry ?? contextTelemetry([], ctx.getContextUsage?.(), { missions, operations, taskGraphs, attemptLedger });
+          const metrics = latestContextTelemetry ?? contextTelemetry([], latestContextUsage, { missions, operations, taskGraphs, attemptLedger });
           const branch = footerData.getGitBranch();
           const left = theme.fg("dim", `${basename(ctx.cwd)}${branch ? ` / ${branch}` : ""}`);
           const model = `${ctx.model?.id ?? "no-model"} · ${ctx.thinkingLevel ?? "off"}`;
           const right = theme.fg("dim", model);
           const first = truncateToWidth(left + " ".repeat(Math.max(1, width - visibleWidth(left) - visibleWidth(right))) + right, width);
 
-          const usage = ctx.getContextUsage?.();
+          const usage = latestContextUsage;
           const percent = Number.isFinite(usage?.percent) ? usage.percent : null;
           const cells = 12;
           const filled = percent === null ? 0 : Math.max(0, Math.min(cells, Math.round(percent / 100 * cells)));
@@ -311,18 +314,21 @@ export default function harness(pi: Pi): void {
     saveCompactState(event);
   };
   pi.on?.("session_before_compact", (event: any) => { nativeCompactionImminent = true; checkpoint(event); return { customInstructions: compactInstructions, replaceInstructions: false }; });
-  pi.on?.("session_compact", () => {
+  pi.on?.("session_compact", (_event: any, ctx: any) => {
     nativeCompactionImminent = false;
+    latestContextUsage = ctx?.getContextUsage?.();
     // Pi owns compaction; the checkpoint does not change Scheduler semantics.
     maintenancePending = false; lastMaintenanceEpoch = maintenanceEpoch; maintenanceArmed = false;
   });
-  pi.on?.("session_compact_failed", () => {
+  pi.on?.("session_compact_failed", (_event: any, ctx: any) => {
     nativeCompactionImminent = false;
+    latestContextUsage = ctx?.getContextUsage?.();
     maintenancePending = false; lastMaintenanceEpoch = maintenanceEpoch; maintenanceArmed = false;
   });
   pi.on?.("context", (_event: any, ctx: any) => {
+    latestContextUsage = ctx.getContextUsage?.();
     if (!proactivePolicy.enabled) return;
-    const percent = ctx.getContextUsage?.()?.percent;
+    const percent = latestContextUsage?.percent;
     if (typeof percent !== "number" || !Number.isFinite(percent)) return;
     if (percent < proactivePolicy.threshold_percent!) {
       if (!maintenanceArmed) { maintenanceEpoch++; maintenanceArmed = true; }
@@ -350,7 +356,7 @@ export default function harness(pi: Pi): void {
   };
   pi.on?.("turn_end", maintainContext);
   pi.on?.("agent_before_settle", maintainContext);
-  pi.on?.("agent_settled", (_event: any, ctx: any) => { continuationQueued = false; latestContextTelemetry = collectContextTelemetry(ctx.sessionManager?.getEntries?.() ?? [], ctx.getContextUsage?.()); pi.appendEntry?.("pi-harness-context-telemetry", latestContextTelemetry); continueGoal(); });
+  pi.on?.("agent_settled", (_event: any, ctx: any) => { continuationQueued = false; latestContextUsage = ctx.getContextUsage?.(); latestContextTelemetry = collectContextTelemetry(ctx.sessionManager?.getEntries?.() ?? [], latestContextUsage); pi.appendEntry?.("pi-harness-context-telemetry", latestContextTelemetry); continueGoal(); });
   pi.on?.("tool_execution_start", (event: any) => { activeToolCalls.add(event.toolCallId); });
   pi.on?.("tool_execution_end", (event: any, ctx: any) => { activeToolCalls.delete(event.toolCallId); });
   pi.on?.("before_agent_start", (event: any, ctx: any) => {
@@ -381,7 +387,8 @@ export default function harness(pi: Pi): void {
   });
 
   pi.registerCommand?.("harness-context", { description: "Show context/cache/GC usage; missing provider metrics stay unknown", handler: async (_args: string, ctx: any) => {
-    latestContextTelemetry = collectContextTelemetry(ctx.sessionManager?.getEntries?.() ?? [], ctx.getContextUsage?.());
+    latestContextUsage = ctx.getContextUsage?.();
+    latestContextTelemetry = collectContextTelemetry(ctx.sessionManager?.getEntries?.() ?? [], latestContextUsage);
     say(ctx, JSON.stringify(latestContextTelemetry));
   }});
 
