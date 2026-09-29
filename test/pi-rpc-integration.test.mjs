@@ -24,7 +24,7 @@ function spawnPiRpc(options = {}) {
   const child = spawn(DEFAULT_PI_EXECUTABLE, ["--mode", "rpc", "-e", ".", "--no-session"], {
     stdio: ["pipe", "pipe", "pipe"],
     cwd: options.cwd || process.cwd(),
-    env: defaultPiEnv(),
+    env: { ...defaultPiEnv(), PI_HARNESS_CONTROL_DIR: join(tmpDir, "control") },
   });
 
   const events = [];

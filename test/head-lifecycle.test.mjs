@@ -4,18 +4,20 @@ import assert from "node:assert/strict";
 import harness from "../extensions/pi-harness.ts";
 import { executeCoordinatorTurn } from "../lib/coordinator.mjs";
 import { OPERATION_ENTRY } from "../lib/operation.mjs";
+import { trackControlPi } from "./helpers/control-state-isolation.mjs";
 
-function fakePi(entries = []) {
+async function fakePi(entries = []) {
   const tools = new Map(), events = new Map(), lifecycle = new Map(), commands = new Map();
   const pi = { entries, tools, commands,
     registerTool(tool) { tools.set(tool.name, tool); }, registerCommand(name, value) { commands.set(name, value); },
     appendEntry(customType, data) { pi.entries.push({ customType, data }); },
     on(name, handler) { lifecycle.set(name, handler); },
     events: { on(name, handler) { const set = events.get(name) ?? new Set(); set.add(handler); events.set(name, set); return () => set.delete(handler); }, emit(name, value) { if (this.mockSettlement !== false) mockSettlement(name, value); for (const handler of events.get(name) ?? []) handler(value); } },
-    start(next) { pi.entries = next; lifecycle.get("session_start")({}, { mode: "rpc", sessionManager: { getEntries: () => next } }); },
+    async start(next) { pi.entries = next; await lifecycle.get("session_start")({}, { mode: "rpc", sessionManager: { getEntries: () => next } }); },
+    shutdown() { return lifecycle.get("session_shutdown")?.(); },
     checkpoint() { lifecycle.get("session_before_compact")({}); },
   };
-  harness(pi); pi.start(entries); return pi;
+  harness(pi); await pi.start(entries); return trackControlPi(pi);
 }
 const call = async (pi, name, input) => JSON.parse((await pi.tools.get(name).execute("id", input)).content[0].text);
 const startMission = (pi, objective = "Check domains.") => pi.commands.get("goal").handler(objective, {});
@@ -26,7 +28,7 @@ const head = JSON.stringify({ version: 1, operation_id: "O-G", head_id: "H-A", a
 const wait = async (condition) => { for (let i = 0; i < 100 && !condition(); i++) await new Promise((resolve) => setTimeout(resolve, 2)); assert.ok(condition()); };
 
 test("Operation setup persists bounded Task intents and shared constraints for Head context", async () => {
-  const pi = fakePi(); await startMission(pi);
+  const pi = await fakePi(); await startMission(pi);
   const result = await call(pi, "pi_harness_operation", { ...create, constraints: ["Do not integrate."], task_intents: { "T-A": "Inspect architecture.", "T-B": "Unrelated task." } });
   assert.equal(result.status, "open");
   assert.equal(result.constraints, undefined);
@@ -37,7 +39,7 @@ test("Operation setup persists bounded Task intents and shared constraints for H
 });
 
 test("Head Registry and bounded HeadState survive checkpoint and reload; no transcript persists", async () => {
-  const pi = fakePi(); await startMission(pi); await call(pi, "pi_harness_operation", create);
+  const pi = await fakePi(); await startMission(pi); await call(pi, "pi_harness_operation", create);
   const registry = latest(pi, "pi-harness-head-registry-state");
   assert.deepEqual(registry["O-G"].heads["H-A"].task_ids, ["T-A"]);
   let turns = 0;
@@ -53,14 +55,14 @@ test("Head Registry and bounded HeadState survive checkpoint and reload; no tran
   const saved = [...pi.entries];
   assert.deepEqual(latest(pi, "pi-harness-head-registry-state"), registry);
   assert.ok(!JSON.stringify(saved.filter((entry) => entry.customType === "pi-harness-head-state")).includes("Head transcript"));
-  const reloaded = fakePi(saved);
+  const reloaded = await fakePi(saved);
   assert.deepEqual(latest(reloaded, "pi-harness-head-registry-state"), registry);
   reloaded.checkpoint();
   assert.equal(latest(reloaded, "pi-harness-head-state")["O-G"]["H-A"].turns, 1);
 });
 
 test("Session switch prevents old Head result from changing new session", async () => {
-  const pi = fakePi(); await startMission(pi); await call(pi, "pi_harness_operation", create);
+  const pi = await fakePi(); await startMission(pi); await call(pi, "pi_harness_operation", create);
   let activeHead;
   let serial = 0;
   pi.events.on("subagents:rpc:spawn", (request) => {
@@ -80,7 +82,7 @@ test("Session switch prevents old Head result from changing new session", async 
 });
 
 test("Goal cancellation aborts active Head and leaves unrelated turn running", async () => {
-  const pi = fakePi(); await pi.commands.get("goal").handler("Check domains.", {}); await call(pi, "pi_harness_operation", create);
+  const pi = await fakePi(); await pi.commands.get("goal").handler("Check domains.", {}); await call(pi, "pi_harness_operation", create);
   const pending = [];
   pi.events.on("subagents:rpc:spawn", (request) => {
     const id = `turn-${pending.length}`; pending.push({ id, request });

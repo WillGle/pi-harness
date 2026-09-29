@@ -365,6 +365,7 @@ async function createFixture(options = {}) {
     HOME: home,
     PI_CODING_AGENT_DIR: agentDir,
     PI_CODING_AGENT_SESSION_DIR: sessionDir,
+    PI_HARNESS_CONTROL_DIR: join(root, "control"),
     PI_OFFLINE: "1",
   };
   await provider.start();

@@ -56,7 +56,7 @@ A Worker finishing execution is not success by itself. Harness stores Evidence, 
 - Explicit TaskResult acceptance and bounded OperationReports.
 - Safe session switching, cancellation, and compaction lifecycle.
 
-Pi Harness also provides `/plan`, `/goal`, and curated skills. The separate `pi-harness-acp` bridge is experimental and outside the supported product surface.
+Pi Harness also provides `/plan`, `/goal`, `/mission list`, and `/mission resume <mission-id>`, plus curated skills. Mission control state is stored in a private project-scoped file independently of Pi session history; a new session lists persisted Missions and requires an explicit ID before it can mutate one. The separate `pi-harness-acp` bridge is experimental and outside the supported product surface.
 
 ## Platform support
 

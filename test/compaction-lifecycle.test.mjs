@@ -9,9 +9,12 @@ import { join } from "node:path";
 import { executeCoordinateTask } from "../lib/coordinator.mjs";
 import harness from "../extensions/pi-harness.ts";
 import { PROACTIVE_COMPACT_ENTRY, setProactiveThreshold } from "../lib/compaction-policy.mjs";
+import { randomUUID } from "node:crypto";
+import { trackControlPi } from "./helpers/control-state-isolation.mjs";
 
 function fixture(entries = []) {
-  const session = SessionManager.inMemory("/tmp/pi-maintenance-fixture");
+  const cwd = join(tmpdir(), `pi-maintenance-fixture-${randomUUID()}`);
+  const session = SessionManager.inMemory(cwd);
   for(const entry of entries)session.appendCustomEntry(entry.customType,entry.data);
   const handlers = new Map(), commands = new Map(), tools = new Map(), notices = [], compactions = [], continuations = [];
   let percent = 0, idle = true;
@@ -26,7 +29,7 @@ function fixture(entries = []) {
     sendUserMessage(text) { continuations.push(text); },
   };
   harness(pi);
-  const ctx = { mode: "rpc", cwd:"/tmp/pi-maintenance-fixture", sessionManager: session, ui: { notify: (message, type) => notices.push({ message, type }) },
+  const ctx = { mode: "rpc", cwd, sessionManager: session, ui: { notify: (message, type) => notices.push({ message, type }) },
     isIdle: () => idle, getContextUsage: () => ({ percent }), compact: (options) => { compactions.push(options); } };
   const boundary = () => {
     const result=handlers.get("agent_before_settle")?.({entries:[],context:{contextEntries:session.buildSessionProjection().entries,pendingMessages:[]}},ctx);
@@ -39,6 +42,8 @@ function fixture(entries = []) {
   };
   const emit = (name, event = {}) => {if(name === "agent_settled" && idle)boundary();return handlers.get(name)?.(event, ctx);};
   emit("session_start");
+  pi.shutdown = () => handlers.get("session_shutdown")?.();
+  trackControlPi(pi);
   return { pi, ctx, emit, session, boundary, maintenance:()=>session.getEntries().filter(e=>e.customType === "pi-harness-context-maintenance"), setPercent: (value) => { percent = value; }, setIdle: (value) => { idle = value; },
     command: (name, args) => commands.get(name).handler(args, ctx),
     latest: (name) => session.getEntries().filter((entry) => entry.customType === name).at(-1)?.data };

@@ -144,12 +144,12 @@ else {
     supported: basePlatform.supported && filesystem.unix_permissions && filesystem.nofollow && processCapabilities.signals && processCapabilities.process_groups,
   };
   const onLinux = basePlatform.actual === "linux";
-  const commands = Object.fromEntries(["sh", "git", "rg", "pi", "npm", "pi-harness-acp"].map((name) => [name === "pi-harness-acp" ? "acp" : name, commandPath(name)]));
+  const commands = Object.fromEntries(["sh", "git", "rg", "flock", "pi", "npm", "pi-harness-acp"].map((name) => [name === "pi-harness-acp" ? "acp" : name, commandPath(name)]));
   const gitWorktrees = probeGitWorktrees(commands.git, platform);
   const pi = platform.supported ? piVersion(commands.pi) : { ready: false, version: "unavailable" };
   const skills = platform.supported ? verifySkills(root) : { ok: false, errors: [], lock: { skills: {} } };
   const resources = { extension: existsSync(resolve(root, "extensions/pi-harness.ts")), skills: existsSync(resolve(root, "skills/skills.lock.json")) };
-  const requiredCommands = ["sh", "git", "rg", "pi", "npm"];
+  const requiredCommands = ["sh", "git", "rg", "flock", "pi", "npm"];
   const commandsReady = requiredCommands.every((name) => commands[name]);
   const toolCalling = platform.supported && pi.ready && checkToolCallingReadiness(commands.pi, resources.extension);
   const zed = value === "--zed" && platform.supported ? { supported: false, ...exactZedEntry() } : { supported: false, ready: false, path: null };

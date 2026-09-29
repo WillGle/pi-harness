@@ -1,4 +1,5 @@
 import { contextTelemetry, deterministicContextEdits, installStablePrompt, stablePromptSections } from "../lib/context-economics.mjs";
+import { acquireControlLease, readControlState, writeControlState } from "../lib/control-state-store.mjs";
 import { MISSION_ENTRY, attachOperation, createMission, missionIsClosable, missionSituationBoard, validateMissionOwnership } from "../lib/mission.mjs";
 import { reconcileAttemptLedger } from "../lib/attempt-ledger.mjs";
 import { assertSupportedPlatform } from "../lib/platform.mjs";
@@ -47,6 +48,10 @@ export default function harness(pi: Pi): void {
   let taskGraphs: Record<string, ReturnType<typeof createTaskGraph>> = {};
   let headRegistries: Record<string, ReturnType<typeof createHeadRegistry>> = {};
   let headStates: Record<string, Record<string, any>> = {};
+  let missionGoals: Record<string, any> = {};
+  let selectedMissionId: string | undefined;
+  let controlLease: any;
+  let controlCwd = process.cwd();
   let sessionTaskGroup = randomUUID();
   const activeOperationRuns = new Map<string, { controller: AbortController; goalGroup?: string }>();
   let sessionEpoch = 0;
@@ -67,7 +72,26 @@ export default function harness(pi: Pi): void {
   let goalGroupId: string | undefined;
 
   const say = (ctx: Context, message: string, level: "info" | "warning" | "error" = "info") => ctx.ui?.notify?.(message, level);
+  const persistControlState = () => {
+    if (!controlLease) return;
+    attemptLedger = reconcileAttemptLedger(attemptLedger, operations, taskGraphs);
+    validateMissionOwnership(missions, operations, taskGraphs, attemptLedger);
+    writeControlState({ missions, operations, task_graphs: taskGraphs, attempt_ledger: attemptLedger, mission_goals: missionGoals,
+      coordinator_states: coordinatorStates, head_registries: headRegistries, head_states: headStates }, controlLease, controlCwd);
+  };
+  const ensureControlLease = async (cwd = process.cwd()) => {
+    const projectCwd = resolve(cwd ?? process.cwd());
+    if (resolve(controlCwd) !== projectCwd) throw new Error("Mission control state is scoped to this Pi session's project directory; start a new session before changing projects");
+    if (controlLease) {
+      assertControlLease(controlLease, projectCwd);
+      return;
+    }
+    controlLease = await acquireControlLease(projectCwd);
+    controlCwd = projectCwd;
+  };
   const persist = () => {
+    if (goal?.mission_id) missionGoals = { ...missionGoals, [goal.mission_id]: goal };
+    persistControlState();
     pi.appendEntry?.(PLAN_ENTRY, plan);
     if (goal) pi.appendEntry?.(GOAL_ENTRY, goal);
   };
@@ -75,10 +99,15 @@ export default function harness(pi: Pi): void {
   const persistScheduler = () => {
     attemptLedger = reconcileAttemptLedger(attemptLedger, operations, taskGraphs);
     validateMissionOwnership(missions, operations, taskGraphs, attemptLedger);
+    persistControlState();
     pi.appendEntry?.(TASK_GRAPH_ENTRY, { version: 2, missions, operations, task_graphs: taskGraphs, attempt_ledger: attemptLedger });
     maintenancePending = true;
   };
-  const persistMission = () => pi.appendEntry?.(MISSION_ENTRY, missions);
+  const persistMission = () => {
+    if (goal?.mission_id) missionGoals = { ...missionGoals, [goal.mission_id]: goal };
+    persistControlState();
+    pi.appendEntry?.(MISSION_ENTRY, missions);
+  };
   const missionBoard = () => missionSituationBoard(missions, operations, taskGraphs, attemptLedger);
   const collectContextTelemetry = (entries: any[], usage: any) => contextTelemetry(entries, usage, { missions, operations, taskGraphs, attemptLedger });
   const saveCompactState = (event: Record<string, unknown> = {}) => pi.appendEntry?.(COMPACT_ENTRY, controlStateSummary({
@@ -102,9 +131,10 @@ export default function harness(pi: Pi): void {
     const groupId = goal?.status === "active" ? goalGroupId : undefined;
     for (const run of activeOperationRuns.values()) if (run.goalGroup && run.goalGroup === groupId) run.controller.abort();
     if (goal?.status === "active") {
-      const activeMission = Object.values(missions).find((mission: any) => mission.status === "active" && mission.objective === goal?.objective) as any;
+      const activeMission = selectedMissionId ? missions[selectedMissionId] : undefined;
       goal = transitionGoal(goal, "cancelled");
       if (activeMission) missions = { ...missions, [activeMission.mission_id]: createMission({ ...activeMission, status: "cancelled" }) };
+      if (goal.mission_id) missionGoals = { ...missionGoals, [goal.mission_id]: goal };
       maintenancePending = true;
       persistMission(); persistScheduler();
     }
@@ -131,18 +161,20 @@ export default function harness(pi: Pi): void {
     persist();
   };
   const continueGoal = () => {
-    if (!goal || goal.status !== "active" || continuationQueued || plan.enabled || maintenancePending) return;
+    if (!goal || goal.status !== "active" || !selectedMissionId || goal.mission_id !== selectedMissionId || continuationQueued || plan.enabled || maintenancePending) return;
     if (continuationCount >= MAX_AUTOMATIC_CONTINUATIONS) return stopUnboundedGoal();
     continuationCount += 1;
     continuationQueued = true;
     pi.sendUserMessage?.(`[PI_HARNESS_MISSION_CONTINUE]\nMission: ${goal.objective}\nContinue until you call pi_harness_goal with a terminal state and concrete evidence.`, { deliverAs: "followUp" });
   };
 
-  pi.on?.("session_start", (_event: any, ctx: any) => {
+  pi.on?.("session_start", async (_event: any, ctx: any) => {
     cancelCoordinateTasks(sessionTaskGroup);
     if (goalGroupId) cancelCoordinateTasks(goalGroupId);
     sessionTaskGroup = randomUUID();
     sessionEpoch++;
+    selectedMissionId = undefined;
+    goal = undefined;
     stablePromptFingerprint = undefined; nativeCompactionImminent = false; sessionEnding = false;
     maintenancePending = false;
     latestContextTelemetry = undefined;
@@ -152,16 +184,22 @@ export default function harness(pi: Pi): void {
     activeToolCalls.clear();
     for (const run of activeOperationRuns.values()) run.controller.abort();
     activeOperationRuns.clear(); // Old callbacks are epoch-guarded and cannot clear a new run.
+    const previousControlLease = controlLease;
+    controlLease = undefined;
+    if (previousControlLease) await previousControlLease.release();
+    controlCwd = ctx.cwd ?? process.cwd();
     const activeTools = pi.getActiveTools?.() ?? [];
     pi.setActiveTools?.(activeTools.filter((name: string) => !PACKAGE_TOOLS.has(name)));
     const entries = ctx.sessionManager?.getEntries?.() ?? [];
     plan = restore(entries, PLAN_ENTRY) ?? plan;
-    goal = restore(entries, GOAL_ENTRY);
+    const restoredGoal = restore(entries, GOAL_ENTRY);
+    const controlSnapshot = readControlState(controlCwd);
+    missionGoals = controlSnapshot?.mission_goals ?? (restoredGoal?.mission_id ? { [restoredGoal.mission_id]: restoredGoal } : {});
     const schedulerSnapshot = restore(entries, TASK_GRAPH_ENTRY);
-    operations = schedulerSnapshot ? schedulerSnapshot.operations : restore(entries, OPERATION_ENTRY) ?? {};
+    operations = controlSnapshot ? controlSnapshot.operations : schedulerSnapshot ? schedulerSnapshot.operations : restore(entries, OPERATION_ENTRY) ?? {};
     const legacyCoordinator = restore(entries, COORDINATOR_ENTRY) ?? {};
-    taskGraphs = schedulerSnapshot ? schedulerSnapshot.task_graphs : Object.fromEntries(Object.entries(operations).map(([id, operation]) => [id, migrateTaskGraph(operation, legacyCoordinator[id]?.dispatch_counts)]));
-    missions = schedulerSnapshot?.missions ?? restore(entries, MISSION_ENTRY) ?? {};
+    taskGraphs = controlSnapshot ? controlSnapshot.task_graphs : schedulerSnapshot ? schedulerSnapshot.task_graphs : Object.fromEntries(Object.entries(operations).map(([id, operation]) => [id, migrateTaskGraph(operation, legacyCoordinator[id]?.dispatch_counts)]));
+    missions = controlSnapshot ? controlSnapshot.missions : schedulerSnapshot?.missions ?? restore(entries, MISSION_ENTRY) ?? {};
     for (const [id, operation] of Object.entries(operations) as [string, any][]) {
       // Legacy Operation state has no trustworthy parent link. Do not create a
       // Mission or infer a child outcome during restore. The session must stop
@@ -172,14 +210,14 @@ export default function harness(pi: Pi): void {
       taskGraphs[id] = reconcileTaskGraph(taskGraphs[id], operations[id]);
     }
     if (Object.keys(taskGraphs).some((id) => !Object.hasOwn(operations, id))) throw new Error("TaskGraph has no owning Operation");
-    attemptLedger = reconcileAttemptLedger(schedulerSnapshot?.attempt_ledger ?? {}, operations, taskGraphs);
+    attemptLedger = reconcileAttemptLedger(controlSnapshot?.attempt_ledger ?? schedulerSnapshot?.attempt_ledger ?? {}, operations, taskGraphs);
     validateMissionOwnership(missions, operations, taskGraphs, attemptLedger);
-    coordinatorStates = Object.fromEntries(Object.entries(legacyCoordinator).map(([id, state]: [string, any]) => [id, {
+    coordinatorStates = controlSnapshot?.coordinator_states ?? Object.fromEntries(Object.entries(legacyCoordinator).map(([id, state]: [string, any]) => [id, {
       version: 1, operation_id: id, turns: state.turns ?? 0, decisions: (state.decisions ?? []).slice(-7), blocker: state.blocker ?? null,
       ...(state.consultations_since_progress !== undefined ? { consultations_since_progress: state.consultations_since_progress } : {}),
     }]));
-    headRegistries = restore(entries, HEAD_REGISTRY_ENTRY) ?? {};
-    headStates = restore(entries, HEAD_STATE_ENTRY) ?? {};
+    headRegistries = controlSnapshot?.head_registries ?? restore(entries, HEAD_REGISTRY_ENTRY) ?? {};
+    headStates = controlSnapshot?.head_states ?? restore(entries, HEAD_STATE_ENTRY) ?? {};
     for (const [id, registry] of Object.entries(headRegistries)) {
       if (!operations[id]) throw new Error("Head Registry has no owning Operation");
       validateHeadRegistry(registry, operations[id]);
@@ -195,7 +233,7 @@ export default function harness(pi: Pi): void {
     proactivePolicy = restoreProactivePolicy(restore(entries, PROACTIVE_COMPACT_ENTRY));
     continuationCount = 0;
     invalidTerminalAttempts = 0;
-    goalGroupId = goal?.status === "active" ? randomUUID() : undefined;
+    goalGroupId = undefined;
     if (plan.enabled) setPlan(true, ctx);
     if (ctx.mode !== "tui") return;
 
@@ -327,7 +365,20 @@ export default function harness(pi: Pi): void {
     if (sessionEnding || maintenancePending || nativeCompactionImminent || current !== stablePromptFingerprint) return { action: "stop" };
     // Provider mechanics, TTL and economics remain entirely Pi-owned.
   });
-  pi.on?.("session_shutdown", () => { sessionEnding = true; });
+  pi.on?.("session_shutdown", async () => {
+    sessionEnding = true;
+    sessionEpoch++;
+    cancelCoordinateTasks(sessionTaskGroup);
+    if (goalGroupId) cancelCoordinateTasks(goalGroupId);
+    for (const run of activeOperationRuns.values()) run.controller.abort();
+    activeOperationRuns.clear();
+    goalGroupId = undefined;
+    continuationQueued = false;
+    const lease = controlLease;
+    controlLease = undefined;
+    selectedMissionId = undefined;
+    if (lease) await lease.release();
+  });
 
   pi.registerCommand?.("harness-context", { description: "Show context/cache/GC usage; missing provider metrics stay unknown", handler: async (_args: string, ctx: any) => {
     latestContextTelemetry = collectContextTelemetry(ctx.sessionManager?.getEntries?.() ?? [], ctx.getContextUsage?.());
@@ -348,15 +399,48 @@ export default function harness(pi: Pi): void {
   pi.registerCommand?.("plan", { description: "Read-only planning: /plan on|off|status", handler: async (args: string, ctx: Context) => {
     try { const action = parsePlan(args); if (action === "status") say(ctx, `Plan mode: ${plan.enabled ? "on" : "off"}`); else setPlan(action === "on", ctx); } catch (error) { say(ctx, (error as Error).message, "error"); }
   }});
+  pi.registerCommand?.("mission", { description: "List Missions or explicitly resume one: /mission list|status|resume <mission-id>", handler: async (args: string, ctx: Context) => {
+    const [action, id, ...extra] = args.trim().split(/\s+/);
+    if (!action || action === "list" || action === "status") {
+      const all = Object.values(missions).sort((a: any, b: any) => a.mission_id.localeCompare(b.mission_id));
+      const shown = all.slice(-32).map((mission: any) => `${mission.mission_id}${mission.mission_id === selectedMissionId ? " [selected]" : ""} · ${mission.status} · ${String(mission.objective).replace(/\s+/g, " ").slice(0, 100)}`);
+      const omitted = all.length - shown.length;
+      return say(ctx, all.length ? `${shown.join("\n")}${omitted > 0 ? `\n${omitted} older Mission(s) omitted.` : ""}` : "No persisted Missions.");
+    }
+    if (action !== "resume" || !id || extra.length) return say(ctx, "Use /mission list or /mission resume <mission-id>.", "warning");
+    if (activeOperationRuns.size || ctx.isIdle?.() === false) return say(ctx, "Wait until the current operation and Pi turn settle before resuming a Mission.", "warning");
+    const mission = missions[id];
+    if (!mission) return say(ctx, `Unknown Mission ${id}. Use /mission list to inspect persisted Missions.`, "error");
+    if (mission.status === "complete") return say(ctx, `Mission ${id} is complete and cannot be resumed.`, "warning");
+    try {
+      await ensureControlLease(ctx.cwd);
+      if (goalGroupId) cancelCoordinateTasks(goalGroupId);
+      selectedMissionId = id;
+      if (mission.status !== "active") missions = { ...missions, [id]: createMission({ ...mission, status: "active" }) };
+      const previousGoal = missionGoals[id];
+      goal = { ...goalState(mission.objective, "active", Array.isArray(previousGoal?.evidence) ? previousGoal.evidence : []), mission_id: id };
+      missionGoals = { ...missionGoals, [id]: goal };
+      goalGroupId = randomUUID(); continuationCount = 0; invalidTerminalAttempts = 0; continuationQueued = false;
+      maintenancePending = true;
+      persistMission(); persistScheduler(); persist();
+      if (ctx.isIdle?.() !== false) maintenancePending = false;
+      say(ctx, `Mission ${id} resumed. Its Task and Attempt state is unchanged.`);
+      continueGoal();
+    } catch (error) { say(ctx, (error as Error).message, "error"); }
+  }});
   pi.registerCommand?.("goal", { description: "Manage one evidence-backed goal", handler: async (args: string, ctx: Context) => {
     const input = args.trim();
-    if (input === "status") return say(ctx, goal ? `${goal.status}: ${goal.objective}` : "No goal.");
-    if (input === "cancel") return cancelGoal(ctx);
+    if (input === "status") return say(ctx, goal && selectedMissionId ? `${goal.status}: ${goal.objective} (${selectedMissionId})` : "No Mission selected. Use /mission list and /mission resume <mission-id>.");
+    if (input === "cancel") return selectedMissionId ? cancelGoal(ctx) : say(ctx, "No Mission selected. Use /mission resume <mission-id> before cancelling.", "warning");
     if (plan.enabled) return say(ctx, "Disable plan mode before starting a goal.", "warning");
-    if (goal?.status === "active") return say(ctx, "An active goal already exists; use /goal status or /goal cancel.", "warning");
+    if (goal?.status === "active" && selectedMissionId) return say(ctx, "An active goal already exists; use /goal status or /goal cancel.", "warning");
     try {
-      goal = goalState(input); goalGroupId = randomUUID(); continuationCount = 0; invalidTerminalAttempts = 0;
+      await ensureControlLease(ctx.cwd);
       const mission_id = `M-${randomUUID()}`;
+      goal = { ...goalState(input), mission_id };
+      selectedMissionId = mission_id;
+      missionGoals = { ...missionGoals, [mission_id]: goal };
+      goalGroupId = randomUUID(); continuationCount = 0; invalidTerminalAttempts = 0;
       missions = { ...missions, [mission_id]: createMission({ mission_id, objective: goal.objective }) };
       maintenancePending = true;
       persistMission(); persistScheduler(); persist(); if (ctx.isIdle?.() !== false) maintenancePending = false; say(ctx, `Goal active: ${goal.objective}`); continueGoal();
@@ -385,13 +469,16 @@ export default function harness(pi: Pi): void {
 
   pi.registerTool?.({
     name: "pi_harness_goal", label: "Pi Harness goal",
-    description: "Record the terminal state of the active goal. Evidence is mandatory; blocked and error also require a blocker.",
+    description: "Record the terminal state of the explicitly selected Mission. Evidence is mandatory; blocked and error also require a blocker.",
     parameters: Type.Object({ status: Type.Union([Type.Literal("complete"), Type.Literal("blocked"), Type.Literal("error")]), evidence: Type.String(), blocker: Type.Optional(Type.String()) }),
     execute: async (_id: string, input: { status: "complete" | "blocked" | "error"; evidence: string; blocker?: string }) => {
-      const activeMission = Object.values(missions).find((mission: any) => mission.status === "active" && mission.objective === goal?.objective) as any;
-      if (input.status === "complete" && activeMission && !missionIsClosable(activeMission, operations, taskGraphs, attemptLedger)) throw new Error("The Mission has unresolved obligations");
+      if (!selectedMissionId || !controlLease || goal?.mission_id !== selectedMissionId) throw new Error("The Commander must explicitly resume a Mission before recording its terminal state");
+      const activeMission = missions[selectedMissionId];
+      if (!activeMission || activeMission.status !== "active") throw new Error("The selected Mission is not active");
+      if (input.status === "complete" && !missionIsClosable(activeMission, operations, taskGraphs, attemptLedger)) throw new Error("The Mission has unresolved obligations or unmet successful completion requirements");
       goal = transitionGoal(goal, input.status, input.evidence, input.blocker);
-      if (activeMission) missions = { ...missions, [activeMission.mission_id]: createMission({ ...activeMission, status: goal.status }) };
+      missions = { ...missions, [activeMission.mission_id]: createMission({ ...activeMission, status: goal.status }) };
+      missionGoals = { ...missionGoals, [activeMission.mission_id]: goal };
       maintenancePending = true;
       continuationQueued = false; if (goal.status !== "active") goalGroupId = undefined; persistMission(); persistScheduler(); persist();
       return { content: [{ type: "text", text: JSON.stringify({ mission_id: activeMission?.mission_id, status: goal.status, evidence: goal.evidence, blocker: goal.blocker }) }] };
@@ -443,9 +530,8 @@ export default function harness(pi: Pi): void {
         // Persisted and direct-program legacy callers can still restore a static Operation.
         // The public schema does not expose this compatibility path.
         const legacy = input as any;
-        const activeMissions = Object.values(missions).filter((entry: any) => entry.status === "active") as any[];
-        if (activeMissions.length !== 1) throw new Error("Operation creation requires one active Mission");
-        const mission = activeMissions[0];
+        const mission = selectedMissionId ? missions[selectedMissionId] : undefined;
+        if (!mission || mission.status !== "active" || !controlLease) throw new Error("Operation creation requires an explicitly selected Mission; use /mission resume <mission-id>");
         const operation = legacy.required_task_ids !== undefined
           ? createOperation({ operation_id: id, mission_id: mission.mission_id, objective: input.objective, required_task_ids: legacy.required_task_ids, acceptance_criteria: input.acceptance_criteria, dependencies: legacy.dependencies, constraints: input.constraints, task_intents: legacy.task_intents, task_specs: legacy.task_specs })
           : createOperation({ operation_id: id, mission_id: mission.mission_id, objective: input.objective, acceptance_criteria: input.acceptance_criteria, allowed_policy_ids: input.allowed_policy_ids ?? ["research-read", "scout-read", "worker-write"], constraints: input.constraints, planning: true });
@@ -467,6 +553,7 @@ export default function harness(pi: Pi): void {
       const operation = Object.hasOwn(operations, id) ? operations[id] : undefined;
       if (!operation) throw new Error("Unknown Operation");
       validateTaskGraph(taskGraphs[id], operation);
+      if (action !== "status" && (!controlLease || selectedMissionId !== operation.mission_id || missions[operation.mission_id]?.status !== "active")) throw new Error("Resume the owning Mission before changing its Operation state");
       if (["transfer", "waive_operation"].includes(action)) {
         if (!input.authority_type || !input.reason?.trim()) throw new Error("Operation terminal disposition requires authority type and reason");
         const status = action === "transfer" ? "transferred" : "waived";
@@ -506,7 +593,7 @@ export default function harness(pi: Pi): void {
       const runCwd = ctx?.cwd ?? process.cwd();
       const id = input.operation_id;
       const operation = Object.hasOwn(operations, id) ? operations[id] : undefined;
-      if (!operation || operation.status !== "open" || activeOperationRuns.size) throw new Error("An open Operation and an idle serial Scheduler are required");
+      if (!operation || operation.status !== "open" || !selectedMissionId || operation.mission_id !== selectedMissionId || missions[selectedMissionId]?.status !== "active" || !controlLease || activeOperationRuns.size) throw new Error("An open Operation owned by the selected Mission and an idle serial Scheduler are required");
       const controller = new AbortController();
       const abort = () => controller.abort();
       if (signal?.aborted) controller.abort(); else signal?.addEventListener("abort", abort, { once: true });

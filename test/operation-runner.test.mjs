@@ -5,6 +5,8 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import harness from "../extensions/pi-harness.ts";
+import { trackControlPi } from "./helpers/control-state-isolation.mjs";
+import { readControlState } from "../lib/control-state-store.mjs";
 import { createOperation as registerOperation } from "../lib/operation.mjs";
 import { coordinatorPrompt, coordinatorState, MAX_COORDINATOR_TURNS, operationBrief, operationReport, parseCoordinatorDecision, runOperation } from "../lib/operation-runner.mjs";
 import { cancelCoordinateTasks, executeCoordinateTask, executeCoordinatorTurn, hasActiveCoordinateTasks } from "../lib/coordinator.mjs";
@@ -346,21 +348,24 @@ function fakePi(entries = []) {
     },
   };
   harness(pi);
-  pi.sessionStart = (nextEntries) => { pi.entries = nextEntries; lifecycle.get("session_start")({}, { mode: "rpc", sessionManager: { getEntries: () => nextEntries } }); };
+  pi.sessionStart = (nextEntries) => { pi.entries = nextEntries; pi.sessionReady = lifecycle.get("session_start")({}, { mode: "rpc", sessionManager: { getEntries: () => nextEntries } }); return pi.sessionReady; };
+  pi.shutdown = () => lifecycle.get("session_shutdown")?.();
   pi.sessionStart(entries);
-  return pi;
+  return trackControlPi(pi);
 }
 const call = async (pi, tool, input, signal) => {
+  await pi.sessionReady;
   if (tool === "pi_harness_operation" && input.action === "create") input = { ...input, task_specs: input.task_specs ?? fixtureSpecs(input) };
   return JSON.parse((await pi.tools.get(tool).execute("id", input, signal)).content[0].text);
 };
-const startMission = (pi, objective) => pi.commands.get("goal").handler(objective, {});
+const startMission = async (pi, objective) => { await pi.sessionReady; return pi.commands.get("goal").handler(objective, {}); };
 
-test("legacy Operation state without a persisted Mission ownership link fails closed", () => {
+test("legacy Operation state without a persisted Mission ownership link fails closed", async () => {
   const operation = op();
   const verified = { version: 1, operation_id: "O-1", task_id: "T-1", execution_status: "execution_complete", verification_status: "verified", evidence_refs: [] };
   const legacy = { ...operation, accepted_task_ids: ["T-1"], task_results: { "T-1": verified } };
-  assert.throws(() => fakePi([{ customType: "pi-harness-operation-state", data: { "O-1": legacy } }]), /no persisted Mission ownership; restore fails closed/);
+  const pi = fakePi([{ customType: "pi-harness-operation-state", data: { "O-1": legacy } }]);
+  await assert.rejects(pi.sessionReady, /no persisted Mission ownership; restore fails closed/);
 });
 
 test("timed-out parallel Task aborts only its child; late completion cannot change the TaskGraph", async () => {
@@ -456,43 +461,73 @@ test("switching sessions aborts the run without writing old Coordinator state in
   for (let i = 0; i < 20 && !request; i++) await new Promise((resolve) => setTimeout(resolve, 5));
   assert.ok(request);
   const newEntries = [];
-  pi.sessionStart(newEntries);
+  await pi.sessionStart(newEntries);
   assert.equal(request.options.signal.aborted, true);
   assert.equal((await oldRun).status, "blocked");
-  assert.equal(newEntries.length, 0);
-  await assert.rejects(() => call(pi, "pi_harness_operation", { action: "status", operation_id: "O-1" }), /Unknown Operation/);
+  assert.ok(newEntries.some((entry) => entry.customType === TASK_GRAPH_ENTRY), "the durable Mission obligations are restored into the new Pi session");
+  assert.equal((await call(pi, "pi_harness_operation", { action: "status", operation_id: "O-1" })).status, "open");
+  await assert.rejects(() => call(pi, "pi_harness_run_operation", { operation_id: "O-1" }), /selected Mission/);
+  const missionId = Object.keys(newEntries.filter((entry) => entry.customType === "pi-harness-mission-state").at(-1).data)[0];
+  await pi.commands.get("mission").handler(`resume ${missionId}`, {});
+  assert.equal((await call(pi, "pi_harness_operation", { action: "status", operation_id: "O-1" })).status, "open");
 });
 
-test("Scheduler attempt budget survives Coordinator replacement and session restore", async () => {
+test("session shutdown invalidates late child callbacks before a new session resumes the Mission", async () => {
+  const old = fakePi(); await startMission(old, "Resume only after the old child is fenced.");
+  await call(old, "pi_harness_operation", { action: "create", operation_id: "O-SHUTDOWN", objective: "Inspect a bounded report.", required_task_ids: ["T-SHUTDOWN"], task_intents: { "T-SHUTDOWN": "Inspect `lib/coordinator.mjs`." } });
+  let workerRequest;
+  old.events.on("subagents:rpc:spawn", (request) => {
+    const id = request.type === "coordinator" ? "shutdown-coordinator" : "shutdown-worker";
+    old.events.emit(`subagents:rpc:spawn:reply:${request.requestId}`, { success: true, data: { id } });
+    if (request.type === "coordinator") queueMicrotask(() => old.events.emit("subagents:completed", { id, status: "completed", result: JSON.stringify({ version: 1, operation_id: "O-SHUTDOWN", action: "dispatch", reason: "Resume after a verified report.", task: { task_id: "T-SHUTDOWN", owner: "research", scope: "Inspect `lib/coordinator.mjs`.", permission: "read", verification: "Inspect report.", acceptance_criteria: ["The report identifies `lib/coordinator.mjs`."] } }) }));
+    else {
+      workerRequest = request;
+      request.options.signal.addEventListener("abort", () => old.events.emit("subagents:failed", { id, status: "stopped" }), { once: true });
+    }
+  });
+  const oldRun = call(old, "pi_harness_run_operation", { operation_id: "O-SHUTDOWN" });
+  for (let i = 0; i < 30 && !workerRequest; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.ok(workerRequest);
+  assert.equal(readControlState(process.cwd()).task_graphs["O-SHUTDOWN"].nodes["T-SHUTDOWN"].scheduler_status, "running");
+
+  await old.shutdown();
+  assert.equal(workerRequest.options.signal.aborted, true);
+  assert.equal((await oldRun).status, "blocked");
+  const fresh = fakePi([]);
+  const restored = fresh.entries.filter((entry) => entry.customType === TASK_GRAPH_ENTRY).at(-1).data;
+  assert.equal(restored.task_graphs["O-SHUTDOWN"].nodes["T-SHUTDOWN"].scheduler_status, "blocked");
+  assert.equal(restored.attempt_ledger["A-O-SHUTDOWN-T-SHUTDOWN-01"].status, "unknown");
+  const missionId = Object.keys(restored.missions)[0];
+  await fresh.commands.get("mission").handler(`resume ${missionId}`, {});
+  const stable = readControlState(process.cwd());
+  old.events.emit("subagents:completed", { id: "shutdown-worker", status: "completed", result: "Late report after resume." });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(readControlState(process.cwd()), stable, "the closed session cannot change resumed durable state");
+});
+
+test("Scheduler attempt budget remains intact after explicit durable Mission resume", async () => {
   const pi = fakePi(); await startMission(pi, "Inspect report.");
   await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-1", objective: "Inspect report.", required_task_ids: ["T-1"], task_intents: { "T-1": "Inspect `lib/coordinator.mjs`." } });
-  let stage = 0, counter = 0;
-  const steps = [
-    decision("dispatch", { task: task("T-1") }), decision("reject_task", { task_id: "T-1" }),
-    decision("block", { blocked_action: "choose another report", required_condition: "the Coordinator checks an alternate source" }),
-  ];
-  const scripted = (instance, decisions) => instance.events.on("subagents:rpc:spawn", (req) => {
+  let counter = 0;
+  const steps = [decision("dispatch", { task: task("T-1") }), decision("reject_task", { task_id: "T-1" }), decision("block", { blocked_action: "choose another report", required_condition: "the Coordinator checks an alternate source" })];
+  pi.events.on("subagents:rpc:spawn", (req) => {
     const id = `agent-${++counter}`;
-    instance.events.emit(`subagents:rpc:spawn:reply:${req.requestId}`, { success: true, data: { id } });
-    queueMicrotask(() => instance.events.emit("subagents:completed", { id, status: "completed", result: req.type === "coordinator" ? decisions[stage++] : "A read-only report." }));
+    pi.events.emit(`subagents:rpc:spawn:reply:${req.requestId}`, { success: true, data: { id } });
+    queueMicrotask(() => pi.events.emit("subagents:completed", { id, status: "completed", result: req.type === "coordinator" ? steps.shift() : "A read-only report." }));
   });
-  scripted(pi, steps);
   assert.equal((await call(pi, "pi_harness_run_operation", { operation_id: "O-1" })).status, "blocked");
   let snapshot = pi.entries.filter((entry) => entry.customType === TASK_GRAPH_ENTRY).at(-1).data;
   assert.equal(snapshot.task_graphs["O-1"].nodes["T-1"].attempts, 1);
   assert.equal(snapshot.task_graphs["O-1"].nodes["T-1"].scheduler_status, "ready");
-  const restored = fakePi(pi.entries);
-  stage = 0;
-  scripted(restored, [decision("dispatch", { task: task("T-1") }), decision("reject_task", { task_id: "T-1" }), decision("dispatch", { task: task("T-1") })]);
-  const report = await call(restored, "pi_harness_run_operation", { operation_id: "O-1" });
-  assert.equal(report.status, "blocked");
-  assert.match(report.blocker, /retry limit/);
-  snapshot = restored.entries.filter((entry) => entry.customType === TASK_GRAPH_ENTRY).at(-1).data;
-  assert.equal(snapshot.task_graphs["O-1"].nodes["T-1"].attempts, 2);
-  assert.equal(snapshot.task_graphs["O-1"].nodes["T-1"].scheduler_status, "exhausted");
+  const missionId = pi.entries.filter((entry) => entry.customType === "pi-harness-goal-state").at(-1).data.mission_id;
+  await pi.sessionStart([...pi.entries]);
+  await pi.commands.get("mission").handler(`resume ${missionId}`, {});
+  snapshot = pi.entries.filter((entry) => entry.customType === TASK_GRAPH_ENTRY).at(-1).data;
+  assert.equal(snapshot.task_graphs["O-1"].nodes["T-1"].attempts, 1);
+  assert.equal(snapshot.task_graphs["O-1"].nodes["T-1"].scheduler_status, "ready");
 });
 
-test("old managed TaskResult cannot mutate a new session's TaskGraph", async () => {
+test("old managed TaskResult cannot mutate a durably resumed Mission", async () => {
   const pi = fakePi(); await startMission(pi, "Old session.");
   await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-1", objective: "Old session.", task_specs: { "T-1": { owner: "research", permission: "read", verification: "Inspect report.", acceptance_criteria: ["The report identifies the requested source."] } }, required_task_ids: ["T-1"], task_intents: { "T-1": "Inspect old session." } });
   let workerRequest;
@@ -510,15 +545,18 @@ test("old managed TaskResult cannot mutate a new session's TaskGraph", async () 
   for (let i = 0; i < 30 && !workerRequest; i++) await new Promise((resolve) => setTimeout(resolve, 5));
   assert.ok(workerRequest);
   const nextEntries = [];
-  pi.sessionStart(nextEntries);
+  await pi.sessionStart(nextEntries);
   assert.equal(workerRequest.options.signal.aborted, true);
   assert.equal((await oldRun).status, "blocked");
-  await startMission(pi, "New session.");
-  await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-1", objective: "New session.", required_task_ids: ["T-1"] });
-  const snapshot = pi.entries.filter((entry) => entry.customType === TASK_GRAPH_ENTRY).at(-1).data;
-  assert.equal(snapshot.operations["O-1"].objective, "New session.");
-  assert.equal(snapshot.task_graphs["O-1"].nodes["T-1"].attempts, 0);
-  assert.equal(snapshot.task_graphs["O-1"].nodes["T-1"].scheduler_status, "ready");
+  const restored = nextEntries.filter((entry) => entry.customType === TASK_GRAPH_ENTRY).at(-1).data;
+  assert.equal(restored.task_graphs["O-1"].nodes["T-1"].scheduler_status, "blocked");
+  assert.equal(restored.attempt_ledger["A-O-1-T-1-01"].status, "unknown");
+  const missionId = Object.keys(restored.missions)[0];
+  await pi.commands.get("mission").handler(`resume ${missionId}`, {});
+  const stableSnapshot = structuredClone(nextEntries.filter((entry) => entry.customType === TASK_GRAPH_ENTRY).at(-1).data);
+  pi.events.emit("subagents:completed", { id: "old-worker", status: "completed", result: "Late report." });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(nextEntries.filter((entry) => entry.customType === TASK_GRAPH_ENTRY).at(-1).data, stableSnapshot, "the old callback cannot overwrite resumed durable state");
 });
 
 test("goal cancellation aborts the active managed ExecutionUnit", async () => {
@@ -594,7 +632,7 @@ test("late results from both old-session parallel Tasks cannot overwrite the new
   assert.ok(workers.every(({ req }) => !req.options.signal.aborted));
 
   const freshEntries = [];
-  pi.sessionStart(freshEntries);
+  await pi.sessionStart(freshEntries);
   assert.equal(controllers[0].signal.aborted, true, "session_start aborts the old managed Operation controller");
   assert.ok(workers.every(({ req }) => req.options.signal.aborted), "session_start aborts both ExecutionUnits");
   await startMission(pi, "New session sentinel.");
@@ -603,11 +641,12 @@ test("late results from both old-session parallel Tasks cannot overwrite the new
   const assertFresh = () => {
     assert.deepEqual(freshEntries, expectedEntries, "stale callbacks must not append or overwrite any new-session entry");
     const snapshot = freshEntries.filter((entry) => entry.customType === TASK_GRAPH_ENTRY).at(-1).data;
-    assert.deepEqual(Object.keys(snapshot.operations), ["O-NEW"]);
+    assert.deepEqual(Object.keys(snapshot.operations), ["O-OLD", "O-NEW"]);
+    assert.equal(snapshot.task_graphs["O-OLD"].nodes["T-1"].scheduler_status, "blocked");
+    assert.equal(snapshot.attempt_ledger["A-O-OLD-T-1-01"].status, "unknown");
     assert.equal(snapshot.operations["O-NEW"].objective, "New session sentinel.");
     assert.deepEqual(Object.keys(snapshot.operations["O-NEW"].task_results), []);
     assert.deepEqual([snapshot.task_graphs["O-NEW"].nodes["T-NEW"].scheduler_status, snapshot.task_graphs["O-NEW"].nodes["T-NEW"].attempts], ["ready", 0]);
-    assert.equal(freshEntries.some((entry) => ["pi-harness-coordinator-state", "pi-harness-head-state"].includes(entry.customType)), false);
   };
   assertFresh();
   // Reverse completion order: both old child results arrive after O-NEW exists.
