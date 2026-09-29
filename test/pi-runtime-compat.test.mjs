@@ -203,6 +203,9 @@ test("telemetry records runtime metrics without inventing provider cost or missi
   assert.equal(result.context_tokens_estimated,100);assert.equal(result.provider_reported_cost,null);
   const attributed=contextTelemetry([{customType:"pi-harness-child-usage",data:{mission_id:"M-1",operation_id:"O-1",task_id:"T-1",attempt_id:"A-O-1-T-1-01",role:"worker",usage:{input:3,output:2,cacheRead:1,cacheWrite:0,totalTokens:6,cost:{total:0.02}}}}]);
   assert.deepEqual(attributed.usage_attribution,[{mission_id:"M-1",operation_id:"O-1",task_id:"T-1",attempt_id:"A-O-1-T-1-01",role:"worker",input_tokens:3,output_tokens:2,cache_read_tokens:1,cache_write_tokens:0,total_tokens:6,runtime_catalog_cost:0.02}]);
+  const unknownAttribution=contextTelemetry([{customType:"pi-harness-child-usage",data:{mission_id:"M-1",operation_id:"O-1",task_id:"T-1",attempt_id:"A-O-1-T-1-01",role:"worker",usage:{input:3,output:2}}}]);
+  assert.equal(unknownAttribution.usage_attribution[0].runtime_catalog_cost,null,"missing runtime catalog cost remains unknown");
+  assert.equal(unknownAttribution.usage_attribution[0].cache_read_tokens,null,"missing token counts remain unknown");
 });
 
 test("Operation-to-Mission telemetry requires an explicit terminal Operation disposition",()=>{
