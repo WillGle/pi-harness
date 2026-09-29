@@ -1,8 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { createOperation, materializeOperation } from "../lib/operation.mjs";
 import { createTaskGraph, dispatchableTaskIds } from "../lib/task-graph.mjs";
-import { parseCoordinatorDecision, runOperation } from "../lib/operation-runner.mjs";
+import { coordinatorPrompt, operationBrief, parseCoordinatorDecision, runOperation } from "../lib/operation-runner.mjs";
 
 const proposal = {
   local_ref: "implement",
@@ -31,6 +32,26 @@ test("Harness materializes only bounded semantic proposals with trusted policy a
   assert.deepEqual(dispatchableTaskIds(materialized.graph, materialized.operation, 2), ["T-O-plan-01"]);
   assert.throws(() => materializeOperation(operation, [{ ...proposal, permission: "write" }]), /unauthorized Task fields/);
   assert.throws(() => materializeOperation(operation, [{ ...proposal, execution_policy_id: "arbitrary-shell" }]), /unauthorized execution policy/);
+});
+
+test("planning Coordinator instructions require semantic proposals, not pre-existing Task IDs", () => {
+  const operation = createOperation({ operation_id: "O-plan", objective: "Implement safely.", planning: true, allowed_policy_ids: ["worker-write"] });
+  const prompt = coordinatorPrompt(operationBrief(operation, { version: 1, operation_id: "O-plan", turns: 0, decisions: [], blocker: null }));
+  const profile = readFileSync(new URL("../.pi/agents/coordinator.md", import.meta.url), "utf8");
+  assert.match(prompt, /planning Operation\. Return plan_tasks with semantic Task proposals/);
+  assert.match(profile, /No TaskOrder ID or registered TaskSpec exists yet/);
+  assert.match(profile, /Do not use or require Task IDs, TaskSpecs, permissions, verification commands/);
+  assert.match(profile, /If `OperationBrief\.planning` is false, use only registered Task IDs/);
+  assert.match(profile, /Every `required_task_ids` value in the OperationBrief already has a Harness-registered TaskSpec/);
+  assert.match(profile, /Do not request TaskSpec registration and do not block for a missing TaskSpec/);
+});
+
+test("CoordinatorDecision rejects fenced JSON while preserving valid planning semantics", () => {
+  const operation = createOperation({ operation_id: "O-plan", objective: "Implement safely.", planning: true, allowed_policy_ids: ["worker-write"] });
+  const valid = decision("plan_tasks", { tasks: [proposal] });
+  assert.equal(parseCoordinatorDecision(valid, operation).action, "plan_tasks");
+  assert.throws(() => parseCoordinatorDecision(`\`\`\`json\n${valid}\n\`\`\``, operation), /malformed JSON/);
+  assert.throws(() => parseCoordinatorDecision(decision("plan_tasks", { tasks: [{ ...proposal, permission: "write" }] }), operation), /unauthorized Task fields/);
 });
 
 test("Coordinator plan_tasks materializes before a managed TaskOrder dispatches", async () => {
