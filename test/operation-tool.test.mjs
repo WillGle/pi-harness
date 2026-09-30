@@ -104,6 +104,16 @@ test("Commander records an explicit terminal Operation disposition after TaskOrd
   assert.match(snapshot.operations["O-waive"].operation_disposition.timestamp, /^\d{4}-\d{2}-\d{2}T/);
 });
 
+test("Commander can remove a TaskOrder through its durable waiver", async () => {
+  const entries = activeMissionEntries("Inspect the Coordinator."), pi = makePi(entries);
+  await pi.commands.get("mission").handler("resume M-test", {});
+  await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-remove", objective: "Inspect the Coordinator.", required_task_ids: ["T-remove"] });
+  const removed = await call(pi, "pi_harness_operation", { action: "remove", operation_id: "O-remove", task_id: "T-remove", authority_type: "commander", reason: "The task is no longer needed." });
+  assert.equal(removed.disposition, "waived");
+  const snapshot = entries.filter((entry) => entry.customType === TASK_GRAPH_ENTRY).at(-1).data;
+  assert.equal(snapshot.task_graphs["O-remove"].nodes["T-remove"].scheduler_status, "waived");
+});
+
 test("Commander creates a task-less planning Operation", async () => {
   const entries = activeMissionEntries("Implement safely."), pi = makePi(entries);
   await pi.commands.get("mission").handler("resume M-test", {});
@@ -165,6 +175,14 @@ test("a completed Mission cannot be resumed or reopened", async () => {
   await pi.commands.get("mission").handler("resume M-complete", {});
   await assert.rejects(() => pi.tools.get("pi_harness_goal").execute("test", { status: "complete", evidence: "Already closed." }), /explicitly resume a Mission/);
   assert.equal(pi.entries.filter((entry) => entry.customType === MISSION_ENTRY).at(-1).data[completed.mission_id].status, "complete");
+});
+
+test("an errored Mission can be explicitly cancelled", async () => {
+  const mission = createMission({ mission_id: "M-error", objective: "Recover safely.", status: "error" });
+  const pi = makePi([{ customType: MISSION_ENTRY, data: { [mission.mission_id]: mission } }]);
+  await pi.commands.get("mission").handler("cancel M-error", {});
+  const cancelled = pi.entries.filter((entry) => entry.customType === MISSION_ENTRY).at(-1).data[mission.mission_id];
+  assert.equal(cancelled.status, "cancelled");
 });
 
 test("legacy direct dispatch is disabled and cannot promote a TaskResult to the Commander", async () => {

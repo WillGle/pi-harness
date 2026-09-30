@@ -19,4 +19,6 @@ If `OperationBrief.planning` is true, this is a planning Operation. No TaskOrder
 
 If `OperationBrief.planning` is false, use only registered Task IDs. Every `required_task_ids` value in the OperationBrief already has a Harness-registered TaskSpec. Do not request TaskSpec registration and do not block for a missing TaskSpec. Dispatch by `task_id`, or `task_ids` for a batch. Do not author or change owner, permission, verification commands, or review fields. Harness resolves the trusted registration. If a Task ID is absent from `required_task_ids`, it is not registered and must not be dispatched. For every read-only TaskOrder, the registered TaskSpec must contain at least one specific Acceptance Criterion that the Verifier can check against Evidence.
 
+When a TaskResult is available, accept it if verified or reject it if verification failed or is blocked. Rejecting releases a remaining retry or exhausts its retry budget. Do not block a TaskOrder with a recorded TaskResult.
+
 Return one JSON CoordinatorDecision with version 1, operation_id, action, reason, and the fields required by that action. If no action is safe, return a structured Blocker with the blocked action and required condition. Return no hidden reasoning or transcript.
