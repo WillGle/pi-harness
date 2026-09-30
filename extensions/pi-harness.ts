@@ -496,7 +496,7 @@ export default function harness(pi: Pi): void {
   pi.registerCommand?.("plan", { description: "Read-only planning: /plan on|off|status", handler: async (args: string, ctx: Context) => {
     try { const action = parsePlan(args); if (action === "status") say(ctx, `Plan mode: ${plan.enabled ? "on" : "off"}`); else setPlan(action === "on", ctx); } catch (error) { say(ctx, (error as Error).message, "error"); }
   }});
-  pi.registerCommand?.("mission", { description: "List Missions, resume one, or cancel one: /mission list|status|resume <mission-id>|cancel <mission-id>", handler: async (args: string, ctx: Context) => {
+  pi.registerCommand?.("mission", { description: "List Missions, resume one, cancel one, or clear a cancelled Mission: /mission list|status|resume <mission-id>|cancel <mission-id>|clear <mission-id>", handler: async (args: string, ctx: Context) => {
     const [action, id, ...extra] = args.trim().split(/\s+/);
     if (!action || action === "list" || action === "status") {
       const all = Object.values(missions).sort((a: any, b: any) => a.mission_id.localeCompare(b.mission_id));
@@ -504,7 +504,7 @@ export default function harness(pi: Pi): void {
       const omitted = all.length - shown.length;
       return say(ctx, all.length ? `${shown.join("\n")}${omitted > 0 ? `\n${omitted} older Mission(s) omitted.` : ""}` : "No persisted Missions.");
     }
-    if (!["resume", "cancel"].includes(action) || !id || extra.length) return say(ctx, "Use /mission list, /mission resume <mission-id>, or /mission cancel <mission-id>.", "warning");
+    if (!["resume", "cancel", "clear"].includes(action) || !id || extra.length) return say(ctx, "Use /mission list, /mission resume <mission-id>, /mission cancel <mission-id>, or /mission clear <mission-id>.", "warning");
     const mission = missions[id];
     if (!mission) return say(ctx, `Unknown Mission ${id}. Use /mission list to inspect persisted Missions.`, "error");
     if (action === "cancel") {
@@ -527,6 +527,24 @@ export default function harness(pi: Pi): void {
         maintenancePending = true;
         persistMission(); persistScheduler(); persist();
         say(ctx, `Mission ${id} cancelled.`);
+      } catch (error) { say(ctx, (error as Error).message, "error"); }
+      return;
+    }
+    if (action === "clear") {
+      if (mission.status !== "cancelled") return say(ctx, `Cancel Mission ${id} before clearing its TaskOrders.`, "warning");
+      if ([...activeOperationRuns.keys()].some((operationId) => operations[operationId]?.mission_id === id)) return say(ctx, `Wait until Mission ${id}'s cancelled Operation run settles before clearing its TaskOrders.`, "warning");
+      try {
+        await ensureControlLease(ctx.cwd);
+        const operationIds = new Set<string>(mission.operation_ids);
+        const removedOperations = operationIds.size;
+        const removedTasks = [...operationIds].reduce((count, operationId) => count + (operations[operationId]?.required_task_ids?.length ?? 0), 0);
+        missions = { ...missions, [id]: createMission({ ...mission, operation_ids: [] }) };
+        operations = Object.fromEntries(Object.entries(operations).filter(([operationId]) => !operationIds.has(operationId)));
+        taskGraphs = Object.fromEntries(Object.entries(taskGraphs).filter(([operationId]) => !operationIds.has(operationId)));
+        coordinatorStates = Object.fromEntries(Object.entries(coordinatorStates).filter(([operationId]) => !operationIds.has(operationId)));
+        attemptLedger = Object.fromEntries(Object.entries(attemptLedger).filter(([, attempt]: [string, any]) => attempt?.mission_id !== id));
+        persistMission(); persistScheduler(); persist();
+        say(ctx, `Cleared ${removedTasks} TaskOrder(s) and ${removedOperations} Operation(s) from cancelled Mission ${id}.`);
       } catch (error) { say(ctx, (error as Error).message, "error"); }
       return;
     }

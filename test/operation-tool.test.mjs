@@ -185,6 +185,19 @@ test("an errored Mission can be explicitly cancelled", async () => {
   assert.equal(cancelled.status, "cancelled");
 });
 
+test("a cancelled Mission can clear its blocked TaskOrders", async () => {
+  const entries = activeMissionEntries("Stop and clear safely."), pi = makePi(entries);
+  await pi.commands.get("mission").handler("resume M-test", {});
+  await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-clear", objective: "Stop and clear safely.", required_task_ids: ["T-clear"] });
+  await pi.commands.get("goal").handler("cancel", {});
+  await pi.commands.get("mission").handler("clear M-test", {});
+  const mission = entries.filter((entry) => entry.customType === MISSION_ENTRY).at(-1).data["M-test"];
+  const snapshot = entries.filter((entry) => entry.customType === TASK_GRAPH_ENTRY).at(-1).data;
+  assert.deepEqual(mission.operation_ids, []);
+  assert.equal(Object.hasOwn(snapshot.operations, "O-clear"), false);
+  assert.equal(Object.hasOwn(snapshot.task_graphs, "O-clear"), false);
+});
+
 test("legacy direct dispatch is disabled and cannot promote a TaskResult to the Commander", async () => {
   const pi = makePi([]);
   await assert.rejects(() => pi.tools.get("pi_harness_coordinate").execute("test", {
