@@ -32,6 +32,14 @@ A Commander defines a Mission. A Coordinator plans bounded Tasks and decides whe
 
 Execution completion is not verification. Verification is not Operation acceptance. Operation completion does not complete the Mission.
 
+## Natural-language execution
+
+State the objective in ordinary language. The Commander chooses direct execution for small, local work when delegation adds no meaningful value. The Commander starts a managed Mission when isolated execution, independent verification, meaningful Dependencies, bounded retries, or separate context materially improve correctness. Users do not need to provide TaskOrders, TaskGraphs, roles, verification commands, or Task IDs.
+
+For managed work, the Commander starts a Mission from the inferred objective and user-stated Constraints. The Commander creates one task-less planning Operation. The Coordinator selects the smallest useful set of semantic Tasks. Harness assigns IDs and trusted execution authority, then schedules and verifies the work. Context Economics runs automatically from authoritative lifecycle state; it preserves unresolved obligations and does not ask the user to manage cache or compaction.
+
+The Commander asks only when a strategic choice cannot be inferred safely. A request to resume persisted work requires an exact Mission selection when ownership is ambiguous.
+
 ## What it is useful for
 
 ### Large repository changes

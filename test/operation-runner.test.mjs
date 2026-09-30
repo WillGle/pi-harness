@@ -35,6 +35,7 @@ test("Coordinator packet contains bounded semantic state, not transcripts", () =
   assert.doesNotMatch(coordinatorPrompt(packet), /ASD-STE100-derived Agent English/, "stable Coordinator doctrine belongs in the Coordinator profile");
   assert.match(coordinatorPrompt(packet), /Harness resolves trusted registered TaskSpecs/);
   assert.match(coordinatorPrompt(packet), /For dispatch return task_id only\. For dispatch_batch return task_ids/);
+  assert.doesNotMatch(coordinatorPrompt(packet), /Actions:[^\n]*\breport\b/);
   assert.ok(!coordinatorPrompt(packet).includes("raw Worker transcript"));
   const profile = readFileSync(".pi/agents/coordinator.md", "utf8");
   assert.match(profile, /tools: read/);
@@ -91,9 +92,15 @@ test("pi-subagents 0.19.0 RPC cannot safely resume a completed Coordinator sessi
 });
 
 test("malformed or unauthorized CoordinatorDecision fails closed", () => {
-  for (const raw of ["not JSON", decision("dispatch", { task_id: "UNKNOWN" }), decision("dispatch", { task: task("T-1") }), decision("accept_task", { task_id: "UNKNOWN" }), decision("report", { mission_complete: true }), decision("accept_task", { task_id: "T-1", task: task("T-1") }), JSON.stringify({ version: 1, operation_id: "O-1", action: "block", blocked_action: "dispatch", required_condition: "the registered Task intent is available" }), JSON.stringify({ ...JSON.parse(decision("report")), operation_id: "O-foreign" })]) assert.throws(() => parseCoordinatorDecision(raw, op()));
+  for (const raw of ["not JSON", decision("dispatch", { task_id: "UNKNOWN" }), decision("dispatch", { task: task("T-1") }), decision("accept_task", { task_id: "UNKNOWN" }), decision("accept_task", { task_id: "T-1", task: task("T-1") }), JSON.stringify({ version: 1, operation_id: "O-1", action: "block", blocked_action: "dispatch", required_condition: "the registered Task intent is available" })]) assert.throws(() => parseCoordinatorDecision(raw, op()));
   const state = coordinatorState(op());
   assert.deepEqual(Object.keys(state).sort(), ["blocker", "decisions", "operation_id", "turns", "version"]);
+});
+
+test("removed Coordinator report action is absent from the prompt and rejected by the parser", () => {
+  const operation = op();
+  assert.throws(() => parseCoordinatorDecision(decision("report"), operation), /invalid or belongs to a foreign Operation/);
+  assert.doesNotMatch(coordinatorPrompt(operationBrief(operation, coordinatorState(operation))), /Actions:[^\n]*\breport\b/);
 });
 
 test("Coordinator decision repair is bounded; ID-only dispatch uses the registered TaskSpec", async () => {
@@ -437,7 +444,7 @@ test("timed-out parallel Task aborts only its child; late completion cannot chan
     const report = await runOperation(operation, {
       turn: async (prompt) => {
         const brief = JSON.parse(prompt.slice(prompt.indexOf('{"OperationBrief"'))).OperationBrief;
-        return brief.ready_task_ids.length === 2 ? decision("dispatch_batch", { task_ids: ["T-1", "T-2"] }) : decision("report");
+        return brief.ready_task_ids.length === 2 ? decision("dispatch_batch", { task_ids: ["T-1", "T-2"] }) : decision("block", { blocked_action: "accept the available TaskResults", required_condition: "the Coordinator reviews the accepted TaskOrders" });
       },
       dispatch: async (selected) => (await executeCoordinateTask(pi, selected, { timeout: 100, rpcTimeout: 1000 })).taskResult,
       save: (nextOperation, _state, graph) => { operationSnapshot = nextOperation; graphSnapshot = graph; },
@@ -821,7 +828,7 @@ test("trusted TaskSpec resolves ID-only dispatch and rejects mechanical substitu
   const operation=op();
   let dispatched;
   const report=await runOperation(operation, {
-    turn: async()=>dispatched ? decision("report") : decision("dispatch", {task_id:"T-1"}),
+    turn: async()=>dispatched ? decision("block", {blocked_action:"accept the available TaskResult",required_condition:"the Coordinator reviews its verification status"}) : decision("dispatch", {task_id:"T-1"}),
     dispatch: async task=>{dispatched=task;return {version:1,operation_id:"O-1",task_id:"T-1",execution_status:"execution_complete",verification_status:"verified",evidence_refs:[]};}
   });
   assert.equal(report.status,"blocked");

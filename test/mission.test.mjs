@@ -91,6 +91,16 @@ test("Situation Board retains unresolved obligations from a blocked Mission", ()
   assert.match(board, /TaskOrder T-1: ready/);
 });
 
+test("Mission Constraints are bounded, durable, and visible on the Situation Board", () => {
+  const mission = createMission({ mission_id: "M-constraints", objective: "Preserve behavior.", constraints: ["Keep the public API stable.", "Do not add dependencies."] });
+  const board = missionSituationBoard({ [mission.mission_id]: mission }, {}, {});
+  assert.deepEqual(mission.constraints, ["Keep the public API stable.", "Do not add dependencies."]);
+  assert.match(board, /Constraint: Keep the public API stable\./);
+  assert.match(board, /Constraint: Do not add dependencies\./);
+  assert.throws(() => createMission({ mission_id: "M-bad", objective: "Reject oversized constraints.", constraints: ["x".repeat(501)] }), /Mission state is invalid/);
+  assert.throws(() => createMission({ mission_id: "M-bad", objective: "Reject duplicate constraints.", constraints: ["Preserve behavior.", "Preserve behavior."] }), /Mission state is invalid/);
+});
+
 test("Situation Board keeps planning and materialized Operations distinct", () => {
   const mission = createMission({ mission_id: "M-plan-board", objective: "Materialize semantic Tasks safely.", operation_ids: ["O-plan-board"] });
   const operation = createOperation({ operation_id: "O-plan-board", mission_id: mission.mission_id, objective: "Plan source inspection.", allowed_policy_ids: ["research-read"], planning: true });

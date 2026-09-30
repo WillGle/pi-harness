@@ -12,10 +12,11 @@ import { trackControlPi } from "./helpers/control-state-isolation.mjs";
 function makePi(entries) {
   const tools = new Map(), handlers = new Map(), listeners = new Map();
   const pi = {
-    tools, entries, commands: new Map(), spawns: 0,
+    tools, entries, commands: new Map(), spawns: 0, followUps: [],
     on(name, handler) { handlers.set(name, handler); },
     registerTool(tool) { tools.set(tool.name, tool); },
     registerCommand(name, command) { this.commands.set(name, command); },
+    sendUserMessage(text, options) { this.followUps.push({ text, options }); },
     appendEntry(customType, data) { entries.push({ customType, data }); },
     events: {
       on(name, fn) { const set = listeners.get(name) ?? new Set(); set.add(fn); listeners.set(name, set); return () => set.delete(fn); },
@@ -38,7 +39,34 @@ function activeMissionEntries(objective) {
 test("Commander context receives the Harness language contract without skill selection", () => {
   const pi = makePi([]);
   const prompt = pi.contextPrompt().sections.pi_harness_contract;
-  for (const text of ["ASD-STE100-derived Agent English", "State the actor explicitly.", "Put a condition before the action that depends on it.", "Only the Coordinator may accept", "Operation completion does not complete the Mission.", "Do not promote raw L3 Worker context or raw Evidence to L0 or L1."]) assert.ok(prompt.includes(text), text);
+  for (const text of ["ASD-STE100-derived Agent English", "State the actor explicitly.", "Put a condition before the action that depends on it.", "Only the Coordinator may accept", "Operation completion does not complete the Mission.", "Do not promote raw L3 Worker context or raw Evidence to L0 or L1.", "Treat an ordinary user request in natural language as sufficient input.", "Choose DIRECT EXECUTION", "Choose MANAGED MISSION", "Treat a user `mission:` hint", "Do not ask the user to trigger maintenance", "Cache-hit ratio is telemetry, not the optimization objective."]) assert.ok(prompt.includes(text), text);
+});
+
+test("natural-language Commander can start a managed Mission and retain its Constraints", async () => {
+  const pi = makePi([]);
+  const started = await call(pi, "pi_harness_start_mission", { objective: "Fix the authentication bug and verify it.", constraints: ["Preserve the public API."] });
+  assert.equal(started.status, "active");
+  assert.match(started.mission_id, /^M-/);
+  const mission = pi.entries.filter((entry) => entry.customType === MISSION_ENTRY).at(-1).data[started.mission_id];
+  assert.deepEqual(mission.constraints, ["Preserve the public API."]);
+  assert.equal(pi.spawns, 0, "Mission start does not bypass Coordinator planning");
+  assert.match(pi.followUps.at(-1).text, /Create a task-less planning Operation/);
+  const operation = await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-natural-language", objective: mission.objective, constraints: ["Use the existing test runner."] });
+  assert.equal(operation.planning, true);
+  assert.deepEqual(pi.entries.filter((entry) => entry.customType === TASK_GRAPH_ENTRY).at(-1).data.operations[operation.operation_id].constraints, [...mission.constraints, "Use the existing test runner."]);
+  assert.deepEqual(Object.keys(pi.tools.get("pi_harness_start_mission").parameters.properties).sort(), ["constraints", "objective"]);
+  await assert.rejects(() => pi.tools.get("pi_harness_start_mission").execute("test", { objective: "Start a conflicting Mission." }), /Mission is already active/);
+});
+
+test("a new natural-language Mission does not silently select persisted Missions", async () => {
+  const old = createMission({ mission_id: "M-old", objective: "Continue previous work." });
+  const entries = [{ customType: MISSION_ENTRY, data: { [old.mission_id]: old } }];
+  const pi = makePi(entries);
+  const started = await call(pi, "pi_harness_start_mission", { objective: "Start a separate new objective." });
+  assert.notEqual(started.mission_id, old.mission_id);
+  const created = await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-new-natural", objective: "Start a separate new objective." });
+  assert.equal(created.mission_id, started.mission_id);
+  assert.deepEqual(entries.filter((entry) => entry.customType === MISSION_ENTRY).at(-1).data[old.mission_id].operation_ids, []);
 });
 
 test("Commander-facing Operation tools cannot accept TaskResults or expose TaskResult contents", async () => {
@@ -98,6 +126,15 @@ test("Commander creates an Operation only after explicitly selecting its owning 
   await pi.commands.get("mission").handler("resume M-only", {});
   const created = await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-restored", objective: "Restore safely.", required_task_ids: ["T-restored"] });
   assert.equal(created.mission_id, "M-only");
+});
+
+test("resuming a Mission with an existing control lease validates the lease", async () => {
+  const pi = makePi(activeMissionEntries("Resume safely.")), notifications = [];
+  const ctx = { ui: { notify: (message, level) => notifications.push({ message, level }) } };
+  await pi.commands.get("mission").handler("resume M-test", ctx);
+  await pi.commands.get("mission").handler("resume M-test", ctx);
+  assert.equal(notifications.some(({ level }) => level === "error"), false);
+  assert.equal(notifications.filter(({ message }) => message.includes("Mission M-test resumed.")).length, 2);
 });
 
 test("multiple restored Missions remain unselected until an exact ID is resumed", async () => {

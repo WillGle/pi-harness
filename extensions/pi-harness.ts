@@ -1,5 +1,5 @@
 import { contextTelemetry, deterministicContextEdits, installStablePrompt, stablePromptSections } from "../lib/context-economics.mjs";
-import { acquireControlLease, readControlState, writeControlState } from "../lib/control-state-store.mjs";
+import { acquireControlLease, assertControlLease, readControlState, writeControlState } from "../lib/control-state-store.mjs";
 import { MISSION_ENTRY, attachOperation, createMission, missionIsClosable, missionSituationBoard, validateMissionOwnership } from "../lib/mission.mjs";
 import { reconcileAttemptLedger } from "../lib/attempt-ledger.mjs";
 import { assertSupportedPlatform } from "../lib/platform.mjs";
@@ -29,7 +29,7 @@ import { Type } from "typebox";
 type Context = { cwd?: string; ui?: { notify?: (message: string, level: "info" | "warning" | "error") => void }; abort?: () => void; isIdle?: () => boolean };
 type Pi = Record<string, any>;
 
-const HARNESS_TOOLS = new Set(["pi_harness_goal", "pi_harness_coordinate", "pi_harness_operation", "pi_harness_run_operation", "pi_harness_cancel_operation", "pi_harness_patch"]);
+const HARNESS_TOOLS = new Set(["pi_harness_start_mission", "pi_harness_goal", "pi_harness_coordinate", "pi_harness_operation", "pi_harness_run_operation", "pi_harness_cancel_operation", "pi_harness_patch"]);
 const PACKAGE_TOOLS = new Set(["Agent", "get_subagent_result", "steer_subagent", "SubagentWorkflow"]);
 const MAX_AUTOMATIC_CONTINUATIONS = 25;
 const SKILLS = Object.keys(JSON.parse(readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "../skills/skills.lock.json"), "utf8")).skills).join(", ");
@@ -46,8 +46,8 @@ class StatusOverlay {
   handleInput(data: string) {
     if (matchesKey(data, "escape") || matchesKey(data, "return") || data === "q" || matchesKey(data, "ctrl+c")) return this.done();
     const rows = Math.max(1, this.content.length - 16);
-    if (matchesKey(data, "down") || matchesKey(data, "pagedown")) this.offset = Math.min(rows, this.offset + (matchesKey(data, "pagedown") ? 12 : 1));
-    else if (matchesKey(data, "up") || matchesKey(data, "pageup")) this.offset = Math.max(0, this.offset - (matchesKey(data, "pageup") ? 12 : 1));
+    if (matchesKey(data, "down") || matchesKey(data, "pageDown")) this.offset = Math.min(rows, this.offset + (matchesKey(data, "pageDown") ? 12 : 1));
+    else if (matchesKey(data, "up") || matchesKey(data, "pageUp")) this.offset = Math.max(0, this.offset - (matchesKey(data, "pageUp") ? 12 : 1));
     else return;
     this.tui.requestRender();
   }
@@ -102,6 +102,7 @@ export default function harness(pi: Pi): void {
   let controlStateRestored = false;
   let latestContextTelemetry: ReturnType<typeof contextTelemetry> | undefined;
   let latestContextUsage: any;
+  let latestRuntimeIdentity: { modelDisplayName?: string; effort?: string } = {};
   let goalGroupId: string | undefined;
   let statusTui: any;
   let statusViewModel = buildStatusViewModel();
@@ -110,10 +111,17 @@ export default function harness(pi: Pi): void {
   const statusFingerprint = (model: ReturnType<typeof buildStatusViewModel>) => JSON.stringify([
     formatStatusFooter(model, 140), formatStatusFooter(model, 100), formatStatusFooter(model, 60), formatExpandedStatus(model),
   ]);
+  const captureRuntimeIdentity = (ctx: any) => {
+    const model = ctx?.model;
+    latestRuntimeIdentity = {
+      modelDisplayName: typeof model?.name === "string" && model.name.trim() ? model.name : typeof model?.id === "string" ? model.id : undefined,
+      effort: typeof ctx?.thinkingLevel === "string" ? ctx.thinkingLevel : undefined,
+    };
+  };
   const refreshStatusView = (requestRender = true) => {
     const next = buildStatusViewModel({ missions, operations, taskGraphs, attemptLedger, coordinatorStates,
       selectedMissionId, activeOperationId: activeOperationRuns.keys().next().value,
-      contextUsage: latestContextUsage, telemetry: latestContextTelemetry,
+      contextUsage: latestContextUsage, telemetry: latestContextTelemetry, runtime: latestRuntimeIdentity,
       gcPending: maintenancePending, piCompacting: nativeCompactionImminent });
     const changed = statusFingerprint(statusViewModel) !== statusFingerprint(next);
     statusViewModel = next;
@@ -161,7 +169,7 @@ export default function harness(pi: Pi): void {
   const missionBoard = () => missionSituationBoard(missions, operations, taskGraphs, attemptLedger);
   const collectContextTelemetry = (entries: any[], usage: any) => contextTelemetry(entries, usage, { missions, operations, taskGraphs, attemptLedger });
   const saveCompactState = (event: Record<string, unknown> = {}) => pi.appendEntry?.(COMPACT_ENTRY, controlStateSummary({
-    goal, plan, decisions: Array.isArray(event.decisions) ? event.decisions : [],
+    goal, missionConstraints: selectedMissionId ? missions[selectedMissionId]?.constraints : undefined, plan, decisions: Array.isArray(event.decisions) ? event.decisions : [],
     changedFiles: Array.isArray(event.changedFiles) ? event.changedFiles : [],
     gates: Array.isArray(event.gates) ? event.gates : [], blocker: goal?.blocker,
   }));
@@ -227,9 +235,30 @@ export default function harness(pi: Pi): void {
       "Current Mission Situation Board:",
       situation,
       "Use this persisted state. Do not recreate completed Operations or accepted Tasks.",
-      "Continue until you call pi_harness_goal with a terminal state and concrete evidence.",
+      "Create a task-less planning Operation and call pi_harness_run_operation when managed execution materially improves this Mission. Pass the Mission Constraints to the planning Operation. Let the Coordinator choose the smallest useful TaskGraph.",
+      "Continue until you call pi_harness_goal with a terminal state and concrete Evidence.",
     ].filter(Boolean).join("\n");
     pi.sendUserMessage?.(message, { deliverAs: "followUp" });
+  };
+  const startMission = async (objective: string, constraints: string[] = [], ctx: Context = {}) => {
+    if (plan.enabled) throw new Error("Disable plan mode before starting a Mission.");
+    if (activeOperationRuns.size) throw new Error("Wait until the active Operation finishes before starting another Mission.");
+    if (goal?.status === "active" && selectedMissionId) throw new Error("A Mission is already active. Continue it or cancel it before starting another Mission.");
+    const mission_id = `M-${randomUUID()}`;
+    const mission = createMission({ mission_id, objective, constraints: [...new Set(constraints)] });
+    await ensureControlLease(ctx.cwd);
+    goal = { ...goalState(mission.objective), mission_id };
+    selectedMissionId = mission_id;
+    missionGoals = { ...missionGoals, [mission_id]: goal };
+    goalGroupId = randomUUID(); continuationCount = 0; invalidTerminalAttempts = 0; continuationQueued = false;
+    resumedMissionId = undefined;
+    missions = { ...missions, [mission_id]: mission };
+    maintenancePending = true;
+    persistMission(); persistScheduler(); persist();
+    if (ctx.isIdle?.() !== false) maintenancePending = false;
+    refreshStatusView();
+    continueGoal();
+    return mission;
   };
 
   pi.on?.("session_start", async (_event: any, ctx: any) => {
@@ -291,6 +320,7 @@ export default function harness(pi: Pi): void {
     // settlement boundaries, so render() never walks an unbounded session.
     latestContextUsage = ctx.getContextUsage?.();
     latestContextTelemetry = collectContextTelemetry(ctx.sessionManager?.getEntries?.() ?? [], latestContextUsage);
+    captureRuntimeIdentity(ctx);
     refreshStatusView(false);
     proactivePolicy = restoreProactivePolicy(restore(entries, PROACTIVE_COMPACT_ENTRY));
     continuationCount = 0;
@@ -365,6 +395,8 @@ export default function harness(pi: Pi): void {
     maintenancePending = false; lastMaintenanceEpoch = maintenanceEpoch; maintenanceArmed = false;
     refreshStatusView();
   });
+  pi.on?.("model_select", (_event: any, ctx: any) => { captureRuntimeIdentity(ctx); refreshStatusView(); });
+  pi.on?.("thinking_level_select", (_event: any, ctx: any) => { captureRuntimeIdentity(ctx); refreshStatusView(); });
   pi.on?.("context", (_event: any, ctx: any) => {
     latestContextUsage = ctx.getContextUsage?.();
     if (proactivePolicy.enabled) {
@@ -435,7 +467,7 @@ export default function harness(pi: Pi): void {
   const showExpandedStatus = async (ctx: any) => {
     const content = formatExpandedStatus(statusViewModel).split("\n");
     if (ctx.mode === "tui" && ctx.ui?.custom) {
-      await ctx.ui.custom<void>((tui: any, theme: any, _keybindings: any, done: () => void) => new StatusOverlay(tui, theme, content, done), {
+      await ctx.ui.custom((tui: any, theme: any, _keybindings: any, done: () => void) => new StatusOverlay(tui, theme, content, done), {
         overlay: true, overlayOptions: { anchor: "center", width: "90%", maxHeight: 24 },
       });
     } else say(ctx, content.join("\n"));
@@ -499,20 +531,8 @@ export default function harness(pi: Pi): void {
     const input = args.trim();
     if (input === "status") return say(ctx, goal && selectedMissionId ? `${goal.status}: ${goal.objective} (${selectedMissionId})` : "No Mission selected. Use /mission list and /mission resume <mission-id>.");
     if (input === "cancel") return selectedMissionId ? cancelGoal(ctx) : say(ctx, "No Mission selected. Use /mission resume <mission-id> before cancelling.", "warning");
-    if (plan.enabled) return say(ctx, "Disable plan mode before starting a goal.", "warning");
-    if (goal?.status === "active" && selectedMissionId) return say(ctx, "An active goal already exists; use /goal status or /goal cancel.", "warning");
-    try {
-      await ensureControlLease(ctx.cwd);
-      const mission_id = `M-${randomUUID()}`;
-      goal = { ...goalState(input), mission_id };
-      selectedMissionId = mission_id;
-      missionGoals = { ...missionGoals, [mission_id]: goal };
-      goalGroupId = randomUUID(); continuationCount = 0; invalidTerminalAttempts = 0;
-      resumedMissionId = undefined;
-      missions = { ...missions, [mission_id]: createMission({ mission_id, objective: goal.objective }) };
-      maintenancePending = true;
-      persistMission(); persistScheduler(); persist(); if (ctx.isIdle?.() !== false) maintenancePending = false; say(ctx, `Goal active: ${goal.objective}`); continueGoal();
-    } catch (error) { say(ctx, (error as Error).message, "error"); }
+    try { const mission = await startMission(input, [], ctx); say(ctx, `Goal active: ${mission.objective}`); }
+    catch (error) { say(ctx, (error as Error).message, "error"); }
   }});
   pi.registerCommand?.("skill-hub", { description: "Show the pinned curated-skill boundary", handler: async (_args: string, ctx: Context) => {
     say(ctx, "Curated skills are checksum-pinned. Do not install an additional skill without an explicit user request.");
@@ -535,6 +555,15 @@ export default function harness(pi: Pi): void {
     }
   }});
 
+  pi.registerTool?.({
+    name: "pi_harness_start_mission", label: "Pi Harness start Mission",
+    description: "Start a managed Mission from a natural-language objective and optional user Constraints. Use only when managed execution materially improves the result. Harness starts a bounded Commander continuation; the Coordinator owns semantic Task decomposition.",
+    parameters: Type.Object({ objective: Type.String(), constraints: Type.Optional(Type.Array(Type.String())) }),
+    execute: async (_id: string, input: { objective: string; constraints?: string[] }, _signal?: AbortSignal, _onUpdate?: any, ctx?: Context) => {
+      const mission = await startMission(input.objective, input.constraints ?? [], ctx ?? {});
+      return { content: [{ type: "text", text: JSON.stringify({ version: 1, mission_id: mission.mission_id, status: mission.status, objective: mission.objective }) }] };
+    },
+  });
   pi.registerTool?.({
     name: "pi_harness_goal", label: "Pi Harness goal",
     description: "Record the terminal state of the explicitly selected Mission. Evidence is mandatory; blocked and error also require a blocker.",
@@ -600,9 +629,10 @@ export default function harness(pi: Pi): void {
         const legacy = input as any;
         const mission = selectedMissionId ? missions[selectedMissionId] : undefined;
         if (!mission || mission.status !== "active" || !controlLease) throw new Error("Operation creation requires an explicitly selected Mission; use /mission resume <mission-id>");
+        const constraints = [...new Set([...(mission.constraints ?? []), ...(input.constraints ?? [])])];
         const operation = legacy.required_task_ids !== undefined
-          ? createOperation({ operation_id: id, mission_id: mission.mission_id, objective: input.objective, required_task_ids: legacy.required_task_ids, acceptance_criteria: input.acceptance_criteria, dependencies: legacy.dependencies, constraints: input.constraints, task_intents: legacy.task_intents, task_specs: legacy.task_specs })
-          : createOperation({ operation_id: id, mission_id: mission.mission_id, objective: input.objective, acceptance_criteria: input.acceptance_criteria, allowed_policy_ids: input.allowed_policy_ids ?? ["research-read", "scout-read", "worker-write"], constraints: input.constraints, planning: true });
+          ? createOperation({ operation_id: id, mission_id: mission.mission_id, objective: input.objective, required_task_ids: legacy.required_task_ids, acceptance_criteria: input.acceptance_criteria, dependencies: legacy.dependencies, constraints, task_intents: legacy.task_intents, task_specs: legacy.task_specs })
+          : createOperation({ operation_id: id, mission_id: mission.mission_id, objective: input.objective, acceptance_criteria: input.acceptance_criteria, allowed_policy_ids: input.allowed_policy_ids ?? ["research-read", "scout-read", "worker-write"], constraints, planning: true });
         if (!operation.planning && operation.required_task_ids.some((taskId: string) => Object.values(operations).some((entry: any) => entry.required_task_ids?.includes(taskId)))) throw new Error("A TaskOrder ID already belongs to another Operation");
         const graph = createTaskGraph(operation);
         operations = { ...operations, [id]: operation };
@@ -691,7 +721,7 @@ export default function harness(pi: Pi): void {
           dispatch: async (task: any, progress: any) => promoteTaskResult(await executeCoordinateTask(pi, validateTask(task), { cwd: runCwd, groupId: runId, signal: controller.signal, modelRegistry: ctx?.modelRegistry,
             onVerificationStart: progress.onVerificationStart, timeout: managedTaskTimeout(task.owner), reviewerTimeout: managedTaskTimeout("reviewer"), onUsage: (usage: any, provenance: Record<string, any>) => recordUsage(usage, { task_id: task.task_id, ...provenance }) })),
           save,
-        }, { state: coordinatorStates[id] ?? coordinatorState(operation), graph: taskGraphs[id], mission: operations[id].mission_id ? { mission_id: operations[id].mission_id, objective: missions[operations[id].mission_id]?.objective } : goal?.status === "active" ? goal.objective : undefined, cwd: runCwd, onUsage: recordUsage, signal: controller.signal, parallelLimit });
+        }, { state: coordinatorStates[id] ?? coordinatorState(operation), graph: taskGraphs[id], mission: operations[id].mission_id ? { mission_id: operations[id].mission_id, objective: missions[operations[id].mission_id]?.objective, ...(missions[operations[id].mission_id]?.constraints?.length ? { constraints: missions[operations[id].mission_id].constraints } : {}) } : goal?.status === "active" ? goal.objective : undefined, cwd: runCwd, onUsage: recordUsage, signal: controller.signal, parallelLimit });
         return { content: [{ type: "text", text: JSON.stringify(report) }] };
       } finally {
         signal?.removeEventListener("abort", abort);

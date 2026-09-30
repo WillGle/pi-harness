@@ -15,6 +15,8 @@ test("footer renders two cached lines without history scans and exposes one boun
   let statusOverlay;
   let overlayClosed = false;
   let contextUsage = { tokens: 164_000, contextWindow: 272_000, percent: 60.3 };
+  let runtimeModel = { id: "test-model", name: "Test Model", contextWindow: 272_000 };
+  let thinkingLevel = "off";
   const entries = [];
   const pi = {
     on(name, handler) { handlers.set(name, handler); },
@@ -26,7 +28,7 @@ test("footer renders two cached lines without history scans and exposes one boun
   harness(pi);
   const theme = { fg: (_tone, text) => text, bold: (text) => text };
   const ctx = {
-    mode: "tui", cwd: process.cwd(), model: { id: "test-model", contextWindow: 272_000 }, thinkingLevel: "off",
+    mode: "tui", cwd: process.cwd(), get model() { return runtimeModel; }, get thinkingLevel() { return thinkingLevel; },
     sessionManager: { getEntries() { entriesReads++; return entries; } },
     getContextUsage() { return contextUsage; },
     ui: {
@@ -47,6 +49,9 @@ test("footer renders two cached lines without history scans and exposes one boun
     assert.equal(lines.length, 2);
     assert.ok(lines.every((line) => visibleWidth(line) <= width));
   }
+  const initialFooter = widget.render(160);
+  assert.match(initialFooter[0], /Mission Idle/);
+  assert.match(initialFooter[1], /Test Model · Off/);
   for (let index = 0; index < 30; index++) widget.render(120);
   assert.equal(entriesReads, readsAfterStartup, "footer render performs no session-history reads");
   assert.equal(renderRequests, 0, "repeated render does not request redraws");
@@ -59,6 +64,16 @@ test("footer renders two cached lines without history scans and exposes one boun
   contextUsage = { tokens: 260_000, contextWindow: 272_000, percent: 95.6 };
   sameContext({}, ctx);
   assert.equal(renderRequests, 1, "a visible high-context transition requests one redraw");
+
+  runtimeModel = { id: "runtime-id", name: "Daybreak Blue", contextWindow: 272_000 };
+  thinkingLevel = "high";
+  handlers.get("model_select")({ type: "model_select", model: { id: "ignored", name: "Event Payload Name" } }, ctx);
+  assert.equal(renderRequests, 2, "the current runtime model selection requests one redraw");
+  assert.match(widget.render(160)[1], /Daybreak Blue · High/);
+  thinkingLevel = "medium";
+  handlers.get("thinking_level_select")({ type: "thinking_level_select", level: "low" }, ctx);
+  assert.equal(renderRequests, 3, "the current runtime thinking level requests one redraw");
+  assert.match(widget.render(160)[1], /Daybreak Blue · Medium/);
 
   await commands.get("status").handler("", ctx);
   assert.ok(customLines.some((line) => line.includes("Blockers")));

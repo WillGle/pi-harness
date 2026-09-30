@@ -474,3 +474,26 @@ T1–T4 retained PASS; T5–T9 now PASS on source, regression and native/live ev
 ### Historical final rerun variance — before catalog-drain fix
 
 At this 2026-09-27 checkpoint, `/tmp/pi-harness-phase-i-release-all.log` showed build and159/159 unit PASS, with integration17/20 and3 timeouts: ACP command forwarding (15s), Pi RPC goal, and compaction/restore (`/plan on`,10s). The immediately preceding full run passed159+20. The focused reproduction in `/tmp/pi-harness-final-timeout-repro.log` showed5/7 PASS and2/7 FAIL. The root cause was not proven at that checkpoint. The canonical gate was NOT green then. T11 later traced the startup timeout cohort to the catalog-drain gap, patched the canonical Pi package, and recorded repeated green default-runtime runs above. Do not delete this historical failure evidence.
+
+## Requested follow-up — Coordinator action cleanup and live Context Economics (2026-06-12)
+Status: PASS
+
+- Removed the Coordinator `report` action from the prompt, parser, planning checks, and architecture documentation. Planning Operations now accept only `plan_tasks` or `block`. Existing fixtures use explicit `block` decisions. Regression confirms the removed action fails parsing and is absent from the action prompt.
+- Targeted tests: operation runner, parallel Operation and parallel Review tests passed 49/49.
+- Full gate: `npm run test:all` passed build, 198 unit tests, 2 runtime tests and 43 integration tests. No tests were skipped.
+- Live provider benchmark: `openai-codex/gpt-6-luna`, current managed Pi/Harness architecture, native compaction enabled, cache warming disabled. Workload: one verified managed Operation plus 12 prior blocked OperationReports and one later complete OperationReport; same provider prompt before and after deterministic ContextEdit GC.
+- Provider usage: input tokens 32,447→3,128; cache read 0→0; cache write 0→0; cache-hit ratio 0→0. These zero values were returned by the provider. Runtime catalog cost: USD0.0032472→USD0.0003153. Provider-reported cost remains null.
+- Context: 187,095→22,191 bytes; 12 ContextEdits; total ContextEdit count 0→12; compaction count 0→0. The Mission stayed active. The Operation completed with a verified, accepted TaskResult.
+- The shared USD1 reservation ledger recorded 20 requests across two live qualification runs and a catalog-derived upper bound of USD0.025302. No credential was read, printed or changed. Cache warming was disabled, so no warming-cost comparison is claimed.
+- Evidence: `/tmp/pi-managed-proof-L5xRFB/benchmark.json`; full log: `/tmp/pi-harness-context-live-20260612-final.log`; final test log: `/tmp/pi-harness-requested-final-all.log`.
+
+## Natural-language execution policy implementation — 2026-06-12
+Status: PASS
+
+- Added Commander policy for natural-language objectives, DIRECT EXECUTION versus MANAGED MISSION selection, optional `mission:` and `direct:` hints, strategic questions, explicit resume selection, and automatic deterministic Context Economics.
+- Added `pi_harness_start_mission`. It accepts only a natural-language objective and optional Constraints. It creates a new Mission without selecting persisted Missions. Mission Constraints persist on the Situation Board, enter each Operation, and remain in compaction state.
+- The managed Mission continuation directs the Commander to create a task-less planning Operation. The Coordinator prompt and profile require the smallest useful TaskGraph and prohibit artificial Task splits.
+- Updated README and target architecture. The target architecture no longer lists the removed Coordinator `report` action.
+- Regression tests cover natural-language Mission start, Constraint propagation, persisted Mission non-selection, compaction retention, and minimal Task decomposition.
+- Verification: targeted tests passed 43/43; `npm run test:all` passed build, 201 unit tests, 2 runtime tests, and 43 integration tests. No tests were skipped.
+- Full test log: `/tmp/pi-harness-natural-language-final-all.log`.

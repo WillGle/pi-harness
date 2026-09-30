@@ -32,6 +32,9 @@ if(!Number.isFinite(initialCeiling)||initialCeiling>1)throw Error('Unchanged Pi 
 let calls=0;
 const usages=[];
 const responses=[];
+const metric=value=>Number.isFinite(value)&&value>=0?value:null;
+const usageSample=usage=>({input:metric(usage?.input),output:metric(usage?.output),cacheRead:metric(usage?.cacheRead),cacheWrite:metric(usage?.cacheWrite),totalTokens:metric(usage?.totalTokens),cost:{input:metric(usage?.cost?.input),output:metric(usage?.cost?.output),cacheRead:metric(usage?.cost?.cacheRead),cacheWrite:metric(usage?.cost?.cacheWrite),total:metric(usage?.cost?.total)}});
+const cacheHitRatio=usage=>usage&&[usage.input,usage.cacheRead,usage.cacheWrite].every(Number.isFinite)&&usage.input+usage.cacheRead+usage.cacheWrite>0?usage.cacheRead/(usage.input+usage.cacheRead+usage.cacheWrite):null;
 const ledger=JSON.parse(readFileSync(ledgerPath,'utf8'));
 const saveBudget=()=>writeFileSync(ledgerPath,JSON.stringify(ledger)+'\n');
 const guarded=new Proxy(runtime,{get(target,key){
@@ -49,15 +52,17 @@ const guarded=new Proxy(runtime,{get(target,key){
    process.stdout.write(JSON.stringify({event:'request_reserved',call:calls,model:provider+'/'+modelId,aggregate_spent_upper:ledger.spent_upper,aggregate_reserved:ledger.reserved,limit:ledger.limit})+'\n');
    const stream=target.streamSimple(requested,context,{...options,maxTokens:output,maxRetries:0});
    void stream.result().then(message=>{
-     const usage=message.usage;
+     const usage=message.usage,sample=usageSample(usage);
      const validUsage=usage&&['input','output','cacheRead','cacheWrite'].every(k=>Number.isFinite(usage[k])&&usage[k]>=0);
      const reportedTokens=validUsage?usage.input+usage.output+usage.cacheRead+usage.cacheWrite:0;
      const responseText=message.content.filter(block=>block.type==='text').map(block=>block.text).join('').trim();
-     responses.push({stop_reason:message.stopReason,response_ok:message.stopReason==='stop'&&responseText==='OK',usage_available:reportedTokens>0});
+     const usageAvailable=[sample.input,sample.output,sample.cacheRead,sample.cacheWrite].some(value=>value!==null);
+     responses.push({stop_reason:message.stopReason,response_ok:message.stopReason==='stop'&&responseText==='OK',usage_available:usageAvailable,usage:sample});
+     usages.push(sample);
      if(!validUsage) {ledger.spent_upper+=ceiling;ledger.reserved-=ceiling;saveBudget();return;}
      if(reportedTokens===0) {ledger.spent_upper+=ceiling;ledger.reserved-=ceiling;saveBudget();return;}
      const upper=(usage.input+usage.cacheRead+usage.cacheWrite)*maximumInput/1e6+usage.output*maximumOutput/1e6;
-     usages.push(usage);ledger.spent_upper+=upper;ledger.reserved-=ceiling;saveBudget();
+     ledger.spent_upper+=upper;ledger.reserved-=ceiling;saveBudget();
    });
    return stream;
  };
@@ -79,7 +84,7 @@ const git=(...args)=>{const r=spawnSync('git',args,{cwd:repo,encoding:'utf8'});i
 git('init','-q');git('config','user.name','Pi live proof');git('config','user.email','proof@example.invalid');git('add','.pi');git('commit','-qm','Initialize disposable managed proof');
 process.chdir(repo);
 const tools=new Map(),commands=new Map(),commanderQueue=[],commanderToolCalls=[];let ctx,tracingCommander=false,commanderRunReport;
-const settings=SettingsManager.inMemory({defaultProvider:provider,defaultModel:modelId,compaction:{enabled:false},cacheWarming:'off'});
+const settings=SettingsManager.inMemory({defaultProvider:provider,defaultModel:modelId,compaction:{enabled:true},cacheWarming:'off'});
 const loader=new DefaultResourceLoader({cwd:repo,agentDir,settingsManager:settings,noExtensions:true,noSkills:true,noPromptTemplates:true,noThemes:true,noContextFiles:true,extensionFactories:[{name:'subagents',factory:subagents},{name:'harness',factory:pi=>{
  const capture=new Proxy(pi,{get(target,key){if(key==='registerCommand')return (name,command)=>{commands.set(name,command);target.registerCommand(name,command);};if(key==='sendUserMessage')return text=>commanderQueue.push(text);if(key==='registerTool')return tool=>{const execute=tool.execute;const tracked={...tool,execute:async(...args)=>{const result=await execute(...args);if(tracingCommander){commanderToolCalls.push(tool.name);if(tool.name==='pi_harness_run_operation'){const text=result?.content?.find(item=>item.type==='text')?.text;if(text)commanderRunReport=JSON.parse(text);}}return result;}};tools.set(tool.name,tracked);target.registerTool(tracked);};return target[key];}});
  harness(capture);pi.on('session_start',(_event,context)=>{ctx=context;});
@@ -157,7 +162,8 @@ try {
    const beforeIndex=responses.length;
    await session.prompt('Benchmark: reply with exactly OK, no tools.');
    assert.equal(responses.length,beforeIndex+1);
-   const beforeResponse=responses.at(-1),beforeUsage=usages.at(-1),beforeBytes=Buffer.byteLength(JSON.stringify(session.sessionManager.buildSessionProjection().messages));
+   const beforeResponse=responses.at(-1),beforeUsage=beforeResponse.response_ok?beforeResponse.usage:null,beforeBytes=Buffer.byteLength(JSON.stringify(session.sessionManager.buildSessionProjection().messages));
+   const beforeEntries=session.sessionManager.getEntries(),beforeTelemetry=contextTelemetry(beforeEntries),contextEditsBefore=beforeEntries.filter(entry=>entry.type==='context_edit').length;
    // Explicit idle safe boundary in the benchmark driver; production uses native drafts.
    assert.equal(session.isStreaming,false);
    const collected=deterministicContextEdits(session.sessionManager.buildSessionProjection().entries,{operations:state.operations,taskGraphs:state.task_graphs});
@@ -166,15 +172,14 @@ try {
    const afterIndex=responses.length;
    await session.prompt('Benchmark: reply with exactly OK, no tools.');
    assert.equal(responses.length,afterIndex+1);
-   const afterResponse=responses.at(-1),afterUsage=usages.at(-1);
+   const afterResponse=responses.at(-1),afterUsage=afterResponse.response_ok?afterResponse.usage:null;
+   const afterEntries=session.sessionManager.getEntries(),afterTelemetry=contextTelemetry(afterEntries),contextEditsAfter=afterEntries.filter(entry=>entry.type==='context_edit').length;
    assert.ok(afterBytes<beforeBytes);assert.equal(collected.edits.length,12);
    assert.equal(JSON.stringify(benchmarkOperation),JSON.stringify(session.sessionManager.getEntries().filter(e=>e.customType==='pi-harness-task-graph-state').at(-1).data.operations[operationId]));
    const controlAfter=readControlState(repo);
    assert.deepEqual(controlAfter,controlBefore,'ContextEdit GC must not alter durable Mission, Operation, Task, or Attempt state');
-   const beforeUsageAvailable=beforeResponse.response_ok&&beforeResponse.usage_available,afterUsageAvailable=afterResponse.response_ok&&afterResponse.usage_available;
-   const measuredBefore=beforeUsageAvailable?beforeUsage:null,measuredAfter=afterUsageAvailable?afterUsage:null;
-   const beforePromptTokens=measuredBefore?measuredBefore.input+measuredBefore.cacheRead+measuredBefore.cacheWrite:null,afterPromptTokens=measuredAfter?measuredAfter.input+measuredAfter.cacheRead+measuredAfter.cacheWrite:null;
-   const benchmark={workload:'12 synthetic prior blocked OperationReport tool-call/results plus one later complete OperationReport; same provider prompt before/after deterministic promotion GC',before_response:beforeResponse,after_response:afterResponse,before_usage:measuredBefore,after_usage:measuredAfter,before_prompt_tokens:beforePromptTokens,after_prompt_tokens:afterPromptTokens,prompt_token_reduction:beforePromptTokens===null||afterPromptTokens===null?null:beforePromptTokens-afterPromptTokens,provider_prompt_tokens_reduced:beforePromptTokens===null||afterPromptTokens===null?null:afterPromptTokens<beforePromptTokens,runtime_catalog_cost_before:measuredBefore?.cost?.total??null,runtime_catalog_cost_after:measuredAfter?.cost?.total??null,provider_reported_cost:null,before_context_bytes:beforeBytes,after_context_bytes:afterBytes,context_bytes_removed:beforeBytes-afterBytes,gc_bytes_removed:collected.bytesRemoved,context_edits:collected.edits.length,compaction_count:contextTelemetry(session.sessionManager.getEntries()).compaction_count,control_state_preserved:true,control_state:controlSummary,aggregate_budget:ledger};
+   const beforePromptTokens=beforeUsage&&[beforeUsage.input,beforeUsage.cacheRead,beforeUsage.cacheWrite].every(Number.isFinite)?beforeUsage.input+beforeUsage.cacheRead+beforeUsage.cacheWrite:null,afterPromptTokens=afterUsage&&[afterUsage.input,afterUsage.cacheRead,afterUsage.cacheWrite].every(Number.isFinite)?afterUsage.input+afterUsage.cacheRead+afterUsage.cacheWrite:null;
+   const benchmark={workload:'12 synthetic prior blocked OperationReport tool-call/results plus one later complete OperationReport; same provider prompt before/after deterministic promotion GC',before_response:beforeResponse,after_response:afterResponse,before_usage:beforeUsage,after_usage:afterUsage,input_tokens_before:beforeUsage?.input??null,input_tokens_after:afterUsage?.input??null,cache_read_tokens_before:beforeUsage?.cacheRead??null,cache_read_tokens_after:afterUsage?.cacheRead??null,cache_write_tokens_before:beforeUsage?.cacheWrite??null,cache_write_tokens_after:afterUsage?.cacheWrite??null,cache_hit_ratio_before:cacheHitRatio(beforeUsage),cache_hit_ratio_after:cacheHitRatio(afterUsage),before_prompt_tokens:beforePromptTokens,after_prompt_tokens:afterPromptTokens,prompt_token_reduction:beforePromptTokens===null||afterPromptTokens===null?null:beforePromptTokens-afterPromptTokens,provider_prompt_tokens_reduced:beforePromptTokens===null||afterPromptTokens===null?null:afterPromptTokens<beforePromptTokens,runtime_catalog_cost_before:beforeUsage?.cost?.total??null,runtime_catalog_cost_after:afterUsage?.cost?.total??null,provider_reported_cost:null,before_context_bytes:beforeBytes,after_context_bytes:afterBytes,context_bytes_removed:beforeBytes-afterBytes,gc_bytes_removed:collected.bytesRemoved,context_edits:collected.edits.length,context_edit_count_before:contextEditsBefore,context_edit_count_after:contextEditsAfter,compaction_count_before:beforeTelemetry.compaction_count,compaction_count_after:afterTelemetry.compaction_count,control_state_preserved:true,control_state:controlSummary,aggregate_budget:ledger};
    writeFileSync(join(sandbox,'benchmark.json'),JSON.stringify(benchmark,null,2)+'\n');
    process.stdout.write(JSON.stringify({event:'benchmark',sandbox,...benchmark})+'\n');
  }

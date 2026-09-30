@@ -157,7 +157,7 @@ test("a failed criterion retries only its own Task after the sibling is accepted
       if (!brief.rejected_task_ids.includes("T-1") && brief.task_results["T-1"].verification_status === "failed") return decision("reject_task", { task_id: "T-1" });
       if (!brief.accepted_task_ids.includes("T-2")) return decision("accept_task", { task_id: "T-2" });
       if (brief.ready_task_ids.includes("T-1")) return decision("dispatch", { task_id: "T-1" });
-      return decision("report");
+      return decision("block", { blocked_action: "accept the remaining TaskOrder", required_condition: "the Commander reviews the accepted TaskResults" });
     },
     dispatch: async ({ task_id }) => { attempts[task_id]++; return result(task_id, task_id === "T-1" && attempts[task_id] === 1 ? "failed" : "verified"); },
     save: (nextOperation, _state, graph) => { last = { operation: nextOperation, graph }; },

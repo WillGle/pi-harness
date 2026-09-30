@@ -71,7 +71,7 @@ test("parallel default/security Reviewers see only their own Task Evidence and m
   try {
     const run = runOperation(op, {
       turn: async (_prompt) => requested.length === 0 ? JSON.stringify({ version: 1, operation_id: "O-P", action: "dispatch_batch", reason: "Both Tasks are ready.", task_ids: tasks.map(({ task_id }) => task_id) })
-        : JSON.stringify({ version: 1, operation_id: "O-P", action: "report", reason: "The Coordinator will accept each Task separately." }),
+        : JSON.stringify({ version: 1, operation_id: "O-P", action: "block", reason: "The Coordinator will accept each Task separately.", blocked_action: "accept the available TaskResults", required_condition: "the Coordinator reviews each TaskResult separately" }),
       dispatch: (task) => executeCoordinateTask({ events }, task, { cwd: process.cwd(), timeout: 1500, rpcTimeout: 1000, modelRegistry: { getAvailable: () => [{ provider: "openai", id: "gpt-daybreak-blue-latest" }] } }).then((record) => record.taskResult),
       save: (operation, _state, graph) => { final = { operation, graph }; },
     });

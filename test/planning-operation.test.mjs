@@ -41,9 +41,12 @@ test("planning Coordinator instructions require semantic proposals, not pre-exis
   assert.match(prompt, /planning Operation\. Return action "plan_tasks"/);
   assert.match(prompt, /top-level "tasks" array, never "proposals"/);
   assert.match(prompt, /Allowed policy-to-role mapping: \{"worker-write":"worker"\}/);
+  assert.match(prompt, /Create only meaningful Tasks that benefit from isolated execution/);
+  assert.match(prompt, /Prefer the smallest useful TaskGraph/);
   assert.match(profile, /No TaskOrder ID or registered TaskSpec exists yet/);
   assert.match(profile, /Put semantic proposals in the top-level `tasks` array, never `proposals`/);
   assert.match(profile, /Set `role` to exactly `scout`, `research`, or `worker`/);
+  assert.match(profile, /Do not split one coherent edit into artificial Tasks/);
   assert.match(profile, /Do not use or require Task IDs, TaskSpecs, permissions, verification commands/);
   assert.match(profile, /If `OperationBrief\.planning` is false, use only registered Task IDs/);
   assert.match(profile, /Every `required_task_ids` value in the OperationBrief already has a Harness-registered TaskSpec/);
