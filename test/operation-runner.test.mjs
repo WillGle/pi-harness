@@ -138,6 +138,40 @@ test("operationBrief keeps the existing MAX_PACKET limit for large Operation inp
   assert.throws(() => operationBrief(operation, coordinatorState(operation)), /bounded Coordinator packet exceeds its limit/);
 });
 
+test("Coordinator prompt rejection does not consume an uncalled turn", async () => {
+  const required_task_ids = Array.from({ length: 20 }, (_, index) => `T-${index}`);
+  const oversized = {
+    constraints: Array.from({ length: 16 }, () => "c".repeat(500)),
+    task_intents: Object.fromEntries(required_task_ids.map(id => [id, "i".repeat(500)])),
+  };
+  for (const initialPrompt of [true, false]) {
+    const operation = createOperation({ operation_id: "O-1", objective: "Count only Coordinator calls.", required_task_ids,
+      task_intents: Object.fromEntries(required_task_ids.map(id => [id, "Inspect the report."])), ...(initialPrompt ? oversized : {}) });
+    const state = { ...coordinatorState(operation), total_turns: 29, run_count: 3 };
+    let calls = 0, saved, persistedAtCall;
+    const report = await runOperation(operation, {
+      turn: async () => {
+        calls++;
+        persistedAtCall = saved;
+        Object.assign(operation, oversized);
+        return "not JSON";
+      },
+      save: (_operation, nextState) => { saved = nextState; },
+    }, { state });
+    assert.equal(calls, initialPrompt ? 0 : 1);
+    assert.equal(saved.turns, calls);
+    assert.equal(saved.total_turns, 29 + calls);
+    assert.equal(saved.run_count, 4);
+    assert.equal(report.turns, calls);
+    assert.equal(report.total_turns, 29 + calls);
+    assert.equal(report.run_count, 4);
+    if (!initialPrompt) {
+      assert.equal(persistedAtCall.turns, 1);
+      assert.equal(persistedAtCall.total_turns, 30);
+    }
+  }
+});
+
 test("pi-subagents 0.19.0 RPC cannot safely resume a completed Coordinator session", () => {
   const source = readFileSync("node_modules/@tintinweb/pi-subagents/dist/index.js", "utf8");
   const start = source.indexOf("const spawnTopLevel =");
