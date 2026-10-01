@@ -1324,7 +1324,8 @@ test("exact recovery evidence reports omitted blockers and permits bounded exact
     assert.equal(exact.blockers[0].next_action, "resolve_attempt");
     assert.equal(exact.blockers[0].children.length, 8);
     assert.equal(exact.omitted_blocker_count, 39);
-    assert.deepEqual(exact.blocked_task_ids, ids);
+    assert.deepEqual(exact.blocked_task_ids, [missing]);
+    assert.equal(exact.omitted_blocked_task_id_count, 39);
     assert.ok(JSON.stringify(exact).length <= 24_000);
     assert.doesNotMatch(JSON.stringify(exact), /stdout|transcript|private-error|evidence_refs/);
     await assert.rejects(call(pi, "pi_harness_operation", { action: "status", operation_id: "O-many", task_id: "foreign" }), /blocked TaskOrder/);
@@ -1342,4 +1343,39 @@ test("exact recovery evidence never attributes a shared outcome to multiple chil
   const blocker = operationReport(operation, coordinatorState(operation), undefined, undefined, graph, ledger).scheduler_blockers[0];
   assert.equal(blocker.child_status, "cancelled");
   assert.deepEqual(blocker.children, [{ child_id: "worker-outcome", role: "worker", child_status: "unknown" }, { child_id: "reviewer-outcome", role: "reviewer", child_status: "unknown" }]);
+});
+
+
+test("exact recovery evidence remains accessible with 240 valid blocked IDs", async () => {
+  const ids = Array.from({ length: 240 }, (_, i) => `T-${String(i).padStart(3, "0")}-${"x".repeat(130)}`);
+  const operation = createOperation({ mission_id: "M-large", operation_id: "O-large", objective: "Recover one exact blocked Attempt.", required_task_ids: ids });
+  let graph = createTaskGraph(operation);
+  for (const task_id of ids) {
+    graph = claimTask(graph, operation, task_id);
+    graph = blockGraphTask(graph, operation, task_id, "inspect the child outcome", "exact terminal evidence is required", "HARNESS_SESSION_INTERRUPTED", undefined, "unknown");
+  }
+  let ledger = attemptLedgerApi.reconcileAttemptLedger({}, { "O-large": operation }, { "O-large": graph });
+  const selected = ids.at(-1), id = `A-O-large-${selected}-01`;
+  ledger = attemptLedgerApi.recordAttemptChild(ledger, id, { child_id: "large-child", role: "research" });
+  const mission = createMission({ mission_id: "M-large", objective: "Recover bounded work.", operation_ids: ["O-large"] });
+  const pi = fakePi([{ customType: TASK_GRAPH_ENTRY, data: { version: 2, missions: { "M-large": mission }, operations: { "O-large": operation }, task_graphs: { "O-large": graph }, attempt_ledger: ledger } }]);
+  try {
+    const exact = await call(pi, "pi_harness_operation", { action: "status", operation_id: "O-large", task_id: selected });
+    assert.deepEqual(exact.blocked_task_ids, [selected]);
+    assert.equal(exact.omitted_blocker_count, 239);
+    assert.equal(exact.omitted_blocked_task_id_count, 239);
+    assert.equal(exact.blockers.length, 1);
+    assert.equal(exact.blockers[0].attempt_id, id);
+    assert.equal(exact.blockers[0].next_action, "resolve_attempt");
+    assert.deepEqual(exact.blockers[0].children, [{ child_id: "large-child", role: "research", child_status: "unknown" }]);
+    assert.ok(Buffer.byteLength(JSON.stringify(exact)) <= 24_000);
+    assert.doesNotMatch(JSON.stringify(exact), /stdout|transcript|evidence_refs|private-error/);
+    const status = await call(pi, "pi_harness_operation", { action: "status", operation_id: "O-large" });
+    assert.ok(status.blocked_task_ids.length > 0);
+    assert.ok(status.omitted_blocked_task_id_count > 0);
+    assert.equal(status.omitted_blocked_task_id_count, ids.length - status.blocked_task_ids.length);
+    assert.equal(status.omitted_blocker_count, ids.length - status.blockers.length);
+    assert.match(status.blocker_lookup, /status.*task_id/);
+    assert.ok(Buffer.byteLength(JSON.stringify(status)) <= 24_000);
+  } finally { await pi.shutdown(); }
 });

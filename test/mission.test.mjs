@@ -244,3 +244,21 @@ test("Situation Board prioritizes waived IDs after more than 32 ready Tasks", ()
   assert.equal([...board.matchAll(/^TaskOrder /gm)].length, 32);
   assert.ok(board.length <= 24_000);
 });
+
+
+test("Situation Board preserves the recovery summary with full-size valid semantic text", () => {
+  const constraints = Array.from({ length: 16 }, (_, i) => `${i}:`.padEnd(500, "c"));
+  const mission = createMission({ mission_id: "M-full", objective: "Keep recovery summaries visible.", constraints, operation_ids: ["O-full-ready", "O-full-waived"] });
+  const ids = Array.from({ length: 33 }, (_, i) => `T-full-ready-${i}`);
+  const ready = createOperation({ mission_id: mission.mission_id, operation_id: "O-full-ready", objective: "Inspect ready work.", required_task_ids: ids, constraints,
+    task_intents: Object.fromEntries(ids.map((id) => [id, "i".repeat(500)])),
+    task_specs: Object.fromEntries(ids.map((id) => [id, { owner: "research", permission: "read", verification: "Inspect the source.", acceptance_criteria: ["a".repeat(500), "b".repeat(500)] }])) });
+  const waived = createOperation({ mission_id: mission.mission_id, operation_id: "O-full-waived", objective: "Retain waived work.", required_task_ids: ["T-full-waived"] });
+  const graph = waiveGraphTask(createTaskGraph(waived), waived, "T-full-waived", { authority_type: "commander", reason: "Work was not run." });
+  const board = missionSituationBoard({ [mission.mission_id]: mission }, { "O-full-ready": ready, "O-full-waived": waived }, { "O-full-ready": createTaskGraph(ready), "O-full-waived": graph });
+  assert.match(board, /Operation O-full-waived: open/);
+  assert.match(board, /TaskOrder T-full-waived: waived/);
+  assert.match(board, /waived work does not satisfy.*completion/i);
+  assert.match(board, /truncated; remaining obligations/);
+  assert.ok(board.length <= 24_000);
+});

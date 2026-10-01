@@ -750,7 +750,7 @@ export default function harness(pi: Pi): void {
         ...(report.failure_task_id ? { failure_task_id: report.failure_task_id } : {}), ...(report.failure_codes ? { failure_codes: report.failure_codes } : {}),
         ready_task_ids: report.ready_task_ids, retryable_task_ids: report.retryable_task_ids, accepted_task_ids: report.accepted_task_ids,
         waived_task_ids: report.waived_task_ids, blocked_task_ids: report.blocked_task_ids, blockers: report.scheduler_blockers,
-        omitted_blocker_count: report.omitted_blocker_count, blocker_lookup: report.blocker_lookup, situation_board: "" };
+        omitted_blocker_count: report.omitted_blocker_count, omitted_blocked_task_id_count: report.omitted_blocked_task_id_count, blocker_lookup: report.blocker_lookup, situation_board: "" };
       // Reserve the status budget before adding the Board; omitted blockers stay
       // available through an exact lookup instead of disappearing silently.
       while (Buffer.byteLength(JSON.stringify(statusReport)) > 24_000 && statusReport.blockers.length && input.task_id === undefined) {
