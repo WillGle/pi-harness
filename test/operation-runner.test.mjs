@@ -1111,7 +1111,7 @@ test("resolve_attempt records terminal outcomes but preserved or unknown Worker 
 
 test("resolve_attempt permits exact retry and prior Attempt remains terminal without a fabricated TaskResult", async () => {
   const key = Symbol.for("pi-subagents:manager"), previous = globalThis[key];
-  globalThis[key] = { getRecord: () => ({ status: "stopped", child_disposition: { branch_status: "not_reported", worktree_status: "unknown" } }) };
+  globalThis[key] = { getRecord: () => ({ status: "stopped", worktreeResult: { hasChanges: false } }) };
   const { pi, id } = await recoveryPi({ worker: true, refs: [{ child_id: "recover-child", role: "worker" }, { child_id: "review-child", role: "reviewer" }] });
   let sequence = 0, duringDispatch;
   pi.events.on("subagents:rpc:spawn", (request) => {
@@ -1152,5 +1152,37 @@ test("resolve_attempt cannot use stale earlier failed TaskResults or bypass exha
     assert.deepEqual((await call(pi, "pi_harness_operation", { action: "status", operation_id: "O-1" })).retryable_task_ids, []);
     await assert.rejects(call(pi, "pi_harness_run_operation", { operation_id: "O-1", retry_task_id: "T-1" }), /budget/);
     await pi.shutdown();
+  } finally { if (previous === undefined) delete globalThis[key]; else globalThis[key] = previous; }
+});
+
+test("resolve_attempt keeps uncertain Worker branch evidence blocked", async () => {
+  const key = Symbol.for("pi-subagents:manager"), previous = globalThis[key];
+  const unknown = { branch_status: "unknown", worktree_status: "unknown" };
+  const preserved = { branch_status: "preserved", branch: "pi-agent-partial", worktree_status: "unknown" };
+  const cases = [
+    { expected: unknown },
+    { worktreeResult: {}, expected: unknown },
+    { worktreeResult: { hasChanges: true, branch: "invalid-branch" }, expected: unknown },
+    { worktreeResult: { hasChanges: "false" }, expected: unknown },
+    { worktreeResult: [], expected: unknown },
+    { child_disposition: { branch_status: "not_reported", worktree_status: "unknown" }, expected: unknown },
+    { worktreeResult: {}, child_disposition: { branch_status: "not_reported", worktree_status: "unknown" }, expected: unknown },
+    { worktreeResult: { hasChanges: false }, child_disposition: unknown, expected: unknown },
+    { worktreeResult: { hasChanges: false }, child_disposition: preserved, expected: preserved },
+    { worktreeResult: { hasChanges: true, branch: "pi-agent-partial" }, expected: preserved },
+  ];
+  try {
+    for (const { expected, ...record } of cases) {
+      globalThis[key] = { getRecord: () => ({ status: "completed", ...record }) };
+      const { pi, id } = await recoveryPi({ worker: true, refs: [{ child_id: "recover-child", role: "worker" }] });
+      const report = await call(pi, "pi_harness_operation", { action: "resolve_attempt", operation_id: "O-1", attempt_id: id });
+      const snapshot = readControlState();
+      assert.deepEqual(snapshot.attempt_ledger[id].child_resolutions[0].child_disposition, expected);
+      assert.deepEqual(report.retryable_task_ids, []);
+      await assert.rejects(call(pi, "pi_harness_run_operation", { operation_id: "O-1", retry_task_id: "T-1" }), /child|branch|disposition/);
+      assert.equal(readControlState().task_graphs["O-1"].nodes["T-1"].scheduler_status, "blocked");
+      assert.deepEqual(readControlState().operations["O-1"].task_results, {});
+      await pi.shutdown();
+    }
   } finally { if (previous === undefined) delete globalThis[key]; else globalThis[key] = previous; }
 });

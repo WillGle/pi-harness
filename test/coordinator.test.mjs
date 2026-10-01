@@ -1236,11 +1236,11 @@ test("executeCoordinateTask records each spawned child against the current Attem
     await executeCoordinateTask({ events }, { task_id: "T-review", owner: "research", permission: "read", scope: "Inspect file.txt", verification: "Inspect report.", acceptance_criteria: ["The report is clear.", "The report is safe."], review_profile: { "The report is safe.": "security" } }, { cwd: repo, onChildStarted: (ref) => references.push(ref), modelRegistry: { getAvailable: () => [{ provider: "openai", id: "gpt-daybreak-blue-latest" }] } });
     if (callbackErrors.length) throw callbackErrors[0];
     assert.deepEqual(references, [{ child_id: "managed-1", role: "worker" }, { child_id: "managed-2", role: "research" }, { child_id: "managed-3", role: "reviewer" }, { child_id: "managed-4", role: "security-reviewer" }]);
-    assert.deepEqual(coordinatorApi.inspectCoordinateChild("managed-1"), { state: "terminal", child_status: "completed" });
+    assert.deepEqual(coordinatorApi.inspectCoordinateChild("managed-1"), { state: "terminal", child_status: "completed", child_disposition: { branch_status: "unknown", worktree_status: "unknown" } });
     records.get("managed-1").child_disposition = { branch_status: "preserved", branch: "pi-agent-selected", worktree_status: "unknown" };
     assert.deepEqual(coordinatorApi.inspectCoordinateChild("managed-1").child_disposition, records.get("managed-1").child_disposition);
     records.get("managed-1").child_disposition.path = "/tmp/private";
-    assert.deepEqual(coordinatorApi.inspectCoordinateChild("managed-1"), { state: "terminal", child_status: "completed" });
+    assert.deepEqual(coordinatorApi.inspectCoordinateChild("managed-1"), { state: "terminal", child_status: "completed", child_disposition: { branch_status: "unknown", worktree_status: "unknown" } });
     assert.deepEqual(coordinatorApi.inspectCoordinateChild("missing"), { state: "unavailable" });
   } finally { restoreManager(); rmSync(repo, { recursive: true, force: true }); }
 });
