@@ -59,6 +59,35 @@ test("worktree preflight failure restores a ready TaskOrder without an unknown A
   } finally { rmSync(cwd, { recursive: true, force: true }); }
 });
 
+test("Worker model unavailable preserves the exact Operation failure after no-child rollback", async () => {
+  const operation = createOperation({ mission_id: "M-1", operation_id: "O-1", objective: "Edit the worker file.", required_task_ids: ["T-1"], task_intents: { "T-1": "Edit lib/coordinator.mjs" }, task_specs: { "T-1": { owner: "worker", permission: "write", verification: "node --check lib/coordinator.mjs" } } });
+  let snapshot, ledger = {}, rolledBack, spawns = 0;
+  const report = await runOperation(operation, {
+    turn: async () => decision("dispatch", { task_id: "T-1" }),
+    dispatch: async (selected) => (await executeCoordinateTask({ events: { on: () => () => {}, emit: () => { spawns++; } } }, { ...selected, model: "test-worker/unavailable-model" }, { cwd: process.cwd(), modelRegistry: { getAvailable: () => [] } })).taskResult,
+    rollbackAttempt: (id) => { rolledBack = id; ledger = attemptLedgerApi.rollbackUnstartedAttempt(ledger, id); },
+    save: (nextOperation, state, graph) => {
+      ledger = attemptLedgerApi.reconcileAttemptLedger(ledger, { "O-1": nextOperation }, { "O-1": graph });
+      snapshot = { operation: nextOperation, state, graph };
+    },
+  }, { attemptLedger: ledger });
+  assert.equal(spawns, 0);
+  assert.equal(rolledBack, "A-O-1-T-1-01");
+  assert.deepEqual(ledger, {});
+  assert.deepEqual(snapshot.operation.task_results, {});
+  assert.equal(snapshot.graph.nodes["T-1"].scheduler_status, "ready");
+  assert.equal(snapshot.graph.nodes["T-1"].attempts, 0);
+  for (const result of [report, operationReport(snapshot.operation, snapshot.state, null, null, snapshot.graph)]) {
+    assert.equal(result.failure_code, "HARNESS_WORKER_MODEL_UNAVAILABLE");
+    assert.equal(result.failure_stage, "model_routing");
+    assert.equal(result.failure_task_id, "T-1");
+    assert.deepEqual(result.ready_task_ids, ["T-1"]);
+  }
+  assert.equal(snapshot.state.failure_code, "HARNESS_WORKER_MODEL_UNAVAILABLE");
+  assert.equal(snapshot.state.failure_stage, "model_routing");
+  assert.equal(hasActiveCoordinateTasks(), false);
+});
+
 test("completed Worker worktree failure retries and dispatches the exact TaskOrder", async () => {
   const pi = fakePi();
   const dispatched = [];

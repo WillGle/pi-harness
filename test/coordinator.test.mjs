@@ -11,6 +11,9 @@ import { readEvidence } from "../lib/evidence.mjs";
 import { promoteTaskResult } from "../lib/communication.mjs";
 import { registerRpcHandlers } from "../node_modules/@tintinweb/pi-subagents/dist/cross-extension-rpc.js";
 import { AgentManager } from "../node_modules/@tintinweb/pi-subagents/dist/agent-manager.js";
+import { getAgentConfig, getAllTypes, registerAgents } from "../node_modules/@tintinweb/pi-subagents/dist/agent-types.js";
+import { resolveDefaultModel } from "../node_modules/@tintinweb/pi-subagents/dist/agent-runner.js";
+import { describeModel } from "../node_modules/@tintinweb/pi-subagents/dist/model-resolver.js";
 import { isWorktreeIsolationEnabled, setWorktreeIsolationEnabled } from "../node_modules/@tintinweb/pi-subagents/dist/worktree.js";
 import {
   cancelCoordinateTasks,
@@ -165,6 +168,157 @@ function packageManagerFor(events, repo, mode = "read") {
     },
   };
 }
+
+function modelRoutingPackage(repo, { configuredModel, available = true, mismatched = false, missingInvocation = false } = {}) {
+  const events = new EventBus();
+  events.mockSettlement = false;
+  const commanderModel = Object.freeze({ provider: "commander-provider", id: "commander-model", name: "Commander" });
+  const workerModel = Object.freeze({ provider: "worker-provider", id: "worker-model", name: "Worker" });
+  const models = [commanderModel, ...(available ? [workerModel] : [])];
+  const mutations = [];
+  const authStorage = Object.freeze({ set: (...args) => mutations.push(["auth", ...args]), setRuntimeApiKey: (...args) => mutations.push(["api-key", ...args]) });
+  const modelRegistry = Object.freeze({
+    getAvailable: () => [...models],
+    find: (provider, id) => models.find((model) => model.provider === provider && model.id === id),
+    authStorage,
+  });
+  const context = Object.freeze({ cwd: repo, model: commanderModel, modelRegistry });
+  const pi = { events, setModel: (...args) => mutations.push(["model", ...args]) };
+  const previousAgents = new Map(getAllTypes().map((name) => [name, getAgentConfig(name)]));
+  registerAgents(new Map([["worker", { name: "worker", model: configuredModel }]]));
+  const calls = [], records = new Map();
+  const restoreManager = installManagerRecords(records);
+  const manager = {
+    spawn(_pi, ctx, type, _prompt, options) {
+      calls.push({ type, options });
+      const selected = options.model ?? resolveDefaultModel(ctx.model, ctx.modelRegistry, getAgentConfig(type)?.model);
+      const id = `route-${calls.length}`;
+      const record = { status: "running", invocation: missingInvocation ? undefined : describeModel(mismatched ? commanderModel : selected) };
+      records.set(id, record);
+      record.promise = Promise.resolve().then(async () => {
+        if (type === "worker") {
+          const worktree = mkdtempSync(join(tmpdir(), "pi-route-worktree-"));
+          rmSync(worktree, { recursive: true, force: true });
+          assert.equal(spawnSync("git", ["-C", repo, "worktree", "add", "--detach", worktree, "HEAD"]).status, 0);
+          try {
+            writeFileSync(join(worktree, "file.txt"), "worker-update\n");
+            assert.equal(spawnSync("git", ["-C", worktree, "add", "file.txt"]).status, 0);
+            assert.equal(spawnSync("git", ["-C", worktree, "commit", "-qm", `pi-agent: ${options.description}`]).status, 0);
+            await options.onBeforeWorktreeCleanup(worktree);
+            const branch = "pi-agent-routing";
+            assert.equal(spawnSync("git", ["-C", worktree, "branch", branch]).status, 0);
+            record.worktreeResult = { branch };
+          } finally {
+            assert.equal(spawnSync("git", ["-C", repo, "worktree", "remove", "--force", worktree]).status, 0);
+          }
+        }
+        record.status = "completed";
+        events.emit("subagents:completed", { id, status: "completed", result: "Routing fixture complete." });
+      });
+      options.onSpawned(id);
+      return id;
+    },
+    async awaitStartup() {},
+    getRecord: (id) => records.get(id),
+  };
+  const handlers = registerRpcHandlers({ events, pi, getCtx: () => context, manager });
+  return {
+    pi, context, modelRegistry, calls, records, commanderModel,
+    assertUnchanged() {
+      assert.deepEqual(mutations, []);
+      assert.equal(context.model, commanderModel);
+      assert.equal(context.modelRegistry.authStorage, authStorage);
+      assert.equal(hasActiveCoordinateTasks(), false);
+    },
+    restore() {
+      for (const unsubscribe of Object.values(handlers)) unsubscribe();
+      restoreManager();
+      registerAgents(previousAgents);
+    },
+  };
+}
+
+test("Coordinator inherits the Commander model through null package routing", async () => {
+  const repo = makeRepo("pi-coordinator-inherit-");
+  const runtime = modelRoutingPackage(repo);
+  try {
+    assert.equal(await executeCoordinatorTurn(runtime.pi, "Inspect routing.", { cwd: repo, timeout: 1000, rpcTimeout: 1000 }), "Routing fixture complete.");
+    assert.equal(runtime.calls[0].options.model, null);
+    assert.equal(runtime.records.get("route-1").invocation.modelId, "commander-provider/commander-model");
+    runtime.assertUnchanged();
+  } finally { runtime.restore(); rmSync(repo, { recursive: true, force: true }); }
+});
+
+test("Coordinator model override is forwarded exactly and resolved by the package", async () => {
+  const repo = makeRepo("pi-coordinator-override-");
+  const runtime = modelRoutingPackage(repo);
+  let forwarded;
+  runtime.pi.events.on("subagents:rpc:spawn", (request) => { forwarded = request.options.model; });
+  try {
+    await executeCoordinatorTurn(runtime.pi, "Inspect routing.", { cwd: repo, model: "worker-provider/worker-model", timeout: 1000, rpcTimeout: 1000 });
+    assert.equal(forwarded, "worker-provider/worker-model");
+    assert.equal(runtime.calls[0].options.model.provider, "worker-provider");
+    assert.equal(runtime.calls[0].options.model.id, "worker-model");
+    assert.equal(runtime.records.get("route-1").invocation.modelId, forwarded);
+    runtime.assertUnchanged();
+  } finally { runtime.restore(); rmSync(repo, { recursive: true, force: true }); }
+});
+
+test("Worker configured model resolves at runtime when available", async (t) => {
+  for (const scenario of ["registered Worker profile", "explicit task override takes precedence", "unconfigured Worker inherits without a Harness registry"]) await t.test(scenario, async () => {
+    const override = scenario === "explicit task override takes precedence";
+    const inherited = scenario.startsWith("unconfigured");
+    const repo = makeRepo("pi-worker-model-");
+    const before = head(repo);
+    const runtime = modelRoutingPackage(repo, { configuredModel: inherited ? undefined : override ? "missing/profile-model" : "worker-provider/worker-model" });
+    try {
+      const result = await executeCoordinateTask(runtime.pi, {
+        owner: "worker", scope: "file.txt", permission: "write", verification: "grep worker-update file.txt",
+        acceptance_criteria: ["The Worker verification command passes."],
+        ...(override ? { model: "worker-provider/worker-model" } : {}),
+      }, { cwd: repo, modelRegistry: inherited ? undefined : runtime.modelRegistry, timeout: 1000, rpcTimeout: 1000 });
+      assert.equal(result.model, inherited ? "commander-provider/commander-model" : "worker-provider/worker-model");
+      assert.equal(result.requestedModel, override ? "worker-provider/worker-model" : null);
+      assert.equal(result.success, true);
+      assert.equal(result.taskResult.execution_status, "execution_complete");
+      assert.equal(result.taskResult.verification_status, "verified");
+      assert.equal(runtime.calls[0].options.model === null, !override);
+      assert.equal(head(repo), before);
+      runtime.assertUnchanged();
+    } finally { runtime.restore(); rmSync(repo, { recursive: true, force: true }); }
+  });
+});
+
+test("Worker model unavailable or mismatched fails before accepting a TaskResult", async (t) => {
+  for (const scenario of ["profile unavailable", "override unavailable", "invocation mismatch", "invocation missing"]) await t.test(scenario, async () => {
+    const repo = makeRepo("pi-worker-route-failure-");
+    const before = head(repo);
+    const unavailable = scenario.endsWith("unavailable");
+    const override = scenario === "override unavailable";
+    const runtime = modelRoutingPackage(repo, {
+      configuredModel: "worker-provider/worker-model", available: !unavailable,
+      mismatched: scenario === "invocation mismatch", missingInvocation: scenario === "invocation missing",
+    });
+    try {
+      await assert.rejects(executeCoordinateTask(runtime.pi, {
+        owner: "worker", scope: "file.txt", permission: "write", verification: "grep worker-update file.txt",
+        acceptance_criteria: ["The Worker verification command passes."],
+        ...(override ? { model: "worker-provider/worker-model" } : {}),
+      }, { cwd: repo, modelRegistry: runtime.modelRegistry, timeout: 1000, rpcTimeout: 1000 }), (error) => {
+        assert.equal(error.code, "HARNESS_WORKER_MODEL_UNAVAILABLE");
+        assert.equal(error.failure_stage, "model_routing");
+        assert.equal(error.taskResult, undefined);
+        assert.equal(error.message, "The configured Worker model is unavailable or mismatched.");
+        if (unavailable) assert.equal(error.childOutcome, "not_started");
+        else assert.equal(error.childSettled, true);
+        return true;
+      });
+      assert.equal(runtime.calls.length, unavailable ? 0 : 1);
+      assert.equal(head(repo), before);
+      runtime.assertUnchanged();
+    } finally { runtime.restore(); rmSync(repo, { recursive: true, force: true }); }
+  });
+});
 
 for (const role of ["worker", "scout", "research", "coordinator", "reviewer", "security-reviewer"]) {
   test(`${role}: failed spawn ACK drains an existing child before releasing ownership`, async () => {
