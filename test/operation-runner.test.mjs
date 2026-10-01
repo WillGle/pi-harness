@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import harness from "../extensions/pi-harness.ts";
 import { trackControlPi } from "./helpers/control-state-isolation.mjs";
-import { readControlState } from "../lib/control-state-store.mjs";
+import { acquireControlLease, readControlState, writeControlState } from "../lib/control-state-store.mjs";
 import { createMission } from "../lib/mission.mjs";
 import { createOperation as registerOperation, acceptTaskResult, recordTaskResult, rejectTaskResult } from "../lib/operation.mjs";
 import { coordinatorPrompt, coordinatorState, MAX_COORDINATOR_TURNS, operationBrief, operationReport, parseCoordinatorDecision, runOperation } from "../lib/operation-runner.mjs";
@@ -158,7 +158,7 @@ test("pi-subagents 0.19.0 RPC cannot safely resume a completed Coordinator sessi
 test("malformed or unauthorized CoordinatorDecision fails closed", () => {
   for (const raw of ["not JSON", decision("dispatch", { task_id: "UNKNOWN" }), decision("dispatch", { task: task("T-1") }), decision("accept_task", { task_id: "UNKNOWN" }), decision("accept_task", { task_id: "T-1", task: task("T-1") }), JSON.stringify({ version: 1, operation_id: "O-1", action: "block", blocked_action: "dispatch", required_condition: "the registered Task intent is available" })]) assert.throws(() => parseCoordinatorDecision(raw, op()));
   const state = coordinatorState(op());
-  assert.deepEqual(Object.keys(state).sort(), ["blocker", "decisions", "operation_id", "turns", "version"]);
+  assert.deepEqual(Object.keys(state).sort(), ["blocker", "decisions", "operation_id", "run_count", "total_turns", "turns", "version"]);
 });
 
 test("removed Coordinator report action is absent from the prompt and rejected by the parser", () => {
@@ -265,15 +265,109 @@ test("invalid Coordinator output receives only one repair attempt", async () => 
 test("Coordinator repairs consume the same persisted turn limit", async () => {
   let calls = 0;
   let saved;
-  const operation = op();
-  const state = { ...coordinatorState(operation), turns: MAX_COORDINATOR_TURNS - 1 };
+  const ids = Array.from({ length: 6 }, (_, index) => `T-${index + 1}`);
+  const operation = createOperation({ operation_id: "O-1", objective: "Bound repair calls.", required_task_ids: ids, task_intents: Object.fromEntries(ids.map(id => [id, "Inspect the report."])) });
   const report = await runOperation(operation, {
-    turn: async () => { calls++; return "not JSON"; },
+    turn: async () => {
+      calls++;
+      if (calls === 12) return "not JSON";
+      return decision(calls % 2 ? "dispatch" : "reject_task", { task_id: ids[Math.floor((calls - 1) / 2)] });
+    },
+    dispatch: async order => ({ operation_id: "O-1", task_id: order.task_id, execution_status: "execution_complete", verification_status: "failed", evidence_refs: [] }),
     save: (_operation, nextState) => { saved = nextState; },
-  }, { state });
-  assert.equal(calls, 1, "the final allowed call cannot be followed by a repair beyond the turn limit");
+  });
+  assert.equal(calls, MAX_COORDINATOR_TURNS, "the final allowed call cannot be followed by a repair beyond the turn limit");
   assert.equal(saved.turns, MAX_COORDINATOR_TURNS);
+  assert.equal(saved.total_turns, MAX_COORDINATOR_TURNS);
+  assert.equal(report.turn_limit_reached, true);
   assert.equal(report.status, "blocked");
+});
+
+test("fresh explicit Coordinator run gets a new 12-turn budget and retains cumulative turns", async () => {
+  const ids = Array.from({ length: 6 }, (_, index) => `T-${index + 1}`);
+  let operation = createOperation({ operation_id: "O-1", objective: "Bound explicit runs.", required_task_ids: ids, task_intents: Object.fromEntries(ids.map(id => [id, "Inspect the report."])) });
+  let graph = createTaskGraph(operation);
+  let state = { version: 2, operation_id: "O-1", turns: 12, total_turns: 24, run_count: 2, decisions: [], blocker: "Previous run reached its cap." };
+  for (let run = 0; run < 2; run++) {
+    let calls = 0;
+    const report = await runOperation(operation, {
+      turn: async () => {
+        calls++;
+        return decision(calls % 2 ? "dispatch" : "reject_task", { task_id: ids[Math.floor((calls - 1) / 2)] });
+      },
+      dispatch: async order => ({ operation_id: "O-1", task_id: order.task_id, execution_status: "execution_complete", verification_status: "failed", evidence_refs: [] }),
+      save: (nextOperation, nextState, nextGraph) => { operation = nextOperation; state = nextState; graph = nextGraph; },
+    }, { state, graph });
+    assert.equal(calls, 12);
+    assert.equal(state.version, 2);
+    assert.equal(state.turns, 12);
+    assert.equal(state.total_turns, 36 + run * 12);
+    assert.equal(state.run_count, 3 + run);
+    assert.equal(report.turns, state.turns);
+    assert.equal(report.total_turns, state.total_turns);
+    assert.equal(report.run_count, state.run_count);
+    assert.equal(report.turn_limit, 12);
+    assert.equal(report.turn_limit_reached, true);
+  }
+});
+
+test("version 1 state migrates without losing saved cumulative turns", async () => {
+  const operation = op();
+  let state = { version: 1, operation_id: "O-1", turns: 17, decisions: [], blocker: "Old cap." };
+  let calls = 0;
+  const report = await runOperation(operation, {
+    turn: async () => { calls++; return decision("block", { blocked_action: "inspect the source", required_condition: "the Commander supplies evidence" }); },
+    save: (_operation, nextState) => { state = nextState; },
+  }, { state });
+  assert.equal(calls, 1);
+  assert.equal(state.version, 2);
+  assert.equal(state.turns, 1);
+  assert.equal(state.total_turns, 18);
+  assert.equal(state.run_count, 1);
+  assert.equal(report.turn_limit_reached, false);
+});
+
+test("fresh explicit Coordinator run persists bounded counters before any call", async () => {
+  for (const complete of [false, true]) {
+    const operation = { ...op(), ...(complete ? { status: "complete" } : {}) };
+    const controller = new AbortController();
+    controller.abort();
+    let saved;
+    const report = await runOperation(operation, {
+      turn: async () => assert.fail("this invocation must exit before a Coordinator call"),
+      save: (_operation, nextState) => { saved = nextState; },
+    }, { signal: controller.signal, state: { ...coordinatorState(operation), version: 2, turns: 12, total_turns: Number.MAX_SAFE_INTEGER, run_count: Number.MAX_SAFE_INTEGER } });
+    assert.equal(saved.turns, 0);
+    assert.equal(saved.total_turns, Number.MAX_SAFE_INTEGER);
+    assert.equal(saved.run_count, Number.MAX_SAFE_INTEGER);
+    assert.equal(report.turn_limit_reached, false);
+  }
+});
+
+test("fresh explicit Coordinator run retains counters across both retry paths", async () => {
+  for (const resolvedAttempt of [false, true]) {
+    let operation = { ...op(), mission_id: "M-retry" }, graph = claimTask(createTaskGraph(operation), operation, "T-1");
+    if (resolvedAttempt) graph = reconcileTaskGraph(graph, operation);
+    else {
+      operation = recordTaskResult(operation, { operation_id: "O-1", task_id: "T-1", execution_status: "execution_complete", verification_status: "failed", evidence_refs: [] });
+      graph = recordTaskGraphResult(graph, operation, "T-1");
+    }
+    let ledger = attemptLedgerApi.reconcileAttemptLedger({}, { "O-1": operation }, { "O-1": graph });
+    if (resolvedAttempt) {
+      ledger = attemptLedgerApi.recordAttemptChild(ledger, "A-O-1-T-1-01", { child_id: "resolved-child", role: "research" });
+      ledger = attemptLedgerApi.resolveUnknownAttempt(ledger, "A-O-1-T-1-01", [{ child_id: "resolved-child", source: "pi-subagents", child_status: "completed", observed_at: new Date().toISOString() }]);
+    }
+    let saved;
+    const report = await runOperation(operation, {
+      turn: async () => decision("block", { blocked_action: "inspect ready work", required_condition: "the Commander supplies evidence" }),
+      save: (_operation, nextState) => { saved = nextState; },
+    }, { graph, attemptLedger: ledger, retryTaskId: "T-1", state: { ...coordinatorState(operation), version: 2, turns: 12, total_turns: 29, run_count: 3 } });
+    assert.equal(saved.turns, 1);
+    assert.equal(saved.total_turns, 30);
+    assert.equal(saved.run_count, 4);
+    assert.equal(report.total_turns, 30);
+    assert.deepEqual(report.ready_task_ids, ["T-1"]);
+  }
 });
 
 test("Coordinator cannot dispatch an unregistered TaskOrder", async () => {
@@ -472,6 +566,47 @@ const call = async (pi, tool, input, signal) => {
   return JSON.parse((await pi.tools.get(tool).execute("id", input, signal)).content[0].text);
 };
 const startMission = async (pi, objective) => { await pi.sessionReady; return pi.commands.get("goal").handler(objective, {}); };
+
+test("version 1 state migrates on session and durable restore before a fresh explicit Coordinator run", async () => {
+  const operation = { ...op(), mission_id: "M-migrate" };
+  const mission = createMission({ mission_id: "M-migrate", objective: "Preserve old turn counts.", operation_ids: ["O-1"] });
+  const state = { version: 1, operation_id: "O-1", turns: 12, decisions: [], blocker: "Old cap." };
+  const snapshot = { version: 2, missions: { "M-migrate": mission }, operations: { "O-1": operation }, task_graphs: { "O-1": createTaskGraph(operation) }, attempt_ledger: {} };
+  for (const durable of [false, true]) {
+    process.env.PI_HARNESS_CONTROL_DIR = mkdtempSync(join(dir, "migration-control-"));
+    if (durable) {
+      const lease = await acquireControlLease();
+      try { writeControlState({ ...snapshot, coordinator_states: { "O-1": state } }, lease); }
+      finally { await lease.release(); }
+    }
+    const pi = fakePi(durable ? [] : [{ customType: TASK_GRAPH_ENTRY, data: snapshot }, { customType: "pi-harness-coordinator-state", data: { "O-1": state } }]);
+    let calls = 0;
+    pi.events.on("subagents:rpc:spawn", request => {
+      const id = `migrate-${++calls}`;
+      request.options.onSpawned(id);
+      pi.events.emit(`subagents:rpc:spawn:reply:${request.requestId}`, { success: true, data: { id } });
+      queueMicrotask(() => pi.events.emit("subagents:completed", { id, status: "completed", result: decision("block", { blocked_action: "inspect the source", required_condition: "the Commander supplies evidence" }) }));
+    });
+    try {
+      await pi.sessionReady;
+      const restored = pi.entries.filter(entry => entry.customType === "pi-harness-coordinator-state").at(-1).data["O-1"];
+      assert.equal(restored.version, 2);
+      assert.equal(restored.turns, 12);
+      assert.equal(restored.total_turns, 12);
+      await pi.commands.get("mission").handler("resume M-migrate", {});
+      const report = await call(pi, "pi_harness_run_operation", { operation_id: "O-1" });
+      assert.equal(calls, 1);
+      assert.equal(report.turns, 1);
+      assert.equal(report.total_turns, 13);
+      assert.equal(report.run_count, 1);
+      const status = await call(pi, "pi_harness_operation", { action: "status", operation_id: "O-1" });
+      assert.equal(status.total_turns, 13);
+      assert.equal(status.run_count, 1);
+      assert.equal(status.turn_limit_reached, false);
+      assert.equal(readControlState().coordinator_states["O-1"].total_turns, 13);
+    } finally { await pi.shutdown(); }
+  }
+});
 
 test("legacy Operation state without a persisted Mission ownership link fails closed", async () => {
   const operation = op();

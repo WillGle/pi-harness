@@ -18,7 +18,7 @@ import { appendProjectMemory, clearProjectMemory, loadProjectMemory } from "../l
 import { cancelCoordinateTasks, executeCoordinateTask, executeCoordinatorTurn, hasActiveCoordinateTasks, inspectCoordinateChild, managedTaskTimeout, validateTask } from "../lib/coordinator.mjs";
 import { COMMANDER_LANGUAGE_POLICY } from "../lib/agent-english.mjs";
 import { PROACTIVE_COMPACT_ENTRY, proactiveCompactionPolicy, restoreProactivePolicy, setProactiveThreshold } from "../lib/compaction-policy.mjs";
-import { COORDINATOR_ENTRY, canRetryResolvedAttempt, canRetryTaskResult, coordinatorState, operationReport, parallelTaskLimit, runOperation } from "../lib/operation-runner.mjs";
+import { COORDINATOR_ENTRY, canRetryResolvedAttempt, canRetryTaskResult, coordinatorState, migrateCoordinatorState, operationReport, parallelTaskLimit, runOperation } from "../lib/operation-runner.mjs";
 import { promoteTaskResult } from "../lib/communication.mjs";
 import { OPERATION_ENTRY, createOperation, terminalizeOperation } from "../lib/operation.mjs";
 import { TASK_GRAPH_ENTRY, createTaskGraph, migrateTaskGraph, reconcileTaskGraph, supersedeGraphTask, validateTaskGraph, waiveGraphTask } from "../lib/task-graph.mjs";
@@ -326,12 +326,8 @@ export default function harness(pi: Pi): void {
     if (Object.keys(taskGraphs).some((id) => !Object.hasOwn(operations, id))) throw new Error("TaskGraph has no owning Operation");
     attemptLedger = reconcileAttemptLedger(controlSnapshot?.attempt_ledger ?? schedulerSnapshot?.attempt_ledger ?? {}, operations, taskGraphs);
     validateMissionOwnership(missions, operations, taskGraphs, attemptLedger);
-    coordinatorStates = controlSnapshot?.coordinator_states ?? Object.fromEntries(Object.entries(legacyCoordinator).map(([id, state]: [string, any]) => [id, {
-      version: 1, operation_id: id, turns: state.turns ?? 0, decisions: (state.decisions ?? []).slice(-7), blocker: state.blocker ?? null,
-      ...(state.failure_code ? { failure_code: safeFailureCode(state.failure_code) } : {}),
-      ...(["worktree_preflight", "worker_branch_result"].includes(state.failure_stage) ? { failure_stage: state.failure_stage } : {}),
-      ...(operations[id]?.required_task_ids?.includes(state.failure_task_id) ? { failure_task_id: state.failure_task_id } : {}),
-    }]));
+    coordinatorStates = Object.fromEntries(Object.entries(controlSnapshot?.coordinator_states ?? legacyCoordinator).map(([id, state]: [string, any]) => [id,
+      migrateCoordinatorState(operations[id] ?? { operation_id: id }, state)]));
     if (Object.keys(coordinatorStates).length) pi.appendEntry?.(COORDINATOR_ENTRY, coordinatorStates);
     if (Object.keys(missions).length) persistMission();
     if (Object.keys(operations).length) persistScheduler();
@@ -746,6 +742,7 @@ export default function harness(pi: Pi): void {
         ? "The Coordinator accepted the Operation. The Commander must evaluate the Mission Definition of Done."
         : "Inspect the bounded recovery status. Resolve exact unknown Attempts, retry only retryable_task_ids, and run ready work in this Operation. Waived work does not satisfy completion.";
       const statusReport = { version: 1, mission_id: operation.mission_id, operation_id: id, status: operation.status, ...(operation.planning ? { planning: true } : {}), summary,
+        turns: report.turns, total_turns: report.total_turns, run_count: report.run_count, turn_limit: report.turn_limit, turn_limit_reached: report.turn_limit_reached,
         ...(report.failure_code ? { failure_code: report.failure_code } : {}), ...(report.failure_stage ? { failure_stage: report.failure_stage } : {}),
         ...(report.failure_task_id ? { failure_task_id: report.failure_task_id } : {}), ...(report.failure_codes ? { failure_codes: report.failure_codes } : {}),
         ready_task_ids: report.ready_task_ids, retryable_task_ids: report.retryable_task_ids, accepted_task_ids: report.accepted_task_ids,
