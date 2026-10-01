@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import * as attemptApi from "../lib/attempt-ledger.mjs";
 import { reconcileAttemptLedger, validateAttemptLedger } from "../lib/attempt-ledger.mjs";
 import { attachOperation, createMission, missionIsClosable, missionSituationBoard, validateMissionOwnership } from "../lib/mission.mjs";
-import { createOperation, recordTaskResult, terminalizeOperation } from "../lib/operation.mjs";
+import { acceptTaskResult, createOperation, recordTaskResult, terminalizeOperation } from "../lib/operation.mjs";
 import { acceptGraphTask, claimTask, createTaskGraph, recordTaskGraphResult, reconcileTaskGraph, supersedeGraphTask, waiveGraphTask } from "../lib/task-graph.mjs";
 
 function fixture() {
@@ -206,5 +206,41 @@ test("Situation Board retains waived TaskOrders in an open blocked Mission", () 
   assert.match(board, /TaskOrder T-1: waived/);
   assert.match(board, /TaskOrder T-2: waived/);
   assert.match(board, /waived work does not satisfy.*completion/i);
+  assert.ok(board.length <= 24_000);
+});
+
+
+test("Situation Board prioritizes later open waived work over accepted Tasks at the cap", () => {
+  const mission = createMission({ mission_id: "M-cap", objective: "Keep waived recovery visible.", operation_ids: ["O-done", "O-open"] });
+  let done = createOperation({ mission_id: mission.mission_id, operation_id: "O-done", objective: "Inspect completed work.", required_task_ids: Array.from({ length: 32 }, (_, i) => `T-done-${i}`) });
+  let doneGraph = createTaskGraph(done);
+  for (const id of done.required_task_ids) {
+    doneGraph = claimTask(doneGraph, done, id);
+    done = recordTaskResult(done, { version: 1, operation_id: done.operation_id, task_id: id, execution_status: "execution_complete", verification_status: "verified", evidence_refs: [] });
+    doneGraph = recordTaskGraphResult(doneGraph, done, id);
+    const accepted = acceptTaskResult(done, id);
+    doneGraph = acceptGraphTask(doneGraph, done, accepted, id);
+    done = accepted;
+  }
+  const open = createOperation({ mission_id: mission.mission_id, operation_id: "O-open", objective: "Keep waived work visible.", required_task_ids: ["T-waived-later"] });
+  const openGraph = waiveGraphTask(createTaskGraph(open), open, "T-waived-later", { authority_type: "commander", reason: "Work was not run." });
+  const board = missionSituationBoard({ [mission.mission_id]: mission }, { "O-done": done, "O-open": open }, { "O-done": doneGraph, "O-open": openGraph });
+  assert.match(board, /Operation O-open: open/);
+  assert.match(board, /TaskOrder T-waived-later: waived/);
+  assert.match(board, /1 additional TaskOrders omitted/);
+  assert.equal([...board.matchAll(/^TaskOrder /gm)].length, 32);
+  assert.ok(board.length <= 24_000);
+});
+
+test("Situation Board prioritizes waived IDs after more than 32 ready Tasks", () => {
+  const mission = createMission({ mission_id: "M-waived-cap", objective: "Keep waived obligations visible.", operation_ids: ["O-ready", "O-waived"] });
+  const ready = createOperation({ mission_id: mission.mission_id, operation_id: "O-ready", objective: "Keep ready work.", required_task_ids: Array.from({ length: 33 }, (_, i) => `T-ready-${i}`) });
+  const waived = createOperation({ mission_id: mission.mission_id, operation_id: "O-waived", objective: "Keep waived work.", required_task_ids: ["T-waived-cap"] });
+  const graph = waiveGraphTask(createTaskGraph(waived), waived, "T-waived-cap", { authority_type: "commander", reason: "Work was not run." });
+  const board = missionSituationBoard({ [mission.mission_id]: mission }, { "O-ready": ready, "O-waived": waived }, { "O-ready": createTaskGraph(ready), "O-waived": graph });
+  assert.match(board, /Operation O-waived: open/);
+  assert.match(board, /TaskOrder T-waived-cap: waived/);
+  assert.match(board, /2 additional TaskOrders omitted/);
+  assert.equal([...board.matchAll(/^TaskOrder /gm)].length, 32);
   assert.ok(board.length <= 24_000);
 });

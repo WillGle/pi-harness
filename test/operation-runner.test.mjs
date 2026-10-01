@@ -1296,3 +1296,50 @@ test("exact recovery evidence includes empty dispositions for a planning Operati
     assert.deepEqual(status.blockers, []);
   } finally { await pi.shutdown(); }
 });
+
+
+test("exact recovery evidence reports omitted blockers and permits bounded exact lookup", async () => {
+  const ids = Array.from({ length: 40 }, (_, i) => `T-many-${i}`);
+  const operation = createOperation({ mission_id: "M-many", operation_id: "O-many", objective: "Expose all bounded recovery evidence.", required_task_ids: ids });
+  let graph = createTaskGraph(operation);
+  for (const id of ids) {
+    graph = claimTask(graph, operation, id);
+    graph = blockGraphTask(graph, operation, id, "a".repeat(500), "b".repeat(500), "HARNESS_SESSION_INTERRUPTED", undefined, "unknown");
+  }
+  let ledger = attemptLedgerApi.reconcileAttemptLedger({}, { "O-many": operation }, { "O-many": graph });
+  for (const id of ids) for (let i = 0; i < 8; i++) ledger = attemptLedgerApi.recordAttemptChild(ledger, `A-O-many-${id}-01`, { child_id: `${id}-child-${i}-${"x".repeat(130)}`, role: "research" });
+  const mission = createMission({ mission_id: "M-many", objective: "Expose all recovery evidence.", operation_ids: ["O-many"] });
+  const pi = fakePi([{ customType: TASK_GRAPH_ENTRY, data: { version: 2, missions: { "M-many": mission }, operations: { "O-many": operation }, task_graphs: { "O-many": graph }, attempt_ledger: ledger } }]);
+  try {
+    const status = await call(pi, "pi_harness_operation", { action: "status", operation_id: "O-many" });
+    assert.deepEqual(status.blocked_task_ids, ids);
+    assert.ok(status.omitted_blocker_count > 0);
+    assert.equal(status.omitted_blocker_count, ids.length - status.blockers.length);
+    assert.match(status.blocker_lookup, /status.*task_id/);
+    assert.ok(JSON.stringify(status).length <= 24_000);
+    const missing = ids.find((id) => !status.blockers.some((blocker) => blocker.task_id === id));
+    const exact = await call(pi, "pi_harness_operation", { action: "status", operation_id: "O-many", task_id: missing });
+    assert.equal(exact.blockers.length, 1);
+    assert.equal(exact.blockers[0].attempt_id, `A-O-many-${missing}-01`);
+    assert.equal(exact.blockers[0].next_action, "resolve_attempt");
+    assert.equal(exact.blockers[0].children.length, 8);
+    assert.equal(exact.omitted_blocker_count, 39);
+    assert.deepEqual(exact.blocked_task_ids, ids);
+    assert.ok(JSON.stringify(exact).length <= 24_000);
+    assert.doesNotMatch(JSON.stringify(exact), /stdout|transcript|private-error|evidence_refs/);
+    await assert.rejects(call(pi, "pi_harness_operation", { action: "status", operation_id: "O-many", task_id: "foreign" }), /blocked TaskOrder/);
+  } finally { await pi.shutdown(); }
+});
+
+test("exact recovery evidence never attributes a shared outcome to multiple children", () => {
+  const operation = createOperation({ mission_id: "M-children", operation_id: "O-1", objective: "Keep child outcomes exact.", required_task_ids: ["T-1"] });
+  let graph = claimTask(createTaskGraph(operation), operation, "T-1");
+  graph = blockGraphTask(graph, operation, "T-1", "inspect children", "exact terminal evidence is required", "HARNESS_CANCELLED", undefined, "cancelled");
+  let ledger = attemptLedgerApi.reconcileAttemptLedger({}, { "O-1": operation }, { "O-1": graph });
+  const id = "A-O-1-T-1-01";
+  ledger = attemptLedgerApi.recordAttemptChild(ledger, id, { child_id: "worker-outcome", role: "worker" });
+  ledger = attemptLedgerApi.recordAttemptChild(ledger, id, { child_id: "reviewer-outcome", role: "reviewer" });
+  const blocker = operationReport(operation, coordinatorState(operation), undefined, undefined, graph, ledger).scheduler_blockers[0];
+  assert.equal(blocker.child_status, "cancelled");
+  assert.deepEqual(blocker.children, [{ child_id: "worker-outcome", role: "worker", child_status: "unknown" }, { child_id: "reviewer-outcome", role: "reviewer", child_status: "unknown" }]);
+});

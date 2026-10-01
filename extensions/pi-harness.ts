@@ -675,7 +675,7 @@ export default function harness(pi: Pi): void {
   });
   pi.registerTool?.({
     name: "pi_harness_operation", label: "Pi Harness Operation handoff",
-    description: "Create, resolve an unknown Attempt from exact child terminal evidence, terminalize, or read a bounded Commander-safe Operation summary. Only the Harness Coordinator may dispatch TaskOrders, accept or reject TaskResults, or accept Operation Acceptance Criteria. Operation completion never completes the Mission.",
+    description: "Create, resolve an unknown Attempt from exact child terminal evidence, terminalize, or read a bounded Commander-safe Operation summary. For status, pass task_id to inspect one exact blocked TaskOrder when omitted_blocker_count is nonzero. Only the Harness Coordinator may dispatch TaskOrders, accept or reject TaskResults, or accept Operation Acceptance Criteria. Operation completion never completes the Mission.",
     parameters: Type.Object({ action: Type.Union([Type.Literal("create"), Type.Literal("status"), Type.Literal("supersede"), Type.Literal("waive"), Type.Literal("remove"), Type.Literal("transfer"), Type.Literal("waive_operation"), Type.Literal("resolve_attempt")]), operation_id: Type.String(), attempt_id: Type.Optional(Type.String({ maxLength: 160 })), objective: Type.Optional(Type.String()), acceptance_criteria: Type.Optional(Type.Array(Type.String())), allowed_policy_ids: Type.Optional(Type.Array(Type.String())), constraints: Type.Optional(Type.Array(Type.String())), task_id: Type.Optional(Type.String()), replacement_operation_id: Type.Optional(Type.String()), replacement_task_id: Type.Optional(Type.String()), authority_type: Type.Optional(Type.Union([Type.Literal("commander"), Type.Literal("user")])), reason: Type.Optional(Type.String()) }),
     execute: async (_id: string, input: { action: "create" | "status" | "supersede" | "waive" | "remove" | "transfer" | "waive_operation" | "resolve_attempt"; operation_id: string; attempt_id?: string; objective?: string; acceptance_criteria?: string[]; allowed_policy_ids?: string[]; constraints?: string[]; task_id?: string; replacement_operation_id?: string; replacement_task_id?: string; authority_type?: "commander" | "user"; reason?: string }) => {
       const id = input.operation_id;
@@ -741,15 +741,37 @@ export default function harness(pi: Pi): void {
         persistScheduler();
         return { content: [{ type: "text", text: JSON.stringify({ version: 1, mission_id: operation.mission_id, operation_id: id, task_id: input.task_id, disposition: action === "supersede" ? "superseded" : "waived", situation_board: missionBoard() }) }] };
       }
-      const report = operationReport(operation, coordinatorStates[id] ?? coordinatorState(operation), undefined, undefined, taskGraphs[id], attemptLedger);
+      const report = operationReport(operation, coordinatorStates[id] ?? coordinatorState(operation), undefined, undefined, taskGraphs[id], attemptLedger, action === "status" ? input.task_id : undefined);
       const summary = operation.planning ? "The Operation awaits Coordinator plan_tasks materialization. No TaskOrder is available." : operation.status === "complete"
         ? "The Coordinator accepted the Operation. The Commander must evaluate the Mission Definition of Done."
         : "Inspect the bounded recovery status. Resolve exact unknown Attempts, retry only retryable_task_ids, and run ready work in this Operation. Waived work does not satisfy completion.";
-      return { content: [{ type: "text", text: JSON.stringify({ version: 1, mission_id: operation.mission_id, operation_id: id, status: operation.status, ...(operation.planning ? { planning: true } : {}), summary,
+      const statusReport = { version: 1, mission_id: operation.mission_id, operation_id: id, status: operation.status, ...(operation.planning ? { planning: true } : {}), summary,
         ...(report.failure_code ? { failure_code: report.failure_code } : {}), ...(report.failure_stage ? { failure_stage: report.failure_stage } : {}),
         ...(report.failure_task_id ? { failure_task_id: report.failure_task_id } : {}), ...(report.failure_codes ? { failure_codes: report.failure_codes } : {}),
         ready_task_ids: report.ready_task_ids, retryable_task_ids: report.retryable_task_ids, accepted_task_ids: report.accepted_task_ids,
-        waived_task_ids: report.waived_task_ids, blocked_task_ids: report.blocked_task_ids, blockers: report.scheduler_blockers, situation_board: missionBoard() }) }] };
+        waived_task_ids: report.waived_task_ids, blocked_task_ids: report.blocked_task_ids, blockers: report.scheduler_blockers,
+        omitted_blocker_count: report.omitted_blocker_count, blocker_lookup: report.blocker_lookup, situation_board: "" };
+      // Reserve the status budget before adding the Board; omitted blockers stay
+      // available through an exact lookup instead of disappearing silently.
+      while (Buffer.byteLength(JSON.stringify(statusReport)) > 24_000 && statusReport.blockers.length && input.task_id === undefined) {
+        statusReport.blockers.pop(); statusReport.omitted_blocker_count++;
+      }
+      const board = missionBoard(), marker = "\n[Situation Board truncated; remaining obligations stay in durable Mission state.]";
+      statusReport.situation_board = board;
+      if (Buffer.byteLength(JSON.stringify(statusReport)) > 24_000) {
+        let low = 0, high = board.length;
+        while (low < high) {
+          const middle = Math.ceil((low + high) / 2);
+          statusReport.situation_board = board.slice(0, middle) + marker;
+          if (Buffer.byteLength(JSON.stringify(statusReport)) <= 24_000) low = middle;
+          else high = middle - 1;
+        }
+        const end = /[\uD800-\uDBFF]$/.test(board.slice(0, low)) ? low - 1 : low;
+        statusReport.situation_board = board.slice(0, end) + marker;
+        if (Buffer.byteLength(JSON.stringify(statusReport)) > 24_000) statusReport.situation_board = "";
+      }
+      if (Buffer.byteLength(JSON.stringify(statusReport)) > 24_000) throw new Error("The bounded Operation status exceeds its limit");
+      return { content: [{ type: "text", text: JSON.stringify(statusReport) }] };
     },
   });
   pi.registerTool?.({
