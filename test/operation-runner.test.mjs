@@ -8,10 +8,10 @@ import harness from "../extensions/pi-harness.ts";
 import { trackControlPi } from "./helpers/control-state-isolation.mjs";
 import { readControlState } from "../lib/control-state-store.mjs";
 import { createMission } from "../lib/mission.mjs";
-import { createOperation as registerOperation, recordTaskResult, rejectTaskResult } from "../lib/operation.mjs";
+import { createOperation as registerOperation, acceptTaskResult, recordTaskResult, rejectTaskResult } from "../lib/operation.mjs";
 import { coordinatorPrompt, coordinatorState, MAX_COORDINATOR_TURNS, operationBrief, operationReport, parseCoordinatorDecision, runOperation } from "../lib/operation-runner.mjs";
 import { cancelCoordinateTasks, executeCoordinateTask, executeCoordinatorTurn, hasActiveCoordinateTasks } from "../lib/coordinator.mjs";
-import { blockGraphTask, claimTask, reconcileTaskGraph, recordTaskGraphResult, rejectGraphTask, createTaskGraph, TASK_GRAPH_ENTRY, validateTaskGraph } from "../lib/task-graph.mjs";
+import { acceptGraphTask, blockGraphTask, claimTask, reconcileTaskGraph, recordTaskGraphResult, rejectGraphTask, createTaskGraph, TASK_GRAPH_ENTRY, validateTaskGraph, waiveGraphTask } from "../lib/task-graph.mjs";
 import { readEvidence, storeEvidence } from "../lib/evidence.mjs";
 import * as attemptLedgerApi from "../lib/attempt-ledger.mjs";
 
@@ -332,8 +332,8 @@ test("OperationReport promotes only bounded structured Scheduler Blockers", () =
   const graph = blockGraphTask(createTaskGraph(operation), operation, "T-1", "resolve an unknown child outcome", "the Commander checks the child outcome and replans with a fresh Task ID", "HARNESS_UNKNOWN", undefined, "unknown");
   const report = operationReport(operation, coordinatorState(operation), "The TaskOrder outcome is unknown.", undefined, graph);
   assert.deepEqual(report.blocked_task_ids, ["T-1"]);
-  assert.deepEqual(report.scheduler_blockers, [{ task_id: "T-1", blocked_action: "resolve an unknown child outcome", required_condition: "the Commander checks the child outcome and replans with a fresh Task ID", failure_code: "HARNESS_UNKNOWN", child_status: "unknown" }]);
-  assert.deepEqual(Object.keys(report.scheduler_blockers[0]).sort(), ["blocked_action", "child_status", "failure_code", "required_condition", "task_id"]);
+  assert.deepEqual(report.scheduler_blockers, [{ task_id: "T-1", blocked_action: "resolve an unknown child outcome", required_condition: "the Commander checks the child outcome and replans with a fresh Task ID", failure_code: "HARNESS_UNKNOWN", child_status: "unknown", recovery_status: "unavailable", next_action: "replan" }]);
+  assert.deepEqual(Object.keys(report.scheduler_blockers[0]).sort(), ["blocked_action", "child_status", "failure_code", "next_action", "recovery_status", "required_condition", "task_id"]);
   assert.equal(Buffer.byteLength(JSON.stringify(report)) <= 24_000, true);
   assert.equal(JSON.stringify(report).includes("raw_evidence"), false);
 });
@@ -393,7 +393,7 @@ test("an unbound child completion cannot become a managed TaskResult", async () 
   });
   assert.equal(report.status, "blocked");
   assert.deepEqual(report.accepted_task_ids, []);
-  assert.deepEqual(report.scheduler_blockers, [{ task_id: "T-1", blocked_action: "resolve an unknown child outcome", required_condition: "the Commander checks the child outcome and replans with a fresh Task ID", failure_code: "HARNESS_LINEAGE_MISMATCH", child_status: "unknown" }]);
+  assert.deepEqual(report.scheduler_blockers, [{ task_id: "T-1", blocked_action: "resolve an unknown child outcome", required_condition: "the Commander checks the child outcome and replans with a fresh Task ID", failure_code: "HARNESS_LINEAGE_MISMATCH", child_status: "unknown", recovery_status: "unavailable", next_action: "replan" }]);
 });
 
 test("a rejected spawn is blocked as a confirmed child startup failure", async () => {
@@ -403,7 +403,7 @@ test("a rejected spawn is blocked as a confirmed child startup failure", async (
     dispatch: async () => { throw Object.assign(new Error("private startup detail"), { childOutcome: "spawn_rejected" }); },
   });
   assert.deepEqual(report.accepted_task_ids, []);
-  assert.deepEqual(report.scheduler_blockers, [{ task_id: "T-1", blocked_action: "resolve the confirmed child spawn failure", required_condition: "the Commander resolves the bounded spawn failure and replans with a fresh Task ID", failure_code: "HARNESS_CHILD_SPAWN_FAILED" }]);
+  assert.deepEqual(report.scheduler_blockers, [{ task_id: "T-1", blocked_action: "resolve the confirmed child spawn failure", required_condition: "the Commander resolves the bounded spawn failure and replans with a fresh Task ID", failure_code: "HARNESS_CHILD_SPAWN_FAILED", recovery_status: "unavailable", next_action: "replan" }]);
   assert.ok(!JSON.stringify(report).includes("private startup detail"));
 });
 
@@ -416,7 +416,7 @@ test("a child acknowledged after spawn timeout remains blocked without a TaskRes
     save: (_operation, _state, graph) => { restoredGraph = JSON.parse(JSON.stringify(graph)); },
   });
   assert.deepEqual(report.accepted_task_ids, []);
-  assert.deepEqual(report.scheduler_blockers, [{ task_id: "T-1", blocked_action: "resolve the settled child outcome", required_condition: "the child reached terminal status stopped; the Commander records this outcome without accepting a TaskResult and replans with a fresh Task ID", failure_code: "HARNESS_RPC_TIMEOUT", child_status: "stopped" }]);
+  assert.deepEqual(report.scheduler_blockers, [{ task_id: "T-1", blocked_action: "resolve the settled child outcome", required_condition: "the child reached terminal status stopped; the Commander records this outcome without accepting a TaskResult and replans with a fresh Task ID", failure_code: "HARNESS_RPC_TIMEOUT", child_status: "stopped", recovery_status: "unavailable", next_action: "replan" }]);
   assert.equal(restoredGraph.nodes["T-1"].blocker.failure_code, "HARNESS_RPC_TIMEOUT");
   validateTaskGraph(restoredGraph, operation);
   assert.ok(!JSON.stringify(report).includes("childStatus"));
@@ -1185,4 +1185,114 @@ test("resolve_attempt keeps uncertain Worker branch evidence blocked", async () 
       await pi.shutdown();
     }
   } finally { if (previous === undefined) delete globalThis[key]; else globalThis[key] = previous; }
+});
+
+
+test("Operation status returns the exact recovery evidence for a blocked Attempt", async () => {
+  let operation = createOperation({ mission_id: "M-diagnostics", operation_id: "O-1", objective: "Inspect recovery safely.", required_task_ids: ["T-1", "T-ready", "T-accepted", "T-waived"], task_intents: { "T-1": "Inspect the failure.", "T-ready": "Inspect ready work.", "T-accepted": "Inspect accepted work.", "T-waived": "Inspect waived work." } });
+  let graph = createTaskGraph(operation);
+  graph = claimTask(graph, operation, "T-accepted");
+  operation = recordTaskResult(operation, { version: 1, operation_id: "O-1", task_id: "T-accepted", execution_status: "execution_complete", verification_status: "verified", evidence_refs: [] });
+  graph = recordTaskGraphResult(graph, operation, "T-accepted");
+  const accepted = acceptTaskResult(operation, "T-accepted");
+  graph = acceptGraphTask(graph, operation, accepted, "T-accepted");
+  operation = accepted;
+  graph = waiveGraphTask(graph, operation, "T-waived", { authority_type: "commander", reason: "The requirement is removed." });
+  graph = reconcileTaskGraph(claimTask(graph, operation, "T-1"), operation);
+  let ledger = attemptLedgerApi.reconcileAttemptLedger({}, { "O-1": operation }, { "O-1": graph });
+  const id = "A-O-1-T-1-01";
+  ledger = attemptLedgerApi.recordAttemptChild(ledger, id, { child_id: "diagnostic-child", role: "research" });
+  ledger[id] = { ...ledger[id], evidence_refs: ["/tmp/private-evidence"] };
+  const state = { ...coordinatorState(operation), failure_code: "HARNESS_WORKTREE_FAILED", failure_stage: "worker_branch_result", failure_task_id: "T-1" };
+  const mission = createMission({ mission_id: "M-diagnostics", objective: "Inspect recovery safely.", operation_ids: ["O-1"] });
+  const pi = fakePi([{ customType: TASK_GRAPH_ENTRY, data: { version: 2, missions: { "M-diagnostics": mission }, operations: { "O-1": operation }, task_graphs: { "O-1": graph }, attempt_ledger: ledger } }, { customType: "pi-harness-coordinator-state", data: { "O-1": state } }]);
+  try {
+    const status = await call(pi, "pi_harness_operation", { action: "status", operation_id: "O-1" });
+    assert.equal(status.mission_id, "M-diagnostics");
+    assert.equal(status.operation_id, "O-1");
+    assert.deepEqual(status.ready_task_ids, ["T-ready"]);
+    assert.deepEqual(status.retryable_task_ids, []);
+    assert.deepEqual(status.accepted_task_ids, ["T-accepted"]);
+    assert.deepEqual(status.waived_task_ids, ["T-waived"]);
+    const blocker = status.blockers[0];
+    assert.equal(blocker.task_id, "T-1");
+    assert.equal(blocker.attempt_id, id);
+    assert.equal(blocker.attempt_status, "unknown");
+    assert.equal(blocker.failure_code, "HARNESS_SESSION_INTERRUPTED");
+    assert.equal(blocker.failure_stage, "worker_branch_result");
+    assert.deepEqual(blocker.children, [{ child_id: "diagnostic-child", role: "research", child_status: "unknown" }]);
+    assert.equal(blocker.next_action, "resolve_attempt");
+    assert.equal(blocker.recovery_status, "unresolved");
+    assert.match(status.situation_board, /Unresolved Attempt A-O-1-T-1-01.*unknown/);
+    assert.match(status.situation_board, /Failure: HARNESS_SESSION_INTERRUPTED/);
+    assert.doesNotMatch(JSON.stringify(status), /private-evidence|raw child output|stdout|transcript/);
+    const report = operationReport(operation, state, undefined, undefined, graph, ledger);
+    assert.deepEqual(report.scheduler_blockers, status.blockers);
+    assert.deepEqual(report.ready_task_ids, ["T-ready"]);
+    assert.deepEqual(report.waived_task_ids, ["T-waived"]);
+    const key = Symbol.for("pi-subagents:manager"), previous = globalThis[key];
+    globalThis[key] = { getRecord: () => ({ status: "completed", result: "raw child output /tmp/private-child", error: "private-error" }) };
+    try {
+      await pi.commands.get("mission").handler("resume M-diagnostics", {});
+      const resolved = await call(pi, "pi_harness_operation", { action: "resolve_attempt", operation_id: "O-1", attempt_id: id });
+      assert.deepEqual(resolved.retryable_task_ids, ["T-1"]);
+      assert.equal(resolved.blockers[0].attempt_status, "terminal");
+      assert.equal(resolved.blockers[0].next_action, "retry_task");
+      assert.deepEqual(resolved.blockers[0].children, [{ child_id: "diagnostic-child", role: "research", child_status: "completed" }]);
+      assert.doesNotMatch(JSON.stringify(resolved), /private-evidence|raw child output|private-child|private-error/);
+    } finally { if (previous === undefined) delete globalThis[key]; else globalThis[key] = previous; }
+  } finally { await pi.shutdown(); }
+});
+
+test("Mission resume reports waived work as non-success", async () => {
+  const pi = fakePi(), messages = [];
+  pi.sendUserMessage = (message) => messages.push(message);
+  try {
+    const { mission_id } = await call(pi, "pi_harness_start_mission", { objective: "Test the routes." });
+    await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-waived", objective: "Test the routes.", required_task_ids: ["T-waived"], task_intents: { "T-waived": "Test the routes." } });
+    await call(pi, "pi_harness_operation", { action: "waive", operation_id: "O-waived", task_id: "T-waived", authority_type: "commander", reason: "Work was not run." });
+    const before = readControlState();
+    messages.length = 0;
+    await pi.commands.get("mission").handler(`resume ${mission_id}`, {});
+    const prompt = messages.at(-1);
+    assert.match(prompt, /TaskOrder T-waived: waived/);
+    assert.match(prompt, /waived work does not satisfy.*completion/i);
+    assert.match(prompt, /routes were not tested/i);
+    assert.match(prompt, new RegExp(`/mission cancel ${mission_id}`));
+    assert.match(prompt, /new Mission/);
+    assert.match(prompt, /preserve.*Mission history/i);
+    assert.doesNotMatch(prompt, /Create a task-less planning Operation and call/);
+    const after = readControlState();
+    assert.deepEqual(after.operations, before.operations);
+    assert.deepEqual(after.task_graphs, before.task_graphs);
+    assert.deepEqual(after.attempt_ledger, before.attempt_ledger);
+    assert.equal(after.operations["O-waived"].status, "open");
+    assert.deepEqual(after.operations["O-waived"].accepted_task_ids, []);
+  } finally { await pi.shutdown(); }
+});
+
+
+test("exact recovery evidence keeps a legacy blocked TaskOrder actionable without an Attempt", () => {
+  const operation = op();
+  const graph = blockGraphTask(createTaskGraph(operation), operation, "T-1", "inspect the unresolved work", "the Commander replans");
+  const blocker = operationReport(operation, coordinatorState(operation), undefined, undefined, graph).scheduler_blockers[0];
+  assert.equal(blocker.recovery_status, "unavailable");
+  assert.equal(blocker.next_action, "replan");
+  assert.equal(blocker.attempt_id, undefined);
+});
+
+
+test("exact recovery evidence includes empty dispositions for a planning Operation", async () => {
+  const pi = fakePi();
+  try {
+    await call(pi, "pi_harness_start_mission", { objective: "Plan the remaining work." });
+    await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-plan", objective: "Plan the remaining work." });
+    const status = await call(pi, "pi_harness_operation", { action: "status", operation_id: "O-plan" });
+    assert.equal(status.planning, true);
+    assert.deepEqual(status.ready_task_ids, []);
+    assert.deepEqual(status.retryable_task_ids, []);
+    assert.deepEqual(status.accepted_task_ids, []);
+    assert.deepEqual(status.waived_task_ids, []);
+    assert.deepEqual(status.blockers, []);
+  } finally { await pi.shutdown(); }
 });

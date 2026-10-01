@@ -193,3 +193,18 @@ test("Mission closure still rejects an unknown Attempt after its TaskOrder is re
   const { ledger, missions, operations, taskGraphs } = unknownAttemptFixture();
   assert.equal(missionIsClosable(missions["M-1"], operations, taskGraphs, ledger), false);
 });
+
+
+test("Situation Board retains waived TaskOrders in an open blocked Mission", () => {
+  const state = fixture();
+  state.missions["M-1"] = createMission({ ...state.missions["M-1"], status: "blocked" });
+  for (const id of ["T-1", "T-2"]) state.taskGraphs["O-1"] = waiveGraphTask(state.taskGraphs["O-1"], state.operations["O-1"], id, { authority_type: "commander", reason: "Work was not run." });
+  const board = missionSituationBoard(state.missions, state.operations, state.taskGraphs);
+  assert.match(board, /Mission M-1/);
+  assert.match(board, /Closable: false/);
+  assert.match(board, /Operation O-1: open/);
+  assert.match(board, /TaskOrder T-1: waived/);
+  assert.match(board, /TaskOrder T-2: waived/);
+  assert.match(board, /waived work does not satisfy.*completion/i);
+  assert.ok(board.length <= 24_000);
+});

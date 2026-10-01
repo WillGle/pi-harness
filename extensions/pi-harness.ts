@@ -1,6 +1,7 @@
 import { contextTelemetry, deterministicContextEdits, installStablePrompt, stablePromptSections } from "../lib/context-economics.mjs";
 import { acquireControlLease, assertControlLease, readControlState, writeControlState } from "../lib/control-state-store.mjs";
 import { MISSION_ENTRY, attachOperation, createMission, missionIsClosable, missionSituationBoard, validateMissionOwnership } from "../lib/mission.mjs";
+import { safeFailureCode } from "../lib/failure-codes.mjs";
 import { attemptId, recordAttemptChild, reconcileAttemptLedger, resolveUnknownAttempt, rollbackUnstartedAttempt } from "../lib/attempt-ledger.mjs";
 import { assertSupportedPlatform } from "../lib/platform.mjs";
 import process from "node:process";
@@ -17,7 +18,7 @@ import { appendProjectMemory, clearProjectMemory, loadProjectMemory } from "../l
 import { cancelCoordinateTasks, executeCoordinateTask, executeCoordinatorTurn, hasActiveCoordinateTasks, inspectCoordinateChild, managedTaskTimeout, validateTask } from "../lib/coordinator.mjs";
 import { COMMANDER_LANGUAGE_POLICY } from "../lib/agent-english.mjs";
 import { PROACTIVE_COMPACT_ENTRY, proactiveCompactionPolicy, restoreProactivePolicy, setProactiveThreshold } from "../lib/compaction-policy.mjs";
-import { COORDINATOR_ENTRY, canRetryResolvedAttempt, canRetryTaskResult, coordinatorState, parallelTaskLimit, runOperation } from "../lib/operation-runner.mjs";
+import { COORDINATOR_ENTRY, canRetryResolvedAttempt, canRetryTaskResult, coordinatorState, operationReport, parallelTaskLimit, runOperation } from "../lib/operation-runner.mjs";
 import { promoteTaskResult } from "../lib/communication.mjs";
 import { OPERATION_ENTRY, createOperation, terminalizeOperation } from "../lib/operation.mjs";
 import { TASK_GRAPH_ENTRY, createTaskGraph, migrateTaskGraph, reconcileTaskGraph, supersedeGraphTask, validateTaskGraph, waiveGraphTask } from "../lib/task-graph.mjs";
@@ -227,6 +228,18 @@ export default function harness(pi: Pi): void {
     resumedMissionId = undefined;
     const mission = missions[selectedMissionId];
     const situation = missionSituationBoard({ [selectedMissionId]: mission }, operations, taskGraphs, attemptLedger);
+    const existingOperations = mission.operation_ids.map((id: string) => operations[id]);
+    const noSafeWork = existingOperations.length > 0 && !missionIsClosable(mission, operations, taskGraphs, attemptLedger)
+      && existingOperations.every((operation: any) => operation && (operation.status !== "open" || !operation.planning
+        && operation.required_task_ids.some((id: string) => taskGraphs[operation.operation_id]?.nodes[id]?.scheduler_status !== "accepted")
+        && operation.required_task_ids.every((id: string) => {
+          const node = taskGraphs[operation.operation_id]?.nodes[id];
+          const attempt = node && attemptLedger[attemptId(operation.operation_id, id, node.attempts)];
+          return !["ready", "running", "result_available"].includes(node?.scheduler_status)
+            && !canRetryTaskResult(operation, taskGraphs[operation.operation_id], attemptLedger, id)
+            && !canRetryResolvedAttempt(operation, taskGraphs[operation.operation_id], attemptLedger, id)
+            && !(attempt?.status === "unknown" && attempt.child_refs?.length && node.scheduler_status === "blocked");
+        })));
     const message = [
       "[PI_HARNESS_MISSION_CONTINUE]",
       resumed ? `Mission ${selectedMissionId} was explicitly resumed by ID in this Pi session.` : undefined,
@@ -235,7 +248,10 @@ export default function harness(pi: Pi): void {
       "Current Mission Situation Board:",
       situation,
       "Use this persisted state. Do not recreate completed Operations or accepted Tasks.",
-      "Create a task-less planning Operation and call pi_harness_run_operation when managed execution materially improves this Mission. Pass the Mission Constraints to the planning Operation. Let the Coordinator choose the smallest useful TaskGraph.",
+      "Inspect existing open Operations with pi_harness_operation status first. Resolve exact unknown Attempts only from terminal child evidence, then retry only IDs in retryable_task_ids. Run ready work in its existing Operation.",
+      noSafeWork
+        ? `No safe TaskOrder remains. Waived work does not satisfy Operation or Mission completion. Routes were not tested by waived work. Preserve the Mission history. Use /mission cancel ${selectedMissionId}, then start a new Mission for the remaining objective.`
+        : "Create a task-less planning Operation only when this eligible Mission has no usable existing Operation. Pass the Mission Constraints and call pi_harness_run_operation. Let the Coordinator choose the smallest useful TaskGraph. If only waived or otherwise non-recoverable work remains, state that routes were not tested, preserve the Mission history, cancel this Mission, and start a new Mission.",
       "Continue until you call pi_harness_goal with a terminal state and concrete Evidence.",
     ].filter(Boolean).join("\n");
     pi.sendUserMessage?.(message, { deliverAs: "followUp" });
@@ -312,6 +328,9 @@ export default function harness(pi: Pi): void {
     validateMissionOwnership(missions, operations, taskGraphs, attemptLedger);
     coordinatorStates = controlSnapshot?.coordinator_states ?? Object.fromEntries(Object.entries(legacyCoordinator).map(([id, state]: [string, any]) => [id, {
       version: 1, operation_id: id, turns: state.turns ?? 0, decisions: (state.decisions ?? []).slice(-7), blocker: state.blocker ?? null,
+      ...(state.failure_code ? { failure_code: safeFailureCode(state.failure_code) } : {}),
+      ...(["worktree_preflight", "worker_branch_result"].includes(state.failure_stage) ? { failure_stage: state.failure_stage } : {}),
+      ...(operations[id]?.required_task_ids?.includes(state.failure_task_id) ? { failure_task_id: state.failure_task_id } : {}),
     }]));
     if (Object.keys(coordinatorStates).length) pi.appendEntry?.(COORDINATOR_ENTRY, coordinatorStates);
     if (Object.keys(missions).length) persistMission();
@@ -722,17 +741,15 @@ export default function harness(pi: Pi): void {
         persistScheduler();
         return { content: [{ type: "text", text: JSON.stringify({ version: 1, mission_id: operation.mission_id, operation_id: id, task_id: input.task_id, disposition: action === "supersede" ? "superseded" : "waived", situation_board: missionBoard() }) }] };
       }
-      if (operation.planning) return { content: [{ type: "text", text: JSON.stringify({ version: 1, mission_id: operation.mission_id, operation_id: id, status: "open", planning: true, summary: "The Operation awaits Coordinator plan_tasks materialization. No TaskOrder is available.", situation_board: missionBoard() }) }] };
-      const blocked_task_ids = operation.required_task_ids.filter((taskId: string) => taskGraphs[id].nodes[taskId].scheduler_status === "blocked");
-      const retryable_task_ids = operation.required_task_ids.filter((taskId: string) => canRetryTaskResult(operation, taskGraphs[id], attemptLedger, taskId) || canRetryResolvedAttempt(operation, taskGraphs[id], attemptLedger, taskId));
-      const blockers = blocked_task_ids.map((taskId: string) => {
-        const { blocked_action, required_condition } = taskGraphs[id].nodes[taskId].blocker;
-        return { task_id: taskId, blocked_action, required_condition };
-      });
-      const summary = operation.status === "complete"
+      const report = operationReport(operation, coordinatorStates[id] ?? coordinatorState(operation), undefined, undefined, taskGraphs[id], attemptLedger);
+      const summary = operation.planning ? "The Operation awaits Coordinator plan_tasks materialization. No TaskOrder is available." : operation.status === "complete"
         ? "The Coordinator accepted the Operation. The Commander must evaluate the Mission Definition of Done."
-        : "The Operation remains open. The Commander must start or resume the Harness Coordinator.";
-      return { content: [{ type: "text", text: JSON.stringify({ version: 1, mission_id: operation.mission_id, operation_id: id, status: operation.status, summary, blocked_task_ids, retryable_task_ids, blockers, situation_board: missionBoard() }) }] };
+        : "Inspect the bounded recovery status. Resolve exact unknown Attempts, retry only retryable_task_ids, and run ready work in this Operation. Waived work does not satisfy completion.";
+      return { content: [{ type: "text", text: JSON.stringify({ version: 1, mission_id: operation.mission_id, operation_id: id, status: operation.status, ...(operation.planning ? { planning: true } : {}), summary,
+        ...(report.failure_code ? { failure_code: report.failure_code } : {}), ...(report.failure_stage ? { failure_stage: report.failure_stage } : {}),
+        ...(report.failure_task_id ? { failure_task_id: report.failure_task_id } : {}), ...(report.failure_codes ? { failure_codes: report.failure_codes } : {}),
+        ready_task_ids: report.ready_task_ids, retryable_task_ids: report.retryable_task_ids, accepted_task_ids: report.accepted_task_ids,
+        waived_task_ids: report.waived_task_ids, blocked_task_ids: report.blocked_task_ids, blockers: report.scheduler_blockers, situation_board: missionBoard() }) }] };
     },
   });
   pi.registerTool?.({
@@ -787,6 +804,7 @@ export default function harness(pi: Pi): void {
               onVerificationStart: progress.onVerificationStart, timeout: managedTaskTimeout(task.owner), reviewerTimeout: managedTaskTimeout("reviewer"), onUsage: (usage: any, provenance: Record<string, any>) => recordUsage(usage, { task_id: task.task_id, ...provenance }) }));
           },
           save,
+          getAttemptLedger: () => attemptLedger,
           rollbackAttempt: (attemptId: string) => {
             if (runEpoch !== sessionEpoch) throw new Error("The Operation session changed before the Attempt rollback");
             attemptLedger = rollbackUnstartedAttempt(attemptLedger, attemptId);
