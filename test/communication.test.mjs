@@ -40,9 +40,11 @@ test("the Harness Verifier, not Worker prose or legacy success, controls accepta
   assert.equal(taskResult(order, record, { evidenceError: true }).verification_status, "failed");
 });
 
-test("failed TaskResults carry bounded failure codes without child error text", () => {
+test("missing-branch and other failed TaskResults carry bounded failure codes without child error text", () => {
   const worker = taskOrder({ owner: "worker", scope: "edit", verification: "npm test", permission: "write" });
   assert.equal(taskResult(worker, { status: "completed" }).failure_code, "HARNESS_WORKTREE_FAILED");
+  assert.equal(taskResult(worker, { status: "completed" }).failure_stage, "worker_branch_result");
+  assert.equal(taskResult(worker, { status: "completed" }).execution_status, "execution_complete");
   const research = taskOrder({ owner: "research", scope: "inspect", verification: "check", permission: "read" });
   assert.equal(taskResult(research, { status: "error", error: "private provider detail" }).failure_code, "HARNESS_CHILD_FAILED");
   assert.equal(taskResult(research, { status: "stopped" }).failure_code, "HARNESS_CANCELLED");

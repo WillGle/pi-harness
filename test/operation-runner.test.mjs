@@ -12,6 +12,7 @@ import { coordinatorPrompt, coordinatorState, MAX_COORDINATOR_TURNS, operationBr
 import { cancelCoordinateTasks, executeCoordinateTask, executeCoordinatorTurn, hasActiveCoordinateTasks } from "../lib/coordinator.mjs";
 import { blockGraphTask, createTaskGraph, TASK_GRAPH_ENTRY, validateTaskGraph } from "../lib/task-graph.mjs";
 import { readEvidence, storeEvidence } from "../lib/evidence.mjs";
+import * as attemptLedgerApi from "../lib/attempt-ledger.mjs";
 
 const dir = mkdtempSync(join(tmpdir(), "pi-phasee-test-"));
 const prior = process.env.PI_HARNESS_EVIDENCE_DIR;
@@ -23,6 +24,68 @@ const createOperation = input => registerOperation({ ...input, task_specs: input
 const op = () => createOperation({ operation_id: "O-1", objective: "Check reports.", required_task_ids: ["T-1", "T-2"], dependencies: { "T-2": ["T-1"] }, acceptance_criteria: ["The Coordinator checked the result."], task_intents: { "T-1": "Inspect `lib/coordinator.mjs`.", "T-2": "Inspect `lib/coordinator.mjs`." } });
 const decision = (action, fields = {}) => JSON.stringify({ version: 1, operation_id: "O-1", action, reason: "The Coordinator checked the Operation state.", ...fields });
 const task = (id) => ({ task_id: id, owner: "research", scope: "Inspect `lib/coordinator.mjs`.", permission: "read", verification: "Inspect report.", acceptance_criteria: ["The report identifies `lib/coordinator.mjs`."] });
+
+test("worktree preflight failure restores a ready TaskOrder without an unknown Attempt", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "pi-operation-preflight-"));
+  const operation = createOperation({ mission_id: "M-1", operation_id: "O-1", objective: "Edit the worker file.", required_task_ids: ["T-1"], task_intents: { "T-1": "Edit lib/coordinator.mjs" }, task_specs: { "T-1": { owner: "worker", permission: "write", verification: "node --check lib/coordinator.mjs" } } });
+  let turns = 0, dispatches = 0, snapshot, ledger = {}, rolledBack;
+  try {
+    const report = await runOperation(operation, {
+      turn: async () => { turns++; return decision("dispatch", { task_id: "T-1" }); },
+      dispatch: async (selected) => { dispatches++; return (await executeCoordinateTask({ events: { on: () => () => {}, emit: () => {} } }, selected, { cwd })).taskResult; },
+      rollbackAttempt: (id) => { rolledBack = id; ledger = attemptLedgerApi.rollbackUnstartedAttempt(ledger, id); },
+      save: (nextOperation, state, graph) => {
+        ledger = attemptLedgerApi.reconcileAttemptLedger(ledger, { "O-1": nextOperation }, { "O-1": graph });
+        snapshot = { operation: nextOperation, state, graph };
+      },
+    }, { attemptLedger: ledger });
+    assert.equal(turns, 1);
+    assert.equal(dispatches, 1);
+    assert.equal(snapshot.graph.nodes["T-1"].scheduler_status, "ready");
+    assert.equal(snapshot.graph.nodes["T-1"].attempts, 0);
+    assert.equal(rolledBack, "A-O-1-T-1-01");
+    assert.deepEqual(ledger, {});
+    assert.deepEqual(snapshot.operation.task_results, {});
+    assert.equal(report.failure_code, "HARNESS_WORKTREE_FAILED");
+    assert.equal(report.failure_stage, "worktree_preflight");
+    assert.equal(report.failure_task_id, "T-1");
+    assert.deepEqual(report.ready_task_ids, ["T-1"]);
+    assert.equal(snapshot.state.failure_code, "HARNESS_WORKTREE_FAILED");
+    assert.equal(snapshot.state.failure_stage, "worktree_preflight");
+    assert.equal(snapshot.state.failure_task_id, "T-1");
+    assert.ok(!JSON.stringify(report).includes(cwd));
+    assert.ok(!JSON.stringify(report).includes("fatal:"));
+  } finally { rmSync(cwd, { recursive: true, force: true }); }
+});
+
+test("completed Worker worktree failure retries and dispatches the exact TaskOrder", async () => {
+  const pi = fakePi();
+  const dispatched = [];
+  let sequence = 0;
+  pi.events.on("subagents:rpc:spawn", (request) => {
+    const id = `worktree-result-${++sequence}`;
+    const result = request.type === "coordinator"
+      ? (() => {
+        const brief = JSON.parse(request.prompt.slice(request.prompt.indexOf('{"OperationBrief"'))).OperationBrief;
+        return brief.ready_task_ids.includes("T-1") ? decision("dispatch", { task_id: "T-1" }) : decision("block", { blocked_action: "retry the failed Worker", required_condition: "the Commander requests the failed TaskOrder" });
+      })() : "Worker execution completed without a branch.";
+    if (request.type === "worker") dispatched.push(request.prompt.match(/TaskOrder ([^\n]+)/)[1]);
+    pi.events.emit(`subagents:rpc:spawn:reply:${request.requestId}`, { success: true, data: { id } });
+    setImmediate(() => pi.events.emit("subagents:completed", { id, status: "completed", result }));
+  });
+  try {
+    await call(pi, "pi_harness_start_mission", { objective: "Repair the worker." });
+    await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-1", objective: "Repair the worker.", required_task_ids: ["T-1"], task_intents: { "T-1": "Edit lib/coordinator.mjs" }, task_specs: { "T-1": { owner: "worker", permission: "write", verification: "node --check lib/coordinator.mjs" } } });
+    const report = await call(pi, "pi_harness_run_operation", { operation_id: "O-1" });
+    assert.deepEqual(report.failure_codes, [{ task_id: "T-1", failure_code: "HARNESS_WORKTREE_FAILED", failure_stage: "worker_branch_result" }]);
+    const status = await call(pi, "pi_harness_operation", { action: "status", operation_id: "O-1" });
+    assert.deepEqual(status.retryable_task_ids, ["T-1"]);
+    await call(pi, "pi_harness_run_operation", { operation_id: "O-1", retry_task_id: status.retryable_task_ids[0] });
+    assert.deepEqual(dispatched, ["T-1", "T-1"]);
+    const settled = await call(pi, "pi_harness_operation", { action: "status", operation_id: "O-1" });
+    assert.deepEqual(settled.retryable_task_ids, []);
+  } finally { await pi.shutdown(); }
+});
 
 test("Coordinator packet contains bounded semantic state, not transcripts", () => {
   const operation = op();

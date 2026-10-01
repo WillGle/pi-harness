@@ -1,7 +1,7 @@
 import { contextTelemetry, deterministicContextEdits, installStablePrompt, stablePromptSections } from "../lib/context-economics.mjs";
 import { acquireControlLease, assertControlLease, readControlState, writeControlState } from "../lib/control-state-store.mjs";
 import { MISSION_ENTRY, attachOperation, createMission, missionIsClosable, missionSituationBoard, validateMissionOwnership } from "../lib/mission.mjs";
-import { reconcileAttemptLedger } from "../lib/attempt-ledger.mjs";
+import { reconcileAttemptLedger, rollbackUnstartedAttempt } from "../lib/attempt-ledger.mjs";
 import { assertSupportedPlatform } from "../lib/platform.mjs";
 import process from "node:process";
 import { randomUUID } from "node:crypto";
@@ -763,6 +763,11 @@ export default function harness(pi: Pi): void {
           dispatch: async (task: any, progress: any) => promoteTaskResult(await executeCoordinateTask(pi, validateTask(task), { cwd: runCwd, groupId: runId, signal: controller.signal, modelRegistry: ctx?.modelRegistry,
             onVerificationStart: progress.onVerificationStart, timeout: managedTaskTimeout(task.owner), reviewerTimeout: managedTaskTimeout("reviewer"), onUsage: (usage: any, provenance: Record<string, any>) => recordUsage(usage, { task_id: task.task_id, ...provenance }) })),
           save,
+          rollbackAttempt: (attemptId: string) => {
+            if (runEpoch !== sessionEpoch) throw new Error("The Operation session changed before the Attempt rollback");
+            attemptLedger = rollbackUnstartedAttempt(attemptLedger, attemptId);
+            return attemptLedger;
+          },
         }, { state: coordinatorStates[id] ?? coordinatorState(operation), graph: taskGraphs[id], mission: operations[id].mission_id ? { mission_id: operations[id].mission_id, objective: missions[operations[id].mission_id]?.objective, ...(missions[operations[id].mission_id]?.constraints?.length ? { constraints: missions[operations[id].mission_id].constraints } : {}) } : goal?.status === "active" ? goal.objective : undefined, cwd: runCwd, onUsage: recordUsage, signal: controller.signal, parallelLimit, retryTaskId: input.retry_task_id, attemptLedger });
         return { content: [{ type: "text", text: JSON.stringify(report) }] };
       } finally {

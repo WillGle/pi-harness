@@ -48,6 +48,22 @@ class EventBus {
   listenerCount(name) { return this.#handlers.get(name)?.size ?? 0; }
 }
 
+test("baseSha worktree failure is tagged before any child starts", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "pi-worker-preflight-"));
+  const events = new EventBus();
+  let spawns = 0;
+  events.on("subagents:rpc:spawn", () => { spawns++; });
+  try {
+    await assert.rejects(executeCoordinateTask({ events }, { owner: "worker", scope: "Edit lib/coordinator.mjs", verification: "node --check lib/coordinator.mjs", permission: "write" }, { cwd }), (error) => {
+      assert.equal(error.code, "HARNESS_WORKTREE_FAILED");
+      assert.equal(error.failure_stage, "worktree_preflight");
+      assert.equal(error.childOutcome, "not_started");
+      return true;
+    });
+    assert.equal(spawns, 0);
+  } finally { rmSync(cwd, { recursive: true, force: true }); }
+});
+
 function makeRepo(prefix) {
   const repo = mkdtempSync(join(tmpdir(), prefix));
   for (const args of [
