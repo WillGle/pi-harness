@@ -1,7 +1,7 @@
 import { contextTelemetry, deterministicContextEdits, installStablePrompt, stablePromptSections } from "../lib/context-economics.mjs";
 import { acquireControlLease, assertControlLease, readControlState, writeControlState } from "../lib/control-state-store.mjs";
 import { MISSION_ENTRY, attachOperation, createMission, missionIsClosable, missionSituationBoard, validateMissionOwnership } from "../lib/mission.mjs";
-import { attemptId, recordAttemptChild, reconcileAttemptLedger, rollbackUnstartedAttempt } from "../lib/attempt-ledger.mjs";
+import { attemptId, recordAttemptChild, reconcileAttemptLedger, resolveUnknownAttempt, rollbackUnstartedAttempt } from "../lib/attempt-ledger.mjs";
 import { assertSupportedPlatform } from "../lib/platform.mjs";
 import process from "node:process";
 import { randomUUID } from "node:crypto";
@@ -14,10 +14,10 @@ import {
   isPlanAllowedTool, parsePlan, planState, restore, transitionGoal,
 } from "../lib/state.mjs";
 import { appendProjectMemory, clearProjectMemory, loadProjectMemory } from "../lib/memory.mjs";
-import { cancelCoordinateTasks, executeCoordinateTask, executeCoordinatorTurn, hasActiveCoordinateTasks, managedTaskTimeout, validateTask } from "../lib/coordinator.mjs";
+import { cancelCoordinateTasks, executeCoordinateTask, executeCoordinatorTurn, hasActiveCoordinateTasks, inspectCoordinateChild, managedTaskTimeout, validateTask } from "../lib/coordinator.mjs";
 import { COMMANDER_LANGUAGE_POLICY } from "../lib/agent-english.mjs";
 import { PROACTIVE_COMPACT_ENTRY, proactiveCompactionPolicy, restoreProactivePolicy, setProactiveThreshold } from "../lib/compaction-policy.mjs";
-import { COORDINATOR_ENTRY, canRetryTaskResult, coordinatorState, parallelTaskLimit, runOperation } from "../lib/operation-runner.mjs";
+import { COORDINATOR_ENTRY, canRetryResolvedAttempt, canRetryTaskResult, coordinatorState, parallelTaskLimit, runOperation } from "../lib/operation-runner.mjs";
 import { promoteTaskResult } from "../lib/communication.mjs";
 import { OPERATION_ENTRY, createOperation, terminalizeOperation } from "../lib/operation.mjs";
 import { TASK_GRAPH_ENTRY, createTaskGraph, migrateTaskGraph, reconcileTaskGraph, supersedeGraphTask, validateTaskGraph, waiveGraphTask } from "../lib/task-graph.mjs";
@@ -656,12 +656,12 @@ export default function harness(pi: Pi): void {
   });
   pi.registerTool?.({
     name: "pi_harness_operation", label: "Pi Harness Operation handoff",
-    description: "Create, terminalize, or read a bounded Commander-safe Operation summary. Only the Harness Coordinator may dispatch TaskOrders, accept or reject TaskResults, or accept Operation Acceptance Criteria. Operation completion never completes the Mission.",
-    parameters: Type.Object({ action: Type.Union([Type.Literal("create"), Type.Literal("status"), Type.Literal("supersede"), Type.Literal("waive"), Type.Literal("remove"), Type.Literal("transfer"), Type.Literal("waive_operation")]), operation_id: Type.String(), objective: Type.Optional(Type.String()), acceptance_criteria: Type.Optional(Type.Array(Type.String())), allowed_policy_ids: Type.Optional(Type.Array(Type.String())), constraints: Type.Optional(Type.Array(Type.String())), task_id: Type.Optional(Type.String()), replacement_operation_id: Type.Optional(Type.String()), replacement_task_id: Type.Optional(Type.String()), authority_type: Type.Optional(Type.Union([Type.Literal("commander"), Type.Literal("user")])), reason: Type.Optional(Type.String()) }),
-    execute: async (_id: string, input: { action: "create" | "status" | "supersede" | "waive" | "remove" | "transfer" | "waive_operation"; operation_id: string; objective?: string; acceptance_criteria?: string[]; allowed_policy_ids?: string[]; constraints?: string[]; task_id?: string; replacement_operation_id?: string; replacement_task_id?: string; authority_type?: "commander" | "user"; reason?: string }) => {
+    description: "Create, resolve an unknown Attempt from exact child terminal evidence, terminalize, or read a bounded Commander-safe Operation summary. Only the Harness Coordinator may dispatch TaskOrders, accept or reject TaskResults, or accept Operation Acceptance Criteria. Operation completion never completes the Mission.",
+    parameters: Type.Object({ action: Type.Union([Type.Literal("create"), Type.Literal("status"), Type.Literal("supersede"), Type.Literal("waive"), Type.Literal("remove"), Type.Literal("transfer"), Type.Literal("waive_operation"), Type.Literal("resolve_attempt")]), operation_id: Type.String(), attempt_id: Type.Optional(Type.String({ maxLength: 160 })), objective: Type.Optional(Type.String()), acceptance_criteria: Type.Optional(Type.Array(Type.String())), allowed_policy_ids: Type.Optional(Type.Array(Type.String())), constraints: Type.Optional(Type.Array(Type.String())), task_id: Type.Optional(Type.String()), replacement_operation_id: Type.Optional(Type.String()), replacement_task_id: Type.Optional(Type.String()), authority_type: Type.Optional(Type.Union([Type.Literal("commander"), Type.Literal("user")])), reason: Type.Optional(Type.String()) }),
+    execute: async (_id: string, input: { action: "create" | "status" | "supersede" | "waive" | "remove" | "transfer" | "waive_operation" | "resolve_attempt"; operation_id: string; attempt_id?: string; objective?: string; acceptance_criteria?: string[]; allowed_policy_ids?: string[]; constraints?: string[]; task_id?: string; replacement_operation_id?: string; replacement_task_id?: string; authority_type?: "commander" | "user"; reason?: string }) => {
       const id = input.operation_id;
       const action = input.action as string;
-      if (!["create", "status", "supersede", "waive", "remove", "transfer", "waive_operation"].includes(action)) throw new Error("Only the Harness Coordinator may accept or reject a TaskResult or Operation Acceptance Criterion");
+      if (!["create", "status", "supersede", "waive", "remove", "transfer", "waive_operation", "resolve_attempt"].includes(action)) throw new Error("Only the Harness Coordinator may accept or reject a TaskResult or Operation Acceptance Criterion");
       if (activeOperationRuns.has(id)) throw new Error("The Operation is running. The Commander must wait for the bounded OperationReport.");
       if (action === "create") {
         if (Object.hasOwn(operations, id)) throw new Error("Operation ID already exists");
@@ -690,6 +690,19 @@ export default function harness(pi: Pi): void {
       if (!operation) throw new Error("Unknown Operation");
       validateTaskGraph(taskGraphs[id], operation);
       if (action !== "status" && (!controlLease || selectedMissionId !== operation.mission_id || missions[operation.mission_id]?.status !== "active")) throw new Error("Resume the owning Mission before changing its Operation state");
+      if (action === "resolve_attempt") {
+        const attempt = input.attempt_id && Object.hasOwn(attemptLedger, input.attempt_id) ? attemptLedger[input.attempt_id] : undefined;
+        if (!attempt || attempt.operation_id !== id) throw new Error("resolve_attempt requires the exact owning attempt_id");
+        if (attempt.status !== "terminal") {
+          if (attempt.status !== "unknown") throw new Error("Only an unknown Attempt can be resolved");
+          if (!attempt.child_refs?.length) throw new Error("Unknown Attempt has no persisted child reference");
+          const observations = attempt.child_refs.map((ref: any) => ({ child_id: ref.child_id, ...inspectCoordinateChild(ref.child_id), source: "pi-subagents", observed_at: new Date().toISOString() }));
+          if (observations.some((observation: any) => observation.state !== "terminal")) throw new Error("Every exact child must be terminal; active or unavailable children remain blocked");
+          const resolutions = observations.map(({ state, ...observation }: any) => observation);
+          attemptLedger = resolveUnknownAttempt(attemptLedger, input.attempt_id!, resolutions);
+          persistScheduler();
+        }
+      }
       if (["transfer", "waive_operation"].includes(action)) {
         if (!input.authority_type || !input.reason?.trim()) throw new Error("Operation terminal disposition requires authority type and reason");
         const status = action === "transfer" ? "transferred" : "waived";
@@ -711,7 +724,7 @@ export default function harness(pi: Pi): void {
       }
       if (operation.planning) return { content: [{ type: "text", text: JSON.stringify({ version: 1, mission_id: operation.mission_id, operation_id: id, status: "open", planning: true, summary: "The Operation awaits Coordinator plan_tasks materialization. No TaskOrder is available.", situation_board: missionBoard() }) }] };
       const blocked_task_ids = operation.required_task_ids.filter((taskId: string) => taskGraphs[id].nodes[taskId].scheduler_status === "blocked");
-      const retryable_task_ids = operation.required_task_ids.filter((taskId: string) => canRetryTaskResult(operation, taskGraphs[id], attemptLedger, taskId));
+      const retryable_task_ids = operation.required_task_ids.filter((taskId: string) => canRetryTaskResult(operation, taskGraphs[id], attemptLedger, taskId) || canRetryResolvedAttempt(operation, taskGraphs[id], attemptLedger, taskId));
       const blockers = blocked_task_ids.map((taskId: string) => {
         const { blocked_action, required_condition } = taskGraphs[id].nodes[taskId].blocker;
         return { task_id: taskId, blocked_action, required_condition };
@@ -724,7 +737,7 @@ export default function harness(pi: Pi): void {
   });
   pi.registerTool?.({
     name: "pi_harness_run_operation", label: "Pi Harness run Operation",
-    description: "Run a serial Harness-controlled Coordinator loop. To restart a failed TaskOrder listed in Operation status retryable_task_ids, pass retry_task_id. Harness rejects its settled TaskResult and makes the TaskOrder ready for a new Attempt. Return only a bounded OperationReport to the Commander.",
+    description: "Run a serial Harness-controlled Coordinator loop. To restart a failed TaskOrder listed in Operation status retryable_task_ids, pass retry_task_id. Harness releases an eligible resolved Attempt or rejects its failed TaskResult and makes the exact TaskOrder ready for a new Attempt. Return only a bounded OperationReport to the Commander.",
     parameters: Type.Object({ operation_id: Type.String(), retry_task_id: Type.Optional(Type.String()), model: Type.Optional(Type.String()) }),
     execute: async (_id: string, input: { operation_id: string; retry_task_id?: string; model?: string }, signal?: AbortSignal, _onUpdate?: any, ctx?: any) => {
       const runCwd = ctx?.cwd ?? process.cwd();

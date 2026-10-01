@@ -7,10 +7,11 @@ import { join } from "node:path";
 import harness from "../extensions/pi-harness.ts";
 import { trackControlPi } from "./helpers/control-state-isolation.mjs";
 import { readControlState } from "../lib/control-state-store.mjs";
-import { createOperation as registerOperation } from "../lib/operation.mjs";
+import { createMission } from "../lib/mission.mjs";
+import { createOperation as registerOperation, recordTaskResult, rejectTaskResult } from "../lib/operation.mjs";
 import { coordinatorPrompt, coordinatorState, MAX_COORDINATOR_TURNS, operationBrief, operationReport, parseCoordinatorDecision, runOperation } from "../lib/operation-runner.mjs";
 import { cancelCoordinateTasks, executeCoordinateTask, executeCoordinatorTurn, hasActiveCoordinateTasks } from "../lib/coordinator.mjs";
-import { blockGraphTask, createTaskGraph, TASK_GRAPH_ENTRY, validateTaskGraph } from "../lib/task-graph.mjs";
+import { blockGraphTask, claimTask, reconcileTaskGraph, recordTaskGraphResult, rejectGraphTask, createTaskGraph, TASK_GRAPH_ENTRY, validateTaskGraph } from "../lib/task-graph.mjs";
 import { readEvidence, storeEvidence } from "../lib/evidence.mjs";
 import * as attemptLedgerApi from "../lib/attempt-ledger.mjs";
 
@@ -1039,4 +1040,117 @@ test("session_start keeps new Coordinator dispatch fenced until the old child se
     await pi.shutdown();
     if (previous === undefined) delete globalThis[key]; else globalThis[key] = previous;
   }
+});
+
+async function recoveryPi({ worker = false, refs = [{ child_id: "recover-child", role: "research" }], disposition, stale = false, exhausted = false } = {}) {
+  let operation = createOperation({ mission_id: "M-recover", operation_id: "O-1", objective: "Recover the exact attempt.", required_task_ids: ["T-1"], task_intents: { "T-1": "Inspect lib/coordinator.mjs" }, ...(worker ? { task_specs: { "T-1": { owner: "worker", permission: "write", verification: "node --check lib/coordinator.mjs" } } } : {}) });
+  let graph = createTaskGraph(operation), ledger = {};
+  if (stale || exhausted) {
+    graph = claimTask(graph, operation, "T-1");
+    operation = recordTaskResult(operation, { version: 1, operation_id: "O-1", task_id: "T-1", execution_status: "execution_complete", verification_status: "failed", evidence_refs: [] });
+    graph = recordTaskGraphResult(graph, operation, "T-1");
+    ledger = attemptLedgerApi.reconcileAttemptLedger({}, { "O-1": operation }, { "O-1": graph });
+    operation = rejectTaskResult(operation, "T-1");
+    graph = rejectGraphTask(graph, operation, "T-1");
+  }
+  graph = reconcileTaskGraph(claimTask(graph, operation, "T-1"), operation);
+  if (disposition) graph = { ...graph, nodes: { ...graph.nodes, "T-1": { ...graph.nodes["T-1"], blocker: { ...graph.nodes["T-1"].blocker, child_disposition: disposition } } } };
+  ledger = attemptLedgerApi.reconcileAttemptLedger(ledger, { "O-1": operation }, { "O-1": graph });
+  const id = exhausted || stale ? "A-O-1-T-1-02" : "A-O-1-T-1-01";
+  for (const ref of refs) ledger = attemptLedgerApi.recordAttemptChild(ledger, id, ref);
+  const mission = createMission({ mission_id: "M-recover", objective: "Recover safely.", operation_ids: ["O-1"] });
+  process.env.PI_HARNESS_CONTROL_DIR = mkdtempSync(join(dir, "recovery-control-"));
+  const pi = fakePi([{ customType: TASK_GRAPH_ENTRY, data: { version: 2, missions: { "M-recover": mission }, operations: { "O-1": operation }, task_graphs: { "O-1": graph }, attempt_ledger: ledger } }]);
+  await pi.sessionReady;
+  await pi.commands.get("mission").handler("resume M-recover", {});
+  return { pi, id };
+}
+
+test("resolve_attempt queries every child and leaves active, unavailable and legacy Attempts unknown", async () => {
+  const key = Symbol.for("pi-subagents:manager"), previous = globalThis[key];
+  try {
+    for (const record of [{ status: "running" }, undefined]) {
+      const queries = [];
+      globalThis[key] = { getRecord: (id) => { queries.push(id); return id === "second-child" ? record : { status: "completed" }; } };
+      const { pi, id } = await recoveryPi({ worker: true, refs: [{ child_id: "recover-child", role: "worker" }, { child_id: "second-child", role: "reviewer" }], disposition: { branch_status: "preserved", branch: "pi-agent-partial", worktree_status: "unknown" } });
+      const before = readControlState().attempt_ledger[id];
+      await assert.rejects(call(pi, "pi_harness_operation", { action: "resolve_attempt", operation_id: "O-1", attempt_id: id }), /terminal|active|unavailable/);
+      assert.deepEqual(queries, ["recover-child", "second-child"]);
+      assert.deepEqual(readControlState().attempt_ledger[id], before);
+      await pi.shutdown();
+    }
+    const { pi, id } = await recoveryPi({ refs: [] });
+    await assert.rejects(call(pi, "pi_harness_operation", { action: "resolve_attempt", operation_id: "O-1", attempt_id: id }), /child reference/);
+    assert.equal(readControlState().attempt_ledger[id].status, "unknown");
+    await assert.rejects(call(pi, "pi_harness_operation", { action: "resolve_attempt", operation_id: "O-1" }), /exact|attempt_id/);
+    await assert.rejects(call(pi, "pi_harness_operation", { action: "resolve_attempt", operation_id: "O-1", attempt_id: "foreign" }), /exact|Attempt/);
+    await pi.shutdown();
+  } finally { if (previous === undefined) delete globalThis[key]; else globalThis[key] = previous; }
+});
+
+test("resolve_attempt records terminal outcomes but preserved or unknown Worker branches stay blocked", async () => {
+  const key = Symbol.for("pi-subagents:manager"), previous = globalThis[key];
+  try {
+    for (const disposition of [{ branch_status: "preserved", branch: "pi-agent-partial", worktree_status: "unknown" }, { branch_status: "unknown", worktree_status: "unknown" }, undefined]) {
+      globalThis[key] = { getRecord: () => ({ status: "stopped", ...(disposition ? { child_disposition: disposition } : {}) }) };
+      const { pi, id } = await recoveryPi({ worker: true, refs: [{ child_id: "recover-child", role: "worker" }], disposition });
+      const report = await call(pi, "pi_harness_operation", { action: "resolve_attempt", operation_id: "O-1", attempt_id: id });
+      assert.deepEqual(report.retryable_task_ids, []);
+      const snapshot = readControlState();
+      assert.equal(snapshot.attempt_ledger[id].status, "terminal");
+      assert.equal(snapshot.attempt_ledger[id].child_resolutions[0].child_status, "stopped");
+      assert.ok(Number.isFinite(Date.parse(snapshot.attempt_ledger[id].child_resolutions[0].observed_at)));
+      assert.deepEqual(snapshot.attempt_ledger[id].child_disposition, disposition);
+      assert.deepEqual(snapshot.task_graphs["O-1"].nodes["T-1"].blocker.child_disposition, disposition);
+      await assert.rejects(call(pi, "pi_harness_run_operation", { operation_id: "O-1", retry_task_id: "T-1" }), /branch|disposition|child/);
+      assert.deepEqual(readControlState().operations["O-1"].task_results, {});
+      await pi.shutdown();
+    }
+  } finally { if (previous === undefined) delete globalThis[key]; else globalThis[key] = previous; }
+});
+
+test("resolve_attempt permits exact retry and prior Attempt remains terminal without a fabricated TaskResult", async () => {
+  const key = Symbol.for("pi-subagents:manager"), previous = globalThis[key];
+  globalThis[key] = { getRecord: () => ({ status: "stopped", child_disposition: { branch_status: "not_reported", worktree_status: "unknown" } }) };
+  const { pi, id } = await recoveryPi({ worker: true, refs: [{ child_id: "recover-child", role: "worker" }, { child_id: "review-child", role: "reviewer" }] });
+  let sequence = 0, duringDispatch;
+  pi.events.on("subagents:rpc:spawn", (request) => {
+    const child_id = `retry-${++sequence}`;
+    request.options.onSpawned(child_id);
+    pi.events.emit(`subagents:rpc:spawn:reply:${request.requestId}`, { success: true, data: { id: child_id } });
+    if (request.type === "worker") duringDispatch = readControlState();
+    queueMicrotask(() => pi.events.emit("subagents:completed", { id: child_id, status: "completed", result: request.type === "coordinator" ? (sequence === 1 ? decision("dispatch", { task_id: "T-1" }) : decision("block", { blocked_action: "inspect the failed retry", required_condition: "the Commander checks its outcome" })) : "Worker completed without a branch." }));
+  });
+  try {
+    const report = await call(pi, "pi_harness_operation", { action: "resolve_attempt", operation_id: "O-1", attempt_id: id });
+    assert.deepEqual(report.retryable_task_ids, ["T-1"]);
+    const priorAttempt = readControlState().attempt_ledger[id];
+    assert.equal(priorAttempt.child_resolutions.length, 2);
+    assert.equal(readControlState().task_graphs["O-1"].nodes["T-1"].scheduler_status, "blocked");
+    assert.deepEqual(readControlState().operations["O-1"].task_results, {});
+    await call(pi, "pi_harness_run_operation", { operation_id: "O-1", retry_task_id: "T-1" });
+    assert.equal(duringDispatch.attempt_ledger["A-O-1-T-1-02"].status, "running");
+    assert.deepEqual(duringDispatch.operations["O-1"].task_results, {});
+    assert.deepEqual(duringDispatch.attempt_ledger[id], priorAttempt);
+    assert.deepEqual(readControlState().attempt_ledger[id], priorAttempt);
+  } finally { await pi.shutdown(); if (previous === undefined) delete globalThis[key]; else globalThis[key] = previous; }
+});
+
+test("resolve_attempt cannot use stale earlier failed TaskResults or bypass exhausted-budget", async () => {
+  const key = Symbol.for("pi-subagents:manager"), previous = globalThis[key];
+  globalThis[key] = { getRecord: () => ({ status: "completed" }) };
+  try {
+    const { pi, id } = await recoveryPi({ stale: true });
+    const before = readControlState();
+    assert.equal(before.attempt_ledger[id].status, "unknown");
+    assert.deepEqual((await call(pi, "pi_harness_operation", { action: "status", operation_id: "O-1" })).retryable_task_ids, []);
+    await assert.rejects(call(pi, "pi_harness_run_operation", { operation_id: "O-1", retry_task_id: "T-1" }), /budget|unresolved|child/);
+    await call(pi, "pi_harness_operation", { action: "resolve_attempt", operation_id: "O-1", attempt_id: id });
+    const after = readControlState();
+    assert.equal(after.attempt_ledger[id].status, "terminal");
+    assert.deepEqual(after.operations["O-1"].task_results, before.operations["O-1"].task_results);
+    assert.deepEqual((await call(pi, "pi_harness_operation", { action: "status", operation_id: "O-1" })).retryable_task_ids, []);
+    await assert.rejects(call(pi, "pi_harness_run_operation", { operation_id: "O-1", retry_task_id: "T-1" }), /budget/);
+    await pi.shutdown();
+  } finally { if (previous === undefined) delete globalThis[key]; else globalThis[key] = previous; }
 });

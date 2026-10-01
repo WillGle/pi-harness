@@ -1,3 +1,5 @@
+import * as graphApi from "../lib/task-graph.mjs";
+import * as attemptApi from "../lib/attempt-ledger.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createOperation, recordTaskResult, acceptTaskResult, rejectTaskResult, acceptOperationCriterion } from "../lib/operation.mjs";
@@ -97,4 +99,35 @@ test("spawn rollback, explicit Blocker, restore reconciliation and Operation cri
   assert.equal(status(migrated, "T-1"), "ready");
   assert.throws(() => acceptOperationCriterion(op, "The Coordinator checked the results.", []), /Evidence/);
   assert.equal(op.status, "open");
+});
+
+test("unresolved unknown Attempt cannot release a blocked TaskOrder", () => {
+  const op = { ...operation(), mission_id: "M-1" };
+  const graph = reconcileTaskGraph(claimTask(createTaskGraph(op), op, "T-1"), op);
+  const ledger = attemptApi.reconcileAttemptLedger({}, { O: op }, { O: graph });
+  assert.throws(() => graphApi.releaseResolvedTaskForRetry(graph, op, "T-1", ledger), /resolved|terminal/);
+  assert.equal(graph.nodes["T-1"].scheduler_status, "blocked");
+});
+
+test("resolved latest Attempt releases only within budget and safe Worker disposition", () => {
+  const op = { ...operation(), mission_id: "M-1" }, id = "A-O-T-1-01";
+  const graph = reconcileTaskGraph(claimTask(createTaskGraph(op), op, "T-1"), op);
+  let ledger = attemptApi.recordAttemptChild(attemptApi.reconcileAttemptLedger({}, { O: op }, { O: graph }), id, { child_id: "worker-1", role: "worker" });
+  const observation = { child_id: "worker-1", source: "pi-subagents", child_status: "stopped", observed_at: "2026-10-01T00:00:00.000Z", child_disposition: { branch_status: "not_reported", worktree_status: "unknown" } };
+  const resolved = attemptApi.resolveUnknownAttempt(ledger, id, [observation]);
+  const ready = graphApi.releaseResolvedTaskForRetry(graph, op, "T-1", resolved);
+  assert.equal(ready.nodes["T-1"].scheduler_status, "ready");
+  assert.equal(ready.nodes["T-1"].attempts, 1);
+  assert.deepEqual(op.task_results, {});
+  assert.equal(resolved[id].status, "terminal");
+  for (const disposition of [undefined, { branch_status: "unknown", worktree_status: "unknown" }, { branch_status: "preserved", branch: "pi-agent-partial", worktree_status: "unknown" }]) {
+    const unsafe = attemptApi.resolveUnknownAttempt(ledger, id, [{ ...observation, child_disposition: disposition }]);
+    assert.throws(() => graphApi.releaseResolvedTaskForRetry(graph, op, "T-1", unsafe), /branch|disposition/);
+  }
+  const preserved = { branch_status: "preserved", branch: "pi-agent-partial", worktree_status: "unknown" };
+  assert.throws(() => graphApi.releaseResolvedTaskForRetry(graph, op, "T-1", { ...resolved, [id]: { ...resolved[id], child_disposition: preserved } }), /branch|disposition/);
+  assert.throws(() => graphApi.releaseResolvedTaskForRetry({ ...graph, nodes: { ...graph.nodes, "T-1": { ...graph.nodes["T-1"], blocker: { ...graph.nodes["T-1"].blocker, child_disposition: preserved } } } }, op, "T-1", resolved), /branch|disposition/);
+  const second = reconcileTaskGraph(claimTask(ready, op, "T-1"), op);
+  ledger = attemptApi.reconcileAttemptLedger(resolved, { O: op }, { O: second });
+  assert.throws(() => graphApi.releaseResolvedTaskForRetry(second, op, "T-1", ledger), /budget|resolved|terminal/);
 });

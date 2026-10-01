@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import * as attemptApi from "../lib/attempt-ledger.mjs";
 import { reconcileAttemptLedger, validateAttemptLedger } from "../lib/attempt-ledger.mjs";
 import { attachOperation, createMission, missionIsClosable, missionSituationBoard, validateMissionOwnership } from "../lib/mission.mjs";
 import { createOperation, recordTaskResult, terminalizeOperation } from "../lib/operation.mjs";
@@ -155,4 +156,40 @@ test("supersession needs persisted replacement lineage and waiver is a terminal 
   assert.equal(waived.nodes["T-1"].scheduler_status, "waived");
   assert.throws(() => waiveGraphTask(state.taskGraphs["O-1"], state.operations["O-1"], "T-1", { authority_type: "worker", reason: "A Worker cannot waive a TaskOrder." }), /invalid Task disposition/);
   assert.equal(missionIsClosable(state.missions["M-1"], state.operations, { ...state.taskGraphs, "O-1": superseded }), false, "the replacement TaskOrder is unresolved");
+});
+
+function unknownAttemptFixture() {
+  const state = fixture();
+  state.taskGraphs["O-1"] = reconcileTaskGraph(claimTask(state.taskGraphs["O-1"], state.operations["O-1"], "T-1"), state.operations["O-1"]);
+  return { ...state, ledger: reconcileAttemptLedger({}, state.operations, state.taskGraphs) };
+}
+const terminalObservation = (child_id, fields = {}) => ({ child_id, source: "pi-subagents", child_status: "completed", observed_at: "2026-10-01T00:00:00.000Z", ...fields });
+
+test("unknown Attempt without child references remains unresolved", () => {
+  const { ledger } = unknownAttemptFixture();
+  assert.throws(() => attemptApi.resolveUnknownAttempt(ledger, "A-O-1-T-1-01", []), /child reference/);
+  assert.equal(ledger["A-O-1-T-1-01"].status, "unknown");
+});
+
+test("terminal evidence resolves only the exact unknown Attempt with every child reference", () => {
+  const { ledger, operations, taskGraphs } = unknownAttemptFixture(), id = "A-O-1-T-1-01";
+  let owned = attemptApi.recordAttemptChild(ledger, id, { child_id: "worker-1", role: "worker" });
+  owned = attemptApi.recordAttemptChild(owned, id, { child_id: "reviewer-1", role: "reviewer" });
+  const observations = [terminalObservation("worker-1", { child_disposition: { branch_status: "not_reported", worktree_status: "unknown" } }), terminalObservation("reviewer-1")];
+  assert.throws(() => attemptApi.resolveUnknownAttempt(owned, "foreign", observations), /exact|existing/);
+  for (const invalid of [observations.slice(0, 1), [observations[0], ,], [observations[0], observations[0]], [...observations, terminalObservation("foreign")], [terminalObservation("worker-1", { child_status: "running" }), observations[1]], [terminalObservation("worker-1", { observed_at: "bad" }), observations[1]], [terminalObservation("worker-1", { child_disposition: { branch_status: "removed" } }), observations[1]]]) assert.throws(() => attemptApi.resolveUnknownAttempt(owned, id, invalid));
+  const resolved = attemptApi.resolveUnknownAttempt(owned, id, observations);
+  assert.equal(resolved[id].status, "terminal");
+  assert.equal(resolved[id].failure_code, "HARNESS_SESSION_INTERRUPTED");
+  assert.deepEqual(resolved[id].child_refs, owned[id].child_refs);
+  assert.deepEqual(resolved[id].child_resolutions, observations);
+  assert.equal(owned[id].status, "unknown");
+  assert.deepEqual(attemptApi.resolveUnknownAttempt(resolved, id, []), resolved);
+  assert.throws(() => attemptApi.recordAttemptChild(resolved, id, { child_id: "late-child", role: "reviewer" }), /resolved|immutable/);
+  assert.deepEqual(reconcileAttemptLedger(resolved, operations, taskGraphs), resolved, "resolved Attempt remains in history");
+});
+
+test("Mission closure still rejects an unknown Attempt after its TaskOrder is resolved", () => {
+  const { ledger, missions, operations, taskGraphs } = unknownAttemptFixture();
+  assert.equal(missionIsClosable(missions["M-1"], operations, taskGraphs, ledger), false);
 });
