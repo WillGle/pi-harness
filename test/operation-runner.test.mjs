@@ -543,6 +543,8 @@ test("goal cancellation aborts the Coordinator turn; an unrelated turn is unaffe
   await pi.commands.get("goal").handler("Mission objective.", {});
   await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-1", objective: "Check reports.", required_task_ids: ["T-1"], task_intents: { "T-1": "Inspect `lib/coordinator.mjs`." } });
   const managed = call(pi, "pi_harness_run_operation", { operation_id: "O-1" });
+  for (let i = 0; i < 20 && requests.size < 1; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(requests.size, 1, "managed dispatch must pass admission before an unrelated child starts");
   const unrelated = executeCoordinatorTurn(pi, "Unrelated OperationBrief", { groupId: "other", timeout: 1000, rpcTimeout: 1000 });
   for (let i = 0; i < 20 && requests.size < 2; i++) await new Promise((resolve) => setTimeout(resolve, 5));
   assert.equal(requests.size, 2);
@@ -939,4 +941,102 @@ test("Commander findings omit model-authored execution bytes and Evidence refere
   const report=operationReport(operation,coordinatorState(operation));
   assert.equal(report.major_findings[0].statement,"Registered criterion.");
   assert.doesNotMatch(JSON.stringify(report),/PRIVATE/);
+});
+
+
+test("child references survive Attempt reconciliation", async () => {
+  const pi = fakePi();
+  const spawned = [], callbackErrors = [];
+  pi.events.on("subagents:rpc:spawn", (request) => {
+    const id = `durable-${spawned.length + 1}`;
+    spawned.push({ id, role: request.type });
+    const result = request.type === "coordinator" ? (spawned.length === 1 ? decision("dispatch", { task_id: "T-1" }) : decision("block", { blocked_action: "review the result", required_condition: "the Coordinator reviews verification" })) : "The selected report.";
+    request.options.onSpawned(id);
+    pi.events.emit(`subagents:rpc:spawn:reply:${request.requestId}`, { success: true, data: { id } });
+    if (request.type !== "coordinator") {
+      const ledger = readControlState().attempt_ledger;
+      try { assert.deepEqual(ledger["A-O-1-T-1-01"].child_refs?.at(-1), { child_id: id, role: request.type }, "child reference is durable before completion"); }
+      catch (error) { callbackErrors.push(error); }
+    }
+    setImmediate(() => pi.events.emit("subagents:completed", { id, status: "completed", result }));
+  });
+  try {
+    await startMission(pi, "Persist exact child ownership.");
+    await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-1", objective: "Inspect ownership.", required_task_ids: ["T-1"], task_intents: { "T-1": "Inspect lib/coordinator.mjs" } });
+    await call(pi, "pi_harness_run_operation", { operation_id: "O-1" });
+    if (callbackErrors.length) throw callbackErrors[0];
+    const snapshot = readControlState();
+    assert.deepEqual(snapshot.attempt_ledger["A-O-1-T-1-01"].child_refs, [{ child_id: "durable-2", role: "research" }, { child_id: "durable-3", role: "reviewer" }]);
+    await pi.sessionStart([]);
+    const restored = pi.entries.filter((entry) => entry.customType === TASK_GRAPH_ENTRY).at(-1).data;
+    assert.deepEqual(restored.attempt_ledger["A-O-1-T-1-01"].child_refs, snapshot.attempt_ledger["A-O-1-T-1-01"].child_refs);
+    const id = "A-O-1-T-1-01";
+    const initial = snapshot.attempt_ledger;
+    assert.deepEqual(attemptLedgerApi.recordAttemptChild(initial, id, { child_id: "durable-2", role: "research" }), initial);
+    assert.throws(() => attemptLedgerApi.recordAttemptChild(initial, id, { child_id: "durable-2", role: "worker" }));
+    for (const ref of [{ child_id: "", role: "worker" }, { child_id: "x".repeat(161), role: "worker" }, { child_id: "foreign", role: "coordinator" }]) assert.throws(() => attemptLedgerApi.recordAttemptChild(initial, id, ref));
+    let bounded = initial;
+    for (let n = 0; n < 6; n++) bounded = attemptLedgerApi.recordAttemptChild(bounded, id, { child_id: `extra-${n}`, role: "reviewer" });
+    assert.equal(bounded[id].child_refs.length, 8);
+    assert.throws(() => attemptLedgerApi.recordAttemptChild(bounded, id, { child_id: "ninth", role: "reviewer" }));
+    assert.throws(() => attemptLedgerApi.validateAttemptLedger({ ...initial, [id]: { ...initial[id], child_refs: [{ child_id: "x", role: "coordinator" }] } }, snapshot.operations, snapshot.task_graphs));
+  } finally { await pi.shutdown(); }
+});
+
+test("session_start keeps new Coordinator dispatch fenced until the old child settles", async () => {
+  const pi = fakePi();
+  pi.events.mockSettlement = false;
+  const key = Symbol.for("pi-subagents:manager"), previous = globalThis[key];
+  const records = new Map(), requests = [];
+  globalThis[key] = { getRecord: (id) => records.get(id) };
+  let oldChild, releaseOldChild, oldRun;
+  pi.events.on("subagents:rpc:spawn", (request) => {
+    const id = `session-child-${requests.length + 1}`;
+    requests.push({ id, request });
+    if (request.type === "research") {
+      oldChild = id;
+      records.set(id, { status: "running", promise: new Promise((resolve) => { releaseOldChild = resolve; }) });
+    } else records.set(id, { status: "completed", promise: Promise.resolve() });
+    request.options.onSpawned(id);
+    pi.events.emit(`subagents:rpc:spawn:reply:${request.requestId}`, { success: true, data: { id } });
+    if (request.type === "coordinator") {
+      const operation_id = request.prompt.includes('"operation_id":"O-NEW"') ? "O-NEW" : "O-1";
+      const result = operation_id === "O-1" ? decision("dispatch", { task_id: "T-1" }) : JSON.stringify({ version: 1, operation_id, action: "block", reason: "The new run reached the Coordinator.", blocked_action: "inspect the new task", required_condition: "the Commander supplies its source" });
+      queueMicrotask(() => pi.events.emit("subagents:completed", { id, status: "completed", result }));
+    }
+  });
+  try {
+    await startMission(pi, "Recover interrupted ownership.");
+    await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-1", objective: "Inspect the old task.", required_task_ids: ["T-1"], task_intents: { "T-1": "Inspect lib/coordinator.mjs" } });
+    oldRun = call(pi, "pi_harness_run_operation", { operation_id: "O-1" });
+    for (let n = 0; n < 100 && !oldChild; n++) await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.ok(oldChild);
+    const missionId = readControlState().operations["O-1"].mission_id;
+    await pi.sessionStart([]);
+    await pi.commands.get("mission").handler(`resume ${missionId}`, {});
+    await call(pi, "pi_harness_operation", { action: "create", operation_id: "O-NEW", objective: "Inspect the new task.", required_task_ids: ["T-NEW"], task_intents: { "T-NEW": "Inspect lib/coordinator.mjs" } });
+    const before = structuredClone(pi.entries), spawnedBefore = requests.length;
+    assert.equal(hasActiveCoordinateTasks(), true);
+    await assert.rejects(call(pi, "pi_harness_run_operation", { operation_id: "O-NEW" }), /child.*settle|settle.*child/i);
+    assert.equal(requests.length, spawnedBefore, "admission must reject before spawning a Coordinator or Worker");
+    const status = await call(pi, "pi_harness_operation", { action: "status", operation_id: "O-1" });
+    assert.deepEqual(status.blocked_task_ids, ["T-1"]);
+    records.get(oldChild).status = "completed";
+    releaseOldChild();
+    pi.events.emit("subagents:completed", { id: oldChild, status: "completed", result: "Late private report." });
+    await oldRun;
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(pi.entries, before, "late old-session callbacks cannot mutate restored state");
+    assert.equal(readControlState().attempt_ledger["A-O-1-T-1-01"].status, "unknown");
+    assert.equal(hasActiveCoordinateTasks(), false);
+    const report = await call(pi, "pi_harness_run_operation", { operation_id: "O-NEW" });
+    assert.equal(report.operation_id, "O-NEW");
+    assert.ok(requests.length > spawnedBefore);
+  } finally {
+    releaseOldChild?.();
+    if (oldChild) pi.events.emit("subagents:completed", { id: oldChild, status: "completed", result: "Cleanup." });
+    await oldRun;
+    await pi.shutdown();
+    if (previous === undefined) delete globalThis[key]; else globalThis[key] = previous;
+  }
 });

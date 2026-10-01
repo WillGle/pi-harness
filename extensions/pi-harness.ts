@@ -1,7 +1,7 @@
 import { contextTelemetry, deterministicContextEdits, installStablePrompt, stablePromptSections } from "../lib/context-economics.mjs";
 import { acquireControlLease, assertControlLease, readControlState, writeControlState } from "../lib/control-state-store.mjs";
 import { MISSION_ENTRY, attachOperation, createMission, missionIsClosable, missionSituationBoard, validateMissionOwnership } from "../lib/mission.mjs";
-import { reconcileAttemptLedger, rollbackUnstartedAttempt } from "../lib/attempt-ledger.mjs";
+import { attemptId, recordAttemptChild, reconcileAttemptLedger, rollbackUnstartedAttempt } from "../lib/attempt-ledger.mjs";
 import { assertSupportedPlatform } from "../lib/platform.mjs";
 import process from "node:process";
 import { randomUUID } from "node:crypto";
@@ -730,6 +730,7 @@ export default function harness(pi: Pi): void {
       const runCwd = ctx?.cwd ?? process.cwd();
       const id = input.operation_id;
       const operation = Object.hasOwn(operations, id) ? operations[id] : undefined;
+      if (hasActiveCoordinateTasks()) throw new Error("Coordinator dispatch is blocked until the previously managed child settles");
       if (!operation || operation.status !== "open" || !selectedMissionId || operation.mission_id !== selectedMissionId || missions[selectedMissionId]?.status !== "active" || !controlLease || activeOperationRuns.size) throw new Error("An open Operation owned by the selected Mission and an idle serial Scheduler are required");
       const controller = new AbortController();
       const abort = () => controller.abort();
@@ -760,8 +761,18 @@ export default function harness(pi: Pi): void {
       try {
         const report = await runOperation(operation, {
           turn: (prompt: string) => executeCoordinatorTurn(pi, prompt, { cwd: runCwd, onUsage: (usage: any) => recordUsage(usage, { role: "coordinator" }), model: input.model, groupId: runId, signal: controller.signal }),
-          dispatch: async (task: any, progress: any) => promoteTaskResult(await executeCoordinateTask(pi, validateTask(task), { cwd: runCwd, groupId: runId, signal: controller.signal, modelRegistry: ctx?.modelRegistry,
-            onVerificationStart: progress.onVerificationStart, timeout: managedTaskTimeout(task.owner), reviewerTimeout: managedTaskTimeout("reviewer"), onUsage: (usage: any, provenance: Record<string, any>) => recordUsage(usage, { task_id: task.task_id, ...provenance }) })),
+          dispatch: async (task: any, progress: any) => {
+            const claimedAttemptId = attemptId(id, task.task_id, taskGraphs[id].nodes[task.task_id].attempts);
+            return promoteTaskResult(await executeCoordinateTask(pi, validateTask(task), { cwd: runCwd, groupId: runId, signal: controller.signal, modelRegistry: ctx?.modelRegistry,
+              onChildStarted: (reference: { child_id: string; role: string }) => {
+                if (runEpoch !== sessionEpoch) return;
+                const nextLedger = recordAttemptChild(attemptLedger, claimedAttemptId, reference);
+                if (nextLedger === attemptLedger) return;
+                attemptLedger = nextLedger;
+                persistScheduler();
+              },
+              onVerificationStart: progress.onVerificationStart, timeout: managedTaskTimeout(task.owner), reviewerTimeout: managedTaskTimeout("reviewer"), onUsage: (usage: any, provenance: Record<string, any>) => recordUsage(usage, { task_id: task.task_id, ...provenance }) }));
+          },
           save,
           rollbackAttempt: (attemptId: string) => {
             if (runEpoch !== sessionEpoch) throw new Error("The Operation session changed before the Attempt rollback");

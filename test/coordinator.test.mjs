@@ -6,6 +6,7 @@ import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, sy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
+import * as coordinatorApi from "../lib/coordinator.mjs";
 import { readEvidence } from "../lib/evidence.mjs";
 import { promoteTaskResult } from "../lib/communication.mjs";
 import { registerRpcHandlers } from "../node_modules/@tintinweb/pi-subagents/dist/cross-extension-rpc.js";
@@ -1201,4 +1202,45 @@ test("fake-clock Reviewer retains its 120s default when execution budget is 300s
     assert.equal((await pending).taskResult.verification_status,"blocked");
     assert.equal(hasActiveCoordinateTasks(),false);
   } finally {t.mock.timers.reset();reviewer.resolve();restoreManager();}
+});
+
+
+test("executeCoordinateTask records each spawned child against the current Attempt", async () => {
+  const repo = makeRepo("pi-child-correlation-");
+  const events = new EventBus();
+  events.mockSettlement = false;
+  const records = new Map(), references = [], callbackErrors = [];
+  const restoreManager = installManagerRecords(records);
+  let sequence = 0;
+  events.on("subagents:rpc:spawn", (request) => {
+    const id = `managed-${++sequence}`;
+    const child = deferred();
+    records.set(id, { status: "running", promise: child.promise, result: "PRIVATE", error: "/tmp/private" });
+    request.options.onSpawned(id);
+    request.options.onSpawned(id);
+    events.emit(`subagents:rpc:spawn:reply:${request.requestId}`, { success: true, data: { id } });
+    queueMicrotask(() => {
+      try {
+        assert.deepEqual(references.at(-1), { child_id: id, role: request.type }, "spawn acknowledgement records ownership before settlement");
+        assert.deepEqual(coordinatorApi.inspectCoordinateChild(id), { state: "active" });
+      } catch (error) { callbackErrors.push(error); }
+      const packet = request.type.endsWith("reviewer") ? JSON.parse(request.prompt.slice(request.prompt.indexOf('{"version"'))) : undefined;
+      const result = packet ? JSON.stringify({ version: 1, task_id: packet.task_id, status: "verified", summary: "The criterion passed.", criteria: packet.acceptance_criteria.map((criterion) => ({ criterion, status: "passed", finding: "The report supports the criterion.", evidence_refs: [packet.evidence[0].reference] })) }) : "A selected report.";
+      records.get(id).status = "completed";
+      child.resolve();
+      events.emit("subagents:completed", { id, status: "completed", result });
+    });
+  });
+  try {
+    await executeCoordinateTask({ events }, { owner: "worker", permission: "write", scope: "Edit file.txt", verification: "true" }, { cwd: repo, onChildStarted: (ref) => references.push(ref) });
+    await executeCoordinateTask({ events }, { task_id: "T-review", owner: "research", permission: "read", scope: "Inspect file.txt", verification: "Inspect report.", acceptance_criteria: ["The report is clear.", "The report is safe."], review_profile: { "The report is safe.": "security" } }, { cwd: repo, onChildStarted: (ref) => references.push(ref), modelRegistry: { getAvailable: () => [{ provider: "openai", id: "gpt-daybreak-blue-latest" }] } });
+    if (callbackErrors.length) throw callbackErrors[0];
+    assert.deepEqual(references, [{ child_id: "managed-1", role: "worker" }, { child_id: "managed-2", role: "research" }, { child_id: "managed-3", role: "reviewer" }, { child_id: "managed-4", role: "security-reviewer" }]);
+    assert.deepEqual(coordinatorApi.inspectCoordinateChild("managed-1"), { state: "terminal", child_status: "completed" });
+    records.get("managed-1").child_disposition = { branch_status: "preserved", branch: "pi-agent-selected", worktree_status: "unknown" };
+    assert.deepEqual(coordinatorApi.inspectCoordinateChild("managed-1").child_disposition, records.get("managed-1").child_disposition);
+    records.get("managed-1").child_disposition.path = "/tmp/private";
+    assert.deepEqual(coordinatorApi.inspectCoordinateChild("managed-1"), { state: "terminal", child_status: "completed" });
+    assert.deepEqual(coordinatorApi.inspectCoordinateChild("missing"), { state: "unavailable" });
+  } finally { restoreManager(); rmSync(repo, { recursive: true, force: true }); }
 });
