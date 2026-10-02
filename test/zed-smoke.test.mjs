@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { defaultPiEnv } from "./helpers/default-pi.mjs";
-import { isPlanAllowedTool } from "../lib/state.mjs";
+import { isPlanAllowedTool } from "../lib/plan.mjs";
 
 const validUpdates = new Set([
   "user_message_chunk", "agent_message_chunk", "agent_thought_chunk", "tool_call", "tool_call_update",

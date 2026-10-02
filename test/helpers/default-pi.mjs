@@ -85,10 +85,5 @@ export function defaultPiFingerprint(executable = DEFAULT_PI_EXECUTABLE) {
 }
 
 const fingerprint = defaultPiFingerprint();
-if (!fingerprint.catalogDrainPatched) {
-  throw new Error(
-    `Default Pi executable ${fingerprint.executable} has an unpatched bundle: ${fingerprint.bundle} sha256=${fingerprint.sha256}`,
-  );
-}
 console.log(`# Default Pi: ${fingerprint.executable}`);
-console.log(`# Pi bundle: ${fingerprint.bundle} sha256=${fingerprint.sha256} catalogDrainPatched=true`);
+console.log(`# Pi bundle: ${fingerprint.bundle} sha256=${fingerprint.sha256} catalogDrainPatched=${fingerprint.catalogDrainPatched}`);

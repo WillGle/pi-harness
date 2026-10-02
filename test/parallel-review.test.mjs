@@ -4,9 +4,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { executeCoordinateTask } from "../lib/coordinator.mjs";
-import { createOperation } from "../lib/operation.mjs";
-import { runOperation } from "../lib/operation-runner.mjs";
+import { executeTask } from "../lib/executor.mjs";
 
 const root = mkdtempSync(join(tmpdir(), "pi-parallel-review-"));
 const prior = process.env.PI_HARNESS_EVIDENCE_DIR;
@@ -37,18 +35,12 @@ test("cancellation aborts both active Reviewers without a ghost-running Task", a
       req.options.signal.addEventListener("abort", () => events.emit("subagents:failed", { id, status: "stopped" }), { once: true });
     }
   });
-  const operation = createOperation({ operation_id: "O-P", objective: "Review reports.", task_specs: Object.fromEntries(tasks.map(({task_id,scope,...spec})=>[task_id,spec])), required_task_ids: ["T-1", "T-2"], task_intents: { "T-1": "Review T-1", "T-2": "Review T-2" } });
-  const run = runOperation(operation, {
-    turn: async () => JSON.stringify({ version: 1, operation_id: "O-P", action: "dispatch_batch", reason: "Both Tasks are ready.", task_ids: tasks.map(({ task_id }) => task_id) }),
-    dispatch: (task) => executeCoordinateTask({ events }, task, { cwd: process.cwd(), groupId: "O-P", signal: controller.signal, timeout: 1500, rpcTimeout: 1000 }).then((record) => record.taskResult),
-    save: (_op, _state, graph) => { last = graph; },
-  }, { signal: controller.signal });
+  const run = Promise.all(tasks.map((task) => executeTask({ events }, task, { cwd: process.cwd(), groupId: "review-wave", signal: controller.signal, timeout: 1500, rpcTimeout: 1000 }).then((record) => record.taskResult)));
   for (let i = 0; i < 30 && reviews.length < 2; i++) await tick();
   assert.equal(reviews.length, 2);
   controller.abort();
   assert.ok(reviews.every((review) => review.options.signal.aborted));
-  assert.equal((await run).status, "blocked");
-  assert.deepEqual(Object.values(last.nodes).map((node) => node.scheduler_status), ["blocked", "blocked"]);
+  assert.ok((await run).every((receipt) => receipt.verification_status === "blocked"));
 });
 
 test("parallel default/security Reviewers see only their own Task Evidence and model", async () => {
@@ -67,14 +59,8 @@ test("parallel default/security Reviewers see only their own Task Evidence and m
     { task_id: "T-1", owner: "research", permission: "read", scope: "Review T-1.", verification: "Check T-1 report.", acceptance_criteria: ["T-1 report is valid."] },
     { task_id: "T-2", owner: "research", permission: "read", scope: "Review T-2.", verification: "Check T-2 report.", acceptance_criteria: ["T-2 report is valid."], review_profile: { "T-2 report is valid.": "security" } },
   ];
-  const op = createOperation({ operation_id: "O-P", objective: "Review reports.", task_specs: Object.fromEntries(tasks.map(({task_id,scope,...spec})=>[task_id,spec])), required_task_ids: ["T-1", "T-2"], task_intents: { "T-1": "Review T-1.", "T-2": "Review T-2." } });
   try {
-    const run = runOperation(op, {
-      turn: async (_prompt) => requested.length === 0 ? JSON.stringify({ version: 1, operation_id: "O-P", action: "dispatch_batch", reason: "Both Tasks are ready.", task_ids: tasks.map(({ task_id }) => task_id) })
-        : JSON.stringify({ version: 1, operation_id: "O-P", action: "block", reason: "The Coordinator will accept each Task separately.", blocked_action: "accept the available TaskResults", required_condition: "the Coordinator reviews each TaskResult separately" }),
-      dispatch: (task) => executeCoordinateTask({ events }, task, { cwd: process.cwd(), timeout: 1500, rpcTimeout: 1000, modelRegistry: { getAvailable: () => [{ provider: "openai", id: "gpt-daybreak-blue-latest" }] } }).then((record) => record.taskResult),
-      save: (operation, _state, graph) => { final = { operation, graph }; },
-    });
+    const run = Promise.all(tasks.map((task) => executeTask({ events }, task, { cwd: process.cwd(), timeout: 1500, rpcTimeout: 1000, modelRegistry: { getAvailable: () => [{ provider: "openai", id: "gpt-daybreak-blue-latest" }] } }).then((record) => record.taskResult)));
     for (let i = 0; i < 30 && reviews.length !== 2; i++) await tick();
     assert.equal(reviews.length, 2, "both review pipelines must overlap");
     assert.deepEqual(reviews.map((item) => item.req.type).sort(), ["reviewer", "security-reviewer"]);
@@ -87,11 +73,10 @@ test("parallel default/security Reviewers see only their own Task Evidence and m
       assert.deepEqual(packet.acceptance_criteria, [`${own} report is valid.`]);
       events.emit("subagents:completed", { id, status: "completed", result: JSON.stringify({ version: 1, task_id: own, status: "verified", summary: "Selected Evidence checked.", criteria: [{ criterion: packet.acceptance_criteria[0], status: "passed", finding: "Selected Evidence checked.", evidence_refs: [packet.evidence[0].reference] }] }) });
     }
-    await run;
-    assert.deepEqual(Object.keys(final.operation.task_results).sort(), ["T-1", "T-2"]);
-    assert.equal(final.operation.task_results["T-1"].semantic_verification.criteria[0].verifier, "semantic");
-    assert.equal(final.operation.task_results["T-2"].semantic_verification.criteria[0].verifier, "security");
-    assert.deepEqual(final.operation.accepted_task_ids, [], "verification does not accept the Operation");
-    assert.deepEqual([final.graph.nodes["T-1"].scheduler_status, final.graph.nodes["T-2"].scheduler_status], ["result_available", "result_available"]);
+    const results = await run;
+    assert.deepEqual(results.map((receipt) => receipt.task_id).sort(), ["T-1", "T-2"]);
+    assert.equal(results[0].semantic_verification.criteria[0].verifier, "semantic");
+    assert.equal(results[1].semantic_verification.criteria[0].verifier, "security");
+    assert.ok(results.every((receipt) => receipt.verification_status === "verified"), "optional review checks Evidence without accepting Commander work");
   } finally { if (old === undefined) delete globalThis[symbol]; else globalThis[symbol] = old; }
 });

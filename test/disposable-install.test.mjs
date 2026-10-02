@@ -56,6 +56,12 @@ test("disposable install: Linux CLI is the default and explicit experimental Zed
     assert.equal(unpackResult.status, 0, `tar unpack failed: ${unpackResult.stderr}`);
     const packageDir = join(unpackDir, "package");
     assert.ok(existsSync(packageDir), "Unpacked package directory must exist");
+    // Pi registers local packages without installing their npm dependencies.
+    const typeboxVersion = JSON.parse(readFileSync(resolve("node_modules/typebox/package.json"), "utf8")).version;
+    const coreInstall = spawnSync("npm", ["install", "--offline", "--omit=dev", "--ignore-scripts", "--legacy-peer-deps", "--save=false", `typebox@${typeboxVersion}`], {
+      cwd: packageDir, env: { ...env, npm_config_cache: npmCache }, encoding: "utf8",
+    });
+    assert.equal(coreInstall.status, 0, `offline CLI dependency install failed: ${coreInstall.stdout} ${coreInstall.stderr}`);
 
     // Pack the ACP workspace and verify its runtime MCP extension ships in the tarball.
     const acpPackResult = spawnSync("npm", ["pack", "--workspace", "packages/pi-harness-acp", "--pack-destination", sandboxDir], {

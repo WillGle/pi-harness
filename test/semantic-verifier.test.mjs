@@ -4,10 +4,10 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { taskOrder, taskResult, promoteTaskResult } from "../lib/communication.mjs";
+import { taskOrder, taskResult } from "../lib/communication.mjs";
 import { storeEvidence, readEvidence } from "../lib/evidence.mjs";
 import { formatVerificationOrder, reviewTask, verificationPacket, validateSemanticReview, acceptedFindings } from "../lib/semantic-verifier.mjs";
-import { executeCoordinateTask, cancelCoordinateTasks, hasActiveCoordinateTasks, securityReviewModel } from "../lib/coordinator.mjs";
+import { executeTask, cancelTasks, hasActiveTasks, securityReviewModel } from "../lib/executor.mjs";
 
 const root = mkdtempSync(join(tmpdir(), "pi-semantic-test-"));
 const old = process.env.PI_HARNESS_EVIDENCE_DIR;
@@ -16,16 +16,16 @@ after(() => { if (old === undefined) delete process.env.PI_HARNESS_EVIDENCE_DIR;
 const cwd = process.cwd();
 
 function order(role = "worker", taskId = "T-1") {
-  return taskOrder({ owner: role, task_id: taskId, scope: "Review `lib/coordinator.mjs`.", verification: "npm test", permission: role === "worker" ? "write" : "read", acceptance_criteria: ["The Coordinator retains the cancellation condition."] });
+  return taskOrder({ owner: role, task_id: taskId, scope: "Review `lib/executor.mjs`.", verification: "npm test", permission: role === "worker" ? "write" : "read", acceptance_criteria: ["The Coordinator retains the cancellation condition."] });
 }
-function resultFor(orderValue, evidenceRefs) { return { task_id: orderValue.task_id, changed_paths: ["lib/coordinator.mjs"], evidence_refs: evidenceRefs }; }
+function resultFor(orderValue, evidenceRefs) { return { task_id: orderValue.task_id, changed_paths: ["lib/executor.mjs"], evidence_refs: evidenceRefs }; }
 function reviewerReply(packet, status = "passed", topLevelStatus = status === "passed" ? "verified" : status === "failed" ? "failed" : "blocked") {
   return JSON.stringify({ version: 1, task_id: packet.task_id, status: topLevelStatus, summary: "The semantic Verifier checked the criterion.", criteria: packet.acceptance_criteria.map((criterion) => ({ criterion, status, finding: "The semantic Verifier checked the selected Evidence.", evidence_refs: status === "passed" ? [packet.evidence[0].reference] : [] })) });
 }
 
 test("semantic review selects one Evidence kind and validates every criterion", async () => {
   const task = order();
-  const diff = storeEvidence({ cwd, taskId: task.task_id, kind: "diff", content: "diff --git a/lib/coordinator.mjs b/lib/coordinator.mjs" });
+  const diff = storeEvidence({ cwd, taskId: task.task_id, kind: "diff", content: "diff --git a/lib/executor.mjs b/lib/executor.mjs" });
   const gate = storeEvidence({ cwd, taskId: task.task_id, kind: "gate", content: "secret-unrelated-gate" });
   const input = resultFor(task, [gate.reference, diff.reference]);
   const packet = verificationPacket(task, input, cwd);
@@ -110,22 +110,22 @@ test("Harness-owned read-only reviewer returns verified Finding, not raw reviewe
     const id = `agent-${spawns.length}`;
     events.emit(`subagents:rpc:spawn:reply:${req.requestId}`, { success: true, data: { id } });
     queueMicrotask(() => {
-      if (req.type === "research") return events.emit("subagents:completed", { id, status: "completed", result: "`executeCoordinateTask` persists Evidence before TaskResult." });
+      if (req.type === "research") return events.emit("subagents:completed", { id, status: "completed", result: "`executeTask` persists Evidence before TaskResult." });
       const packet = JSON.parse(req.prompt.slice(req.prompt.indexOf("{\"version\"")));
       assert.ok(!req.prompt.includes("UNRELATED PRIVATE DATA"));
       assert.ok(!req.prompt.includes(unrelated.reference));
       events.emit("subagents:completed", { id, status: "completed", result: reviewerReply(packet) });
     });
   });
-  const result = await executeCoordinateTask({ events }, { owner: "research", task_id: "T-RESEARCH", scope: "Inspect `lib/coordinator.mjs`.", verification: "file evidence", permission: "read", acceptance_criteria: ["`executeCoordinateTask` persists Evidence before TaskResult."] }, { cwd, timeout: 1000, rpcTimeout: 1000 });
+  const result = await executeTask({ events }, { owner: "research", task_id: "T-RESEARCH", scope: "Inspect `lib/executor.mjs`.", verification: "file evidence", permission: "read", acceptance_criteria: ["`executeTask` persists Evidence before TaskResult."] }, { cwd, timeout: 1000, rpcTimeout: 1000 });
   assert.deepEqual(spawns.map((req) => req.type), ["research", "reviewer"]);
   assert.equal(spawns[1].options.isolation, "off");
   assert.equal(result.taskResult.verification_status, "verified");
   assert.match(result.taskResult.summary, /The research ExecutionUnit satisfied 1 verified Acceptance Criteria\./);
   assert.equal(acceptedFindings(result.taskResult)[0].source_role, "research");
   assert.equal(acceptedFindings(result.taskResult)[0].verification_status, "verified");
-  assert.ok(!JSON.stringify(promoteTaskResult(result)).includes("Research observation."));
-  assert.ok(!JSON.stringify(promoteTaskResult(result)).includes("UNRELATED PRIVATE DATA"));
+  assert.ok(!JSON.stringify(result.taskResult).includes("Research observation."));
+  assert.ok(!JSON.stringify(result.taskResult).includes("UNRELATED PRIVATE DATA"));
   const reviewer = readFileSync(".pi/agents/reviewer.md", "utf8");
   assert.match(reviewer, /tools: read, grep, find, ls/);
   assert.doesNotMatch(reviewer, /tools:.*\bbash\b/);
@@ -160,7 +160,7 @@ test("semantic and security Reviewer timeouts abort the owned child and reject l
         }
       });
       const criterion = "The report identifies a source.";
-      const result = await executeCoordinateTask({ events }, {
+      const result = await executeTask({ events }, {
         owner: "research", task_id: `T-${profile}`, operation_id: "O-timeout", scope: "Inspect report.", verification: "inspect", permission: "read",
         acceptance_criteria: [criterion], review_profile: { [criterion]: profile },
       }, { cwd, timeout: 40, reviewerTimeout: 40, rpcTimeout: 1000, modelRegistry: { getAvailable: () => { const [provider, id] = securityReviewModel().split("/"); return [{ provider, id }]; } } });
@@ -168,7 +168,7 @@ test("semantic and security Reviewer timeouts abort the owned child and reject l
       assert.equal(reviewer.req.options.signal.aborted, true);
       assert.equal(result.taskResult.verification_status, "blocked");
       assert.equal(result.taskResult.failure_code, "HARNESS_CHILD_TERMINAL_TIMEOUT");
-      assert.equal(hasActiveCoordinateTasks(), false);
+      assert.equal(hasActiveTasks(), false);
       assert.equal(events.handlers.get("subagents:completed")?.size ?? 0, 0);
       assert.equal(events.handlers.get("subagents:failed")?.size ?? 0, 0);
       events.emit("subagents:completed", { id: reviewer.id, status: "completed", result: "LATE VERIFIED" });
@@ -194,11 +194,11 @@ test("group cancellation stops only the active semantic Reviewer", async () => {
     }
   });
   const input = (task_id) => ({ owner: "research", task_id, scope: "Find report", verification: "inspect", permission: "read", acceptance_criteria: ["The report identifies a source."] });
-  const a = executeCoordinateTask({ events }, input("T-A"), { cwd, groupId: "A", timeout: 1500, rpcTimeout: 1000 });
-  const b = executeCoordinateTask({ events }, input("T-B"), { cwd, groupId: "B", timeout: 1500, rpcTimeout: 1000 });
+  const a = executeTask({ events }, input("T-A"), { cwd, groupId: "A", timeout: 1500, rpcTimeout: 1000 });
+  const b = executeTask({ events }, input("T-B"), { cwd, groupId: "B", timeout: 1500, rpcTimeout: 1000 });
   for (let i = 0; i < 20 && reviewers.size !== 2; i++) await new Promise((resolve) => setTimeout(resolve, 10));
   assert.equal(reviewers.size, 2);
-  assert.equal(cancelCoordinateTasks("A"), 1);
+  assert.equal(cancelTasks("A"), 1);
   assert.equal(reviewers.get("T-A").req.options.signal.aborted, true);
   assert.equal(reviewers.get("T-B").req.options.signal.aborted, false);
   const packet = JSON.parse(reviewers.get("T-B").req.prompt.slice(reviewers.get("T-B").req.prompt.indexOf("{\"version\"")));

@@ -1,6 +1,7 @@
 ---
 name: worker
 description: Scoped implementation in an isolated worktree.
+model: openai-codex/gpt-6-luna
 tools: read, grep, find, ls, bash, edit, write
 extensions: false
 skills: false

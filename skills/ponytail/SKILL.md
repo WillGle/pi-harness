@@ -97,7 +97,7 @@ Hardware is never the ideal on paper: a real clock drifts, a real sensor
 reads off, a PCA9685 runs a few percent fast. Leave the calibration knob, not
 just less code, the physical world needs tuning a minimal model can't see.
 
-For delegated work, the implementing worker's own check is not task acceptance: keep Harness verification and the coordinator's acceptance decision separate. Do not spawn extra agents solely for minimalism; use Harness-controlled delegation when it reduces context without weakening gates.
+For delegated work, the implementing worker's own check is not task acceptance: keep Harness verification and Commander acceptance separate. Do not spawn extra agents solely for minimalism; use Harness-controlled delegation when it reduces context without weakening gates.
 
 Lazy code without its check is unfinished. Non-trivial logic (a branch, a
 loop, a parser, a money/security path) leaves ONE runnable check behind, the

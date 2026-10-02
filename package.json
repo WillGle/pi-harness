@@ -1,7 +1,7 @@
 {
   "name": "@will/pi-harness",
   "version": "1.0.0",
-  "description": "Pi-native planning and goal harness",
+  "description": "Pi-native Commander and scoped subagent execution",
   "type": "module",
   "private": true,
   "license": "MIT",
@@ -22,9 +22,7 @@
     "pi-harness-web": "bin/pi-harness-web.mjs"
   },
   "files": [
-    ".env.example",
     ".pi/agents/research.md",
-    ".pi/agents/coordinator.md",
     ".pi/agents/reviewer.md",
     ".pi/agents/security-reviewer.md",
     ".pi/agents/scout.md",
@@ -34,11 +32,8 @@
     "README.md",
     "bin/",
     "extensions/",
-    "future-work.md",
     "lib/",
-    "packages/pi-harness-acp/",
     "scripts/bootstrap.mjs",
-    "scripts/context-economics-benchmark.mjs",
     "scripts/verify-skills.mjs",
     "skills/ask-user/SKILL.md",
     "skills/architecture-diagram/SKILL.md",
@@ -49,9 +44,6 @@
     "skills/atomic-commit/SKILL.md",
     "skills/atomic-commit/references/splitting-recipes.md",
     "skills/cavecrew/SKILL.md",
-    "skills/cavecrew/references/agents/cavecrew-builder.md",
-    "skills/cavecrew/references/agents/cavecrew-investigator.md",
-    "skills/cavecrew/references/agents/cavecrew-reviewer.md",
     "skills/caveman/SKILL.md",
     "skills/caveman-commit/SKILL.md",
     "skills/caveman-compress/SKILL.md",
@@ -97,18 +89,18 @@
     "skills/skill-creator/scripts/package_skill.py",
     "skills/skill-creator/scripts/validate_skill.py",
     "skills/skills.lock.json",
-    "target-architecture.md"
+    "docs/manual.md",
+    "docs/target-architecture.md"
   ],
   "scripts": {
     "build": "npm run typecheck && node --experimental-strip-types --check extensions/pi-harness.ts",
     "typecheck": "tsc --project tsconfig.json",
-    "test": "node --test test/communication.test.mjs test/semantic-verifier.test.mjs test/security-review.test.mjs test/parallel-operation.test.mjs test/parallel-review.test.mjs test/operation.test.mjs test/operation-tool.test.mjs test/planning-operation.test.mjs test/task-graph.test.mjs test/operation-runner.test.mjs test/compaction-lifecycle.test.mjs test/pi-runtime-compat.test.mjs test/footer-render.test.mjs test/status-view-model.test.mjs test/status-footer-integration.test.mjs test/evidence.test.mjs test/state.test.mjs test/mission.test.mjs test/control-state-store.test.mjs test/coordinator.test.mjs test/skills.test.mjs test/web.test.mjs test/memory.test.mjs test/precise-edit.test.mjs test/code-intel.test.mjs test/integration.test.mjs test/platform.test.mjs",
+    "test": "node --test test/communication.test.mjs test/semantic-verifier.test.mjs test/security-review.test.mjs test/parallel-review.test.mjs test/operation-tool.test.mjs test/compaction-lifecycle.test.mjs test/pi-runtime-compat.test.mjs test/footer-render.test.mjs test/status-view-model.test.mjs test/status-footer-integration.test.mjs test/evidence.test.mjs test/plan.test.mjs test/control-state-store.test.mjs test/executor.test.mjs test/skills.test.mjs test/web.test.mjs test/memory.test.mjs test/precise-edit.test.mjs test/code-intel.test.mjs test/integration.test.mjs test/platform.test.mjs",
     "test:daybreak": "node --test test/daybreak-live.test.mjs",
     "test:runtime": "node --test packages/pi-harness-acp/runtime/catalog-drain.test.mjs",
     "test:integration": "node --test test/acp-rpc-lifecycle.test.mjs test/parallel-package-integration.test.mjs test/integration.test.mjs test/acp-acceptance.test.mjs test/acp-mcp-integration.test.mjs test/pi-rpc-integration.test.mjs test/pi-plan-lifecycle.test.mjs test/zed-smoke.test.mjs test/disposable-install.test.mjs",
     "test:all": "npm run build && npm run test && npm run test:runtime && npm run test:integration",
     "verify:skills": "node scripts/verify-skills.mjs",
-    "benchmark:context": "node scripts/context-economics-benchmark.mjs",
     "bootstrap": "node scripts/bootstrap.mjs",
     "doctor": "node bin/pi-harness.mjs doctor"
   },
@@ -119,11 +111,11 @@
     "linux"
   ],
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "0.87.1"
+    "@earendil-works/pi-coding-agent": "0.87.1",
+    "typebox": "*"
   },
   "dependencies": {
-    "@tintinweb/pi-subagents": "0.19.0",
-    "typebox": "1.3.7"
+    "@tintinweb/pi-subagents": "0.19.0"
   },
   "pi": {
     "extensions": [

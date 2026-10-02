@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { createWorktree, cleanupWorktree } from "../node_modules/@tintinweb/pi-subagents/dist/worktree.js";
 import { loadSettings, applySettings } from "../node_modules/@tintinweb/pi-subagents/dist/settings.js";
 import { AgentManager } from "../node_modules/@tintinweb/pi-subagents/dist/agent-manager.js";
-import { executeCoordinateTask } from "../lib/coordinator.mjs";
+import { executeTask } from "../lib/executor.mjs";
 
 const exec = promisify(execFile);
 const git = (cwd, ...args) => exec("git", args, { cwd });
@@ -121,7 +121,7 @@ test("package cleanup failure keeps the timed-out Worker's worktree disposition 
         for (const handler of [...(listeners.get(name) ?? [])]) handler(payload);
       },
     };
-    await assert.rejects(executeCoordinateTask({ events }, {
+    await assert.rejects(executeTask({ events }, {
       owner: "worker", task_id: "T-CLEANUP-FAILURE", operation_id: "O-CLEANUP-FAILURE",
       scope: "Run a bounded Worker task.", permission: "write", verification: "true",
     }, { cwd, timeout: 30, rpcTimeout: 1000 }), (error) => {

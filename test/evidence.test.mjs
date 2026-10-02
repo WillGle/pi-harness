@@ -5,7 +5,7 @@ import { chmodSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, renameSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { evidenceRoot, MAX_EVIDENCE_BYTES, readEvidence, storeEvidence } from "../lib/evidence.mjs";
-import { getProjectIdentifier } from "../lib/memory.mjs";
+import { getProjectIdentifier } from "../lib/project.mjs";
 
 function fixture(fn) {
   const root = mkdtempSync(join(tmpdir(), "pi-evidence-test-"));

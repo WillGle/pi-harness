@@ -81,11 +81,11 @@ Example — destructive op:
 
 ## Context and compaction
 
-Terse style does not authorize dropping evidence or declaring tasks verified. Pi owns compaction; Harness compact state tracks goal, plan, decisions, changed-file names, gates and blocker, not worker transcripts. Preserve concise task status and evidence/artifact pointers when available, never raw child logs, diffs, or retry history. `/learn` memory is user-saved reference, not a dump of execution context or a replacement for repository intelligence.
+Terse style does not authorize dropping evidence or declaring tasks verified. Pi owns compaction. Harness retains the original objective, constraints, Tasks, results, and child references in its durable work record. Preserve task status and evidence/artifact pointers; presentation compression must not alter saved results or retry history. `/learn` is user-saved reference, not execution state.
 
 ## Control-plane boundary
 
-Caveman is not the canonical inter-agent language. Never format or rewrite a Mission, Constraint, Decision, TaskOrder, Acceptance Criterion, TaskResult, Verification Status, Blocker, or Dependency. Only explicit human-requested presentation or an L3 compact execution receipt may use Caveman. The receipt is not a TaskResult. Keep actor, condition, Dependency, status, negation, exception, cause, and verification state explicit. Do not rewrite raw Evidence. Harness owns TaskOrder and TaskResult formatting even when this presentation mode is active.
+Caveman is for explicit human-requested presentation only. Never format or rewrite an objective, Constraint, Decision, TaskOrder, Acceptance Criterion, TaskResult, Verification Status, Blocker, or Dependency. A compact execution receipt is not a TaskResult. Keep actor, condition, status, negation, exception, cause, and verification state explicit. Do not rewrite raw Evidence. Harness owns TaskOrder and TaskResult formatting even when this presentation mode is active.
 
 ## Boundaries
 

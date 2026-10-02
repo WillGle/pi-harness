@@ -1,3 +1,4 @@
+import { getProjectIdentifier } from "../lib/project.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, existsSync, readFileSync, statSync } from "node:fs";
@@ -7,7 +8,6 @@ import {
   appendProjectMemory,
   clearProjectMemory,
   getMemoryDir,
-  getProjectIdentifier,
   getProjectMemoryPath,
   loadProjectMemory,
   MAX_MEMORY_BYTES,

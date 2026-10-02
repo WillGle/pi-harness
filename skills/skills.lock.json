@@ -23,15 +23,12 @@
     },
     "cavecrew": {
       "files": {
-        "SKILL.md": "2ec34e817d73bcd3e2731afc17504425a3a9f1d8d703b5ba6cbca80c2f0d906b",
-        "references/agents/cavecrew-builder.md": "498f5bd26cd78a85d1e6c78047662fc8bc75837c44694abbafddf08e65fbd87b",
-        "references/agents/cavecrew-investigator.md": "b722ca51e90a81ee025d732346bd9f2d66ee5bf00bf296149dfb9bbe7e76b57b",
-        "references/agents/cavecrew-reviewer.md": "6148701b3f7851070ab3fa4ee9abbec33b7b2865a4f6f2b34e6663e099215522"
+        "SKILL.md": "8cf67c37d139d710bbc64a2fd4505cfcab0b5008f48826a430733ded111fae10"
       }
     },
     "caveman": {
       "files": {
-        "SKILL.md": "2024a77cbcdd9986311b9e62deea97f4dbc1aec8f479b2783e54f01063a8b9b6"
+        "SKILL.md": "2df433e0961cc5f34ca2dfb429848d8eebce6e830d763ee36b7ba8b5bb23924e"
       }
     },
     "caveman-commit": {
@@ -83,7 +80,7 @@
     },
     "ponytail": {
       "files": {
-        "SKILL.md": "b34e63abe90949ccfe266e5b2900045d92bd0de8a726e6d86dcc80e28856e419"
+        "SKILL.md": "5d296e0392ef70ac919da24c8bebe1c6f910f153492b371b2d730e38d52f8abb"
       }
     },
     "ponytail-audit": {
@@ -113,7 +110,7 @@
     },
     "project-scouting": {
       "files": {
-        "SKILL.md": "cc030a3c2a482c168c1640116a08dad219f0cd11384f13f2e0699cc6ac1fc4a7"
+        "SKILL.md": "c12589fe3682d440639d0a75bc6846a1fcbc884c1136f5e7439da01cbd61b48e"
       }
     },
     "requirement-check": {

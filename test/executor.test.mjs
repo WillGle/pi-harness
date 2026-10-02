@@ -6,9 +6,8 @@ import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, sy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import * as coordinatorApi from "../lib/coordinator.mjs";
+import * as coordinatorApi from "../lib/executor.mjs";
 import { readEvidence } from "../lib/evidence.mjs";
-import { promoteTaskResult } from "../lib/communication.mjs";
 import { registerRpcHandlers } from "../node_modules/@tintinweb/pi-subagents/dist/cross-extension-rpc.js";
 import { AgentManager } from "../node_modules/@tintinweb/pi-subagents/dist/agent-manager.js";
 import { getAgentConfig, getAllTypes, registerAgents } from "../node_modules/@tintinweb/pi-subagents/dist/agent-types.js";
@@ -16,16 +15,19 @@ import { resolveDefaultModel } from "../node_modules/@tintinweb/pi-subagents/dis
 import { describeModel } from "../node_modules/@tintinweb/pi-subagents/dist/model-resolver.js";
 import { isWorktreeIsolationEnabled, setWorktreeIsolationEnabled } from "../node_modules/@tintinweb/pi-subagents/dist/worktree.js";
 import {
-  cancelCoordinateTasks,
-  executeCoordinateTask,
-  executeCoordinatorTurn,
-  hasActiveCoordinateTasks,
+  cancelTasks,
+  executeTask,
+  hasActiveTasks,
   managedTaskTimeout,
   DEFAULT_TERMINAL_TIMEOUT_MS,
   MANAGED_WORKER_TERMINAL_TIMEOUT_MS,
   MAX_TERMINAL_TIMEOUT_MS,
   validateTask,
-} from "../lib/coordinator.mjs";
+} from "../lib/executor.mjs";
+
+const executeReadOnlyTurn = async (pi, prompt, options = {}) => (await executeTask(pi,
+  { owner: "research", scope: prompt, verification: "The Commander reviews the report.", permission: "read", model: options.model },
+  { ...options, review: false })).result;
 
 const evidenceDir = mkdtempSync(join(tmpdir(), "pi-harness-evidence-test-"));
 const previousEvidenceDir = process.env.PI_HARNESS_EVIDENCE_DIR;
@@ -58,7 +60,7 @@ test("baseSha worktree failure is tagged before any child starts", async () => {
   let spawns = 0;
   events.on("subagents:rpc:spawn", () => { spawns++; });
   try {
-    await assert.rejects(executeCoordinateTask({ events }, { owner: "worker", scope: "Edit lib/coordinator.mjs", verification: "node --check lib/coordinator.mjs", permission: "write" }, { cwd }), (error) => {
+    await assert.rejects(executeTask({ events }, { owner: "worker", scope: "Edit lib/executor.mjs", verification: "node --check lib/executor.mjs", permission: "write" }, { cwd }), (error) => {
       assert.equal(error.code, "HARNESS_WORKTREE_FAILED");
       assert.equal(error.failure_stage, "worktree_preflight");
       assert.equal(error.childOutcome, "not_started");
@@ -228,7 +230,7 @@ function modelRoutingPackage(repo, { configuredModel, available = true, mismatch
       assert.deepEqual(mutations, []);
       assert.equal(context.model, commanderModel);
       assert.equal(context.modelRegistry.authStorage, authStorage);
-      assert.equal(hasActiveCoordinateTasks(), false);
+      assert.equal(hasActiveTasks(), false);
     },
     restore() {
       for (const unsubscribe of Object.values(handlers)) unsubscribe();
@@ -242,20 +244,20 @@ test("Coordinator inherits the Commander model through null package routing", as
   const repo = makeRepo("pi-coordinator-inherit-");
   const runtime = modelRoutingPackage(repo);
   try {
-    assert.equal(await executeCoordinatorTurn(runtime.pi, "Inspect routing.", { cwd: repo, timeout: 1000, rpcTimeout: 1000 }), "Routing fixture complete.");
+    assert.equal(await executeReadOnlyTurn(runtime.pi, "Inspect routing.", { cwd: repo, timeout: 1000, rpcTimeout: 1000 }), "Routing fixture complete.");
     assert.equal(runtime.calls[0].options.model, null);
     assert.equal(runtime.records.get("route-1").invocation.modelId, "commander-provider/commander-model");
     runtime.assertUnchanged();
   } finally { runtime.restore(); rmSync(repo, { recursive: true, force: true }); }
 });
 
-test("Coordinator model override is forwarded exactly and resolved by the package", async () => {
+test("Read-only task model override is forwarded exactly and resolved by the package", async () => {
   const repo = makeRepo("pi-coordinator-override-");
   const runtime = modelRoutingPackage(repo);
   let forwarded;
   runtime.pi.events.on("subagents:rpc:spawn", (request) => { forwarded = request.options.model; });
   try {
-    await executeCoordinatorTurn(runtime.pi, "Inspect routing.", { cwd: repo, model: "worker-provider/worker-model", timeout: 1000, rpcTimeout: 1000 });
+    await executeReadOnlyTurn(runtime.pi, "Inspect routing.", { cwd: repo, model: "worker-provider/worker-model", timeout: 1000, rpcTimeout: 1000 });
     assert.equal(forwarded, "worker-provider/worker-model");
     assert.equal(runtime.calls[0].options.model.provider, "worker-provider");
     assert.equal(runtime.calls[0].options.model.id, "worker-model");
@@ -272,7 +274,7 @@ test("Worker configured model resolves at runtime when available", async (t) => 
     const before = head(repo);
     const runtime = modelRoutingPackage(repo, { configuredModel: inherited ? undefined : override ? "missing/profile-model" : "worker-provider/worker-model" });
     try {
-      const result = await executeCoordinateTask(runtime.pi, {
+      const result = await executeTask(runtime.pi, {
         owner: "worker", scope: "file.txt", permission: "write", verification: "grep worker-update file.txt",
         acceptance_criteria: ["The Worker verification command passes."],
         ...(override ? { model: "worker-provider/worker-model" } : {}),
@@ -300,7 +302,7 @@ test("Worker model unavailable or mismatched fails before accepting a TaskResult
       mismatched: scenario === "invocation mismatch", missingInvocation: scenario === "invocation missing",
     });
     try {
-      await assert.rejects(executeCoordinateTask(runtime.pi, {
+      await assert.rejects(executeTask(runtime.pi, {
         owner: "worker", scope: "file.txt", permission: "write", verification: "grep worker-update file.txt",
         acceptance_criteria: ["The Worker verification command passes."],
         ...(override ? { model: "worker-provider/worker-model" } : {}),
@@ -320,7 +322,7 @@ test("Worker model unavailable or mismatched fails before accepting a TaskResult
   });
 });
 
-for (const role of ["worker", "scout", "research", "coordinator", "reviewer", "security-reviewer"]) {
+for (const role of ["worker", "scout", "research", "reviewer", "security-reviewer"]) {
   test(`${role}: failed spawn ACK drains an existing child before releasing ownership`, async () => {
     const events = new EventBus();
     const child = deferred();
@@ -345,9 +347,9 @@ for (const role of ["worker", "scout", "research", "coordinator", "reviewer", "s
       events.emit(`subagents:rpc:spawn:reply:${request.requestId}`, { success: false, error: "PRIVATE STARTUP ERROR" });
     });
     try {
-      const pending = role === "coordinator"
-        ? executeCoordinatorTurn({ events }, "Inspect.", { cwd: repo, role })
-        : executeCoordinateTask({ events }, {
+      const pending = role === "research"
+        ? executeReadOnlyTurn({ events }, "Inspect.", { cwd: repo, role })
+        : executeTask({ events }, {
           owner: reviewing ? "research" : role, permission: role === "worker" ? "write" : "read", scope: "Inspect.", verification: "true",
           ...(reviewing ? { acceptance_criteria: ["The report establishes the finding."],
             review_profile: { "The report establishes the finding.": role === "security-reviewer" ? "security" : "default" } } : {}),
@@ -356,7 +358,7 @@ for (const role of ["worker", "scout", "research", "coordinator", "reviewer", "s
       while (!signal) await new Promise((resolve) => setImmediate(resolve));
       await new Promise((resolve) => setImmediate(resolve));
       assert.equal(signal.aborted, true);
-      assert.equal(hasActiveCoordinateTasks(), true, "failed ACK must retain exact child ownership");
+      assert.equal(hasActiveTasks(), true, "failed ACK must retain exact child ownership");
       child.resolve();
       const { value, error } = await outcome;
       if (reviewing) {
@@ -367,7 +369,7 @@ for (const role of ["worker", "scout", "research", "coordinator", "reviewer", "s
         assert.equal(error.childOutcome, undefined, "an existing child is not a confirmed no-child outcome");
         assert.equal(error.childSettled, true);
       }
-      assert.equal(hasActiveCoordinateTasks(), false);
+      assert.equal(hasActiveTasks(), false);
       assert.equal(events.listenerCount("subagents:completed"), 0);
       assert.equal(events.listenerCount("subagents:failed"), 0);
     } finally {
@@ -398,14 +400,14 @@ test("RPC spawn timeout aborts the exact child signal and waits for late startup
   };
   const handlers = registerRpcHandlers({ events, pi: {}, getCtx: () => ({ cwd: process.cwd() }), manager });
   try {
-    const pending = executeCoordinateTask({ events }, { owner: "research", scope: "lib", verification: "inspect", permission: "read" }, { rpcTimeout: 20, rpcLateReplyGrace: 200, timeout: 1000, groupId: "G-late" });
+    const pending = executeTask({ events }, { owner: "research", scope: "lib", verification: "inspect", permission: "read" }, { rpcTimeout: 20, rpcLateReplyGrace: 200, timeout: 1000, groupId: "G-late" });
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 40));
     assert.equal(childSignal.aborted, true, "the Harness must abort the signal before it releases task ownership");
-    assert.equal(hasActiveCoordinateTasks(), true, "ownership stays active until the exact child settles");
+    assert.equal(hasActiveTasks(), true, "ownership stays active until the exact child settles");
     startup.resolve();
     settled.resolve();
     await assert.rejects(pending, (error) => error.code === "HARNESS_RPC_TIMEOUT");
-    assert.equal(hasActiveCoordinateTasks(), false);
+    assert.equal(hasActiveTasks(), false);
   } finally {
     for (const unsubscribe of Object.values(handlers)) unsubscribe?.();
     if (previousManager === undefined) delete globalThis[managerKey];
@@ -443,7 +445,7 @@ test("pi-subagents 0.19.0 late Worker startup aborts its real worktree child", a
   try {
     let failure;
     try {
-      await executeCoordinateTask({ events }, { owner: "worker", scope: "file.txt", verification: "true", permission: "write" }, { cwd: repo, rpcTimeout: 20, rpcLateReplyGrace: 2000, timeout: 2000 });
+      await executeTask({ events }, { owner: "worker", scope: "file.txt", verification: "true", permission: "write" }, { cwd: repo, rpcTimeout: 20, rpcLateReplyGrace: 2000, timeout: 2000 });
     } catch (error) { failure = error; }
     assert.equal(failure?.code, "HARNESS_RPC_TIMEOUT");
     assert.equal(failure?.childSettled, true);
@@ -494,8 +496,8 @@ test("one RPC spawn timeout does not abort its sibling ExecutionUnit", async () 
   };
   const handlers = registerRpcHandlers({ events, pi: {}, getCtx: () => ({ cwd: process.cwd() }), manager });
   try {
-    const timed = executeCoordinateTask({ events }, { owner: "research", scope: "timeout", verification: "inspect", permission: "read" }, { rpcTimeout: 20, rpcLateReplyGrace: 200, timeout: 1000 });
-    const sibling = executeCoordinateTask({ events }, { owner: "research", scope: "sibling", verification: "inspect", permission: "read" }, { rpcTimeout: 200, rpcLateReplyGrace: 200, timeout: 1000 });
+    const timed = executeTask({ events }, { owner: "research", scope: "timeout", verification: "inspect", permission: "read" }, { rpcTimeout: 20, rpcLateReplyGrace: 200, timeout: 1000 });
+    const sibling = executeTask({ events }, { owner: "research", scope: "sibling", verification: "inspect", permission: "read" }, { rpcTimeout: 200, rpcLateReplyGrace: 200, timeout: 1000 });
     const siblingResult = await sibling;
     assert.equal(siblingResult.success, true);
     await Promise.race([timedAborted.promise, new Promise((resolvePromise) => setTimeout(resolvePromise, 1000))]);
@@ -504,7 +506,7 @@ test("one RPC spawn timeout does not abort its sibling ExecutionUnit", async () 
     startup.resolve();
     firstSettlement.resolve();
     await assert.rejects(timed, (error) => error.code === "HARNESS_RPC_TIMEOUT");
-    assert.equal(hasActiveCoordinateTasks(), false);
+    assert.equal(hasActiveTasks(), false);
   } finally {
     for (const unsubscribe of Object.values(handlers)) unsubscribe?.();
     if (previousManager === undefined) delete globalThis[managerKey];
@@ -521,11 +523,11 @@ test("RPC startup rejection reports a confirmed no-child outcome", async () => {
   };
   const handlers = registerRpcHandlers({ events, pi: {}, getCtx: () => ({ cwd: process.cwd() }), manager });
   try {
-    const pending = executeCoordinateTask({ events }, { owner: "research", scope: "lib", verification: "inspect", permission: "read" }, { rpcTimeout: 20, rpcLateReplyGrace: 200, timeout: 1000 });
+    const pending = executeTask({ events }, { owner: "research", scope: "lib", verification: "inspect", permission: "read" }, { rpcTimeout: 20, rpcLateReplyGrace: 200, timeout: 1000 });
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 40));
     startup.reject(new Error("private startup details"));
     await assert.rejects(pending, (error) => error.code === "HARNESS_RPC_TIMEOUT" && error.childOutcome === "spawn_rejected");
-    assert.equal(hasActiveCoordinateTasks(), false);
+    assert.equal(hasActiveTasks(), false);
   } finally {
     for (const unsubscribe of Object.values(handlers)) unsubscribe?.();
   }
@@ -545,10 +547,10 @@ test("RPC timeout before manager spawn lets the aborted request resolve as no ch
       }
     }, 50);
   });
-  await assert.rejects(executeCoordinateTask({ events }, { owner: "research", scope: "lib", verification: "inspect", permission: "read" }, { rpcTimeout: 20, rpcLateReplyGrace: 200, timeout: 1000 }), (error) => error.childOutcome === "spawn_rejected");
+  await assert.rejects(executeTask({ events }, { owner: "research", scope: "lib", verification: "inspect", permission: "read" }, { rpcTimeout: 20, rpcLateReplyGrace: 200, timeout: 1000 }), (error) => error.childOutcome === "spawn_rejected");
   assert.equal(childSignal.aborted, true);
   assert.equal(spawned, false);
-  assert.equal(hasActiveCoordinateTasks(), false);
+  assert.equal(hasActiveTasks(), false);
 });
 
 test("Coordinator RPC timeout aborts the exact child and drains its acknowledgment", async () => {
@@ -571,14 +573,14 @@ test("Coordinator RPC timeout aborts the exact child and drains its acknowledgme
   };
   const handlers = registerRpcHandlers({ events, pi: {}, getCtx: () => ({ cwd: process.cwd() }), manager });
   try {
-    const pending = executeCoordinatorTurn({ events }, "bounded brief", { rpcTimeout: 20, rpcLateReplyGrace: 200, timeout: 1000, groupId: "G-coordinator" });
+    const pending = executeReadOnlyTurn({ events }, "bounded brief", { rpcTimeout: 20, rpcLateReplyGrace: 200, timeout: 1000, groupId: "G-coordinator" });
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 40));
     assert.equal(childSignal.aborted, true);
-    assert.equal(hasActiveCoordinateTasks(), true);
+    assert.equal(hasActiveTasks(), true);
     startup.resolve();
     settled.resolve();
     await assert.rejects(pending, (error) => error.code === "HARNESS_RPC_TIMEOUT");
-    assert.equal(hasActiveCoordinateTasks(), false);
+    assert.equal(hasActiveTasks(), false);
   } finally {
     for (const unsubscribe of Object.values(handlers)) unsubscribe?.();
     if (previousManager === undefined) delete globalThis[managerKey];
@@ -617,16 +619,16 @@ test("Reviewer RPC timeout aborts the Reviewer and returns blocked verification"
   };
   const handlers = registerRpcHandlers({ events, pi: {}, getCtx: () => ({ cwd: process.cwd() }), manager });
   try {
-    const pending = executeCoordinateTask({ events }, { owner: "research", task_id: "T-reviewer-timeout", scope: "lib", verification: "inspect", permission: "read", acceptance_criteria: ["The report identifies the source."] }, { rpcTimeout: 20, rpcLateReplyGrace: 200, timeout: 1000 });
+    const pending = executeTask({ events }, { owner: "research", task_id: "T-reviewer-timeout", scope: "lib", verification: "inspect", permission: "read", acceptance_criteria: ["The report identifies the source."] }, { rpcTimeout: 20, rpcLateReplyGrace: 200, timeout: 1000 });
     await Promise.race([reviewerAborted, new Promise((resolvePromise) => setTimeout(resolvePromise, 1000))]);
     assert.equal(reviewerSignal.aborted, true);
-    assert.equal(hasActiveCoordinateTasks(), true);
+    assert.equal(hasActiveTasks(), true);
     reviewerStartup.resolve();
     reviewerSettled.resolve();
     const result = await pending;
     assert.equal(result.taskResult.execution_status, "execution_complete");
     assert.equal(result.taskResult.verification_status, "blocked");
-    assert.equal(hasActiveCoordinateTasks(), false);
+    assert.equal(hasActiveTasks(), false);
   } finally {
     for (const unsubscribe of Object.values(handlers)) unsubscribe?.();
     if (previousManager === undefined) delete globalThis[managerKey];
@@ -655,13 +657,13 @@ test("terminal timeout aborts only the owned ExecutionUnit and drains its exact 
           child.resolve();
         }, { once: true });
       });
-      await assert.rejects(executeCoordinateTask({ events }, { owner, task_id: `T-${owner}`, operation_id: "O-timeout", scope: "Inspect timeout.", permission: owner === "worker" ? "write" : "read", verification: "true", ...(owner === "worker" ? {} : { acceptance_criteria: ["The report identifies the requested evidence."] }) }, { timeout: 30, rpcTimeout: 1000 }), (error) => error.code === "HARNESS_CHILD_TERMINAL_TIMEOUT" && error.childSettled === true);
+      await assert.rejects(executeTask({ events }, { owner, task_id: `T-${owner}`, operation_id: "O-timeout", scope: "Inspect timeout.", permission: owner === "worker" ? "write" : "read", verification: "true", ...(owner === "worker" ? {} : { acceptance_criteria: ["The report identifies the requested evidence."] }) }, { timeout: 30, rpcTimeout: 1000 }), (error) => error.code === "HARNESS_CHILD_TERMINAL_TIMEOUT" && error.childSettled === true);
       assert.equal(request.options.signal.aborted, true, `${owner} child signal must reach pi-subagents`);
-      assert.equal(hasActiveCoordinateTasks(), false);
+      assert.equal(hasActiveTasks(), false);
       assert.equal(events.listenerCount("subagents:completed"), 0);
       assert.equal(events.listenerCount("subagents:failed"), 0);
       events.emit("subagents:completed", { id, status: "completed", result: "LATE PRIVATE RESULT" });
-      assert.equal(hasActiveCoordinateTasks(), false);
+      assert.equal(hasActiveTasks(), false);
     }
   } finally { restoreManager(); }
 });
@@ -692,7 +694,7 @@ test("timed-out Worker records package-confirmed branch and commit disposition w
     }, { once: true });
   });
   try {
-    await assert.rejects(executeCoordinateTask({ events }, { owner: "worker", task_id: "T-partial", operation_id: "O-partial", scope: "Write partial output.", permission: "write", verification: "Run the required gate." }, { cwd: repo, timeout: 30, rpcTimeout: 1000 }), (error) => {
+    await assert.rejects(executeTask({ events }, { owner: "worker", task_id: "T-partial", operation_id: "O-partial", scope: "Write partial output.", permission: "write", verification: "Run the required gate." }, { cwd: repo, timeout: 30, rpcTimeout: 1000 }), (error) => {
       assert.equal(error.code, "HARNESS_CHILD_TERMINAL_TIMEOUT");
       assert.equal(error.childSettled, true);
       assert.deepEqual(error.child_disposition, { branch_status: "preserved", branch: "pi-agent-partial", commit_sha: commitSha, commit_count: 1, worktree_status: "unknown" });
@@ -700,7 +702,7 @@ test("timed-out Worker records package-confirmed branch and commit disposition w
       return true;
     });
     assert.equal(head(repo), base, "the partial branch is not integrated into the base branch");
-    assert.equal(hasActiveCoordinateTasks(), false);
+    assert.equal(hasActiveTasks(), false);
   } finally {
     restoreManager();
     rmSync(repo, { recursive: true, force: true });
@@ -721,17 +723,17 @@ test("a terminal event does not release ownership before the exact package child
     queueMicrotask(() => events.emit("subagents:completed", { id, status: "completed", result: "The report is ready." }));
   });
   try {
-    const pending = executeCoordinateTask({ events }, { owner: "research", scope: "Inspect.", verification: "inspect", permission: "read" }, { timeout: 1000, rpcTimeout: 1000 }).then((result) => {
+    const pending = executeTask({ events }, { owner: "research", scope: "Inspect.", verification: "inspect", permission: "read" }, { timeout: 1000, rpcTimeout: 1000 }).then((result) => {
       returned = true;
       return result;
     });
     await new Promise((resolvePromise) => setImmediate(resolvePromise));
     assert.equal(returned, false, "TaskResult waits for package settlement after the terminal event");
-    assert.equal(hasActiveCoordinateTasks(), true, "Harness ownership remains until the package promise settles");
+    assert.equal(hasActiveTasks(), true, "Harness ownership remains until the package promise settles");
     child.resolve();
     const result = await pending;
     assert.equal(result.taskResult.execution_status, "execution_complete");
-    assert.equal(hasActiveCoordinateTasks(), false);
+    assert.equal(hasActiveTasks(), false);
   } finally { restoreManager(); }
 });
 
@@ -748,11 +750,11 @@ test("a terminal notification without package settlement times out without promo
     queueMicrotask(() => events.emit("subagents:completed", { id, status: "completed", result: "The report is ready." }));
   });
   try {
-    await assert.rejects(executeCoordinateTask({ events }, { owner: "research", scope: "Inspect.", verification: "inspect", permission: "read" }, { timeout: 1000, rpcTimeout: 1000 }), (error) => error.code === "HARNESS_CHILD_SETTLEMENT_TIMEOUT" && error.childSettled === false);
-    assert.equal(hasActiveCoordinateTasks(), true, "unsettled package ownership remains tracked");
+    await assert.rejects(executeTask({ events }, { owner: "research", scope: "Inspect.", verification: "inspect", permission: "read" }, { timeout: 1000, rpcTimeout: 1000 }), (error) => error.code === "HARNESS_CHILD_SETTLEMENT_TIMEOUT" && error.childSettled === false);
+    assert.equal(hasActiveTasks(), true, "unsettled package ownership remains tracked");
     child.resolve();
     await new Promise((resolvePromise) => setImmediate(resolvePromise));
-    assert.equal(hasActiveCoordinateTasks(), false, "late settlement releases exact ownership");
+    assert.equal(hasActiveTasks(), false, "late settlement releases exact ownership");
   } finally { restoreManager(); }
 });
 
@@ -773,17 +775,17 @@ test("terminal timeout retains ownership until the exact child settles", async (
     next.options.signal.addEventListener("abort", () => { record.status = "stopped"; aborted.resolve(); }, { once: true });
   });
   try {
-    const pending = executeCoordinateTask({ events }, { owner: "research", scope: "Inspect timeout.", permission: "read", verification: "Inspect report." }, { timeout: 30, rpcTimeout: 1000 });
+    const pending = executeTask({ events }, { owner: "research", scope: "Inspect timeout.", permission: "read", verification: "Inspect report." }, { timeout: 30, rpcTimeout: 1000 });
     await aborted.promise;
     assert.equal(request.options.signal.aborted, true);
-    assert.equal(hasActiveCoordinateTasks(), true, "Harness must retain ownership during the bounded drain");
+    assert.equal(hasActiveTasks(), true, "Harness must retain ownership during the bounded drain");
     await assert.rejects(pending, (error) => error.code === "HARNESS_CHILD_TERMINAL_TIMEOUT" && error.childSettled !== true);
-    assert.equal(hasActiveCoordinateTasks(), true, "Harness must retain ownership after the drain expires");
+    assert.equal(hasActiveTasks(), true, "Harness must retain ownership after the drain expires");
     events.emit("subagents:completed", { id, status: "completed", result: "LATE PRIVATE RESULT" });
-    assert.equal(hasActiveCoordinateTasks(), true);
+    assert.equal(hasActiveTasks(), true);
     child.resolve();
     await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(hasActiveCoordinateTasks(), false, "Harness releases ownership only after package settlement");
+    assert.equal(hasActiveTasks(), false, "Harness releases ownership only after package settlement");
   } finally { restoreManager(); }
 });
 
@@ -807,13 +809,13 @@ test("Coordinator terminal timeout aborts its own signal and drains its child", 
     }, { once: true });
   });
   try {
-    await assert.rejects(executeCoordinatorTurn({ events }, "Bounded OperationBrief", { timeout: 30, rpcTimeout: 1000 }), (error) => error.code === "HARNESS_CHILD_TERMINAL_TIMEOUT" && error.childSettled === true);
+    await assert.rejects(executeReadOnlyTurn({ events }, "Bounded OperationBrief", { timeout: 30, rpcTimeout: 1000 }), (error) => error.code === "HARNESS_CHILD_TERMINAL_TIMEOUT" && error.childSettled === true);
     assert.equal(request.options.signal.aborted, true);
-    assert.equal(hasActiveCoordinateTasks(), false);
+    assert.equal(hasActiveTasks(), false);
     assert.equal(events.listenerCount("subagents:completed"), 0);
     assert.equal(events.listenerCount("subagents:failed"), 0);
     events.emit("subagents:completed", { id, status: "completed", result: "late decision" });
-    assert.equal(hasActiveCoordinateTasks(), false);
+    assert.equal(hasActiveTasks(), false);
   } finally { restoreManager(); }
 });
 
@@ -842,10 +844,10 @@ test("Reviewer terminal timeout drains its own child and blocks verification", a
     }
   });
   try {
-    const result = await executeCoordinateTask({ events }, { owner: "research", task_id: "T-review-timeout", scope: "Inspect the source.", permission: "read", verification: "Inspect report.", acceptance_criteria: ["The report identifies the source."] }, { timeout: 1000, reviewerTimeout: 30, rpcTimeout: 1000 });
+    const result = await executeTask({ events }, { owner: "research", task_id: "T-review-timeout", scope: "Inspect the source.", permission: "read", verification: "Inspect report.", acceptance_criteria: ["The report identifies the source."] }, { timeout: 1000, reviewerTimeout: 30, rpcTimeout: 1000 });
     assert.equal(reviewerSignal.aborted, true);
     assert.equal(result.taskResult.verification_status, "blocked");
-    assert.equal(hasActiveCoordinateTasks(), false);
+    assert.equal(hasActiveTasks(), false);
     assert.equal(events.listenerCount("subagents:completed"), 0);
     assert.equal(events.listenerCount("subagents:failed"), 0);
   } finally { restoreManager(); }
@@ -873,7 +875,7 @@ test("execution budgets start after RPC acknowledgement and Worker gate has a se
         events.emit(`subagents:rpc:spawn:reply:${request.requestId}`, { success: true, data: { id } });
       }, 60);
     });
-    await assert.rejects(executeCoordinateTask({ events }, { owner: "research", scope: "Inspect.", verification: "inspect", permission: "read" }, { timeout: 40, rpcTimeout: 500 }), (error) => error.code === "HARNESS_CHILD_TERMINAL_TIMEOUT");
+    await assert.rejects(executeTask({ events }, { owner: "research", scope: "Inspect.", verification: "inspect", permission: "read" }, { timeout: 40, rpcTimeout: 500 }), (error) => error.code === "HARNESS_CHILD_TERMINAL_TIMEOUT");
     assert.ok(abortedAt - acknowledgedAt >= 30, `child timeout began before acknowledgement: ${abortedAt - acknowledgedAt}ms`);
   } finally { restoreManager(); }
 
@@ -882,7 +884,7 @@ test("execution budgets start after RPC acknowledgement and Worker gate has a se
   const fakePackage = packageManagerFor(events, repo, "worker-delayed-cleanup");
   try {
     const startedAt = Date.now();
-    const result = await executeCoordinateTask({ events }, {
+    const result = await executeTask({ events }, {
       owner: "worker", scope: "file.txt", verification: "sleep 0.8; test -f file.txt", permission: "write",
     }, { cwd: repo, timeout: 500, rpcTimeout: 1000 });
     assert.equal(result.taskResult.execution_status, "execution_complete");
@@ -899,20 +901,20 @@ test("managed Worker receives a bounded terminal budget; other roles retain the 
   assert.equal(MANAGED_WORKER_TERMINAL_TIMEOUT_MS, 300_000);
   assert.equal(MAX_TERMINAL_TIMEOUT_MS, 300_000);
   assert.equal(managedTaskTimeout("worker"), MANAGED_WORKER_TERMINAL_TIMEOUT_MS);
-  for (const role of ["coordinator", "scout", "research", "reviewer", "security-reviewer"]) assert.equal(managedTaskTimeout(role), DEFAULT_TERMINAL_TIMEOUT_MS);
+  for (const role of ["scout", "research", "reviewer", "security-reviewer"]) assert.equal(managedTaskTimeout(role), DEFAULT_TERMINAL_TIMEOUT_MS);
   const source = readFileSync("extensions/pi-harness.ts", "utf8");
-  assert.match(source, /timeout: managedTaskTimeout\(task\.owner\), reviewerTimeout: managedTaskTimeout\("reviewer"\)/);
+  assert.match(source, /timeout: managedTaskTimeout\(task\.assignment\.owner\)/);
   const task = { owner: "research", scope: "Inspect.", verification: "inspect", permission: "read" };
   for (const timeout of [0, -1, MAX_TERMINAL_TIMEOUT_MS + 1, 1.5, Infinity]) {
-    await assert.rejects(executeCoordinateTask({}, task, { timeout }), /terminal budget/);
-    await assert.rejects(executeCoordinatorTurn({}, "brief", { timeout }), /terminal budget/);
+    await assert.rejects(executeTask({}, task, { timeout }), /terminal budget/);
+    await assert.rejects(executeReadOnlyTurn({}, "brief", { timeout }), /terminal budget/);
   }
-  await assert.rejects(executeCoordinateTask({}, task, { reviewerTimeout: MAX_TERMINAL_TIMEOUT_MS + 1 }), /terminal budget/);
+  await assert.rejects(executeTask({}, task, { reviewerTimeout: MAX_TERMINAL_TIMEOUT_MS + 1 }), /terminal budget/);
   for (const rpcTimeout of [0, -1, 60_001, 1.5, Infinity]) {
-    await assert.rejects(executeCoordinateTask({}, task, { rpcTimeout }), /RPC timeout/);
-    await assert.rejects(executeCoordinatorTurn({}, "brief", { rpcTimeout }), /RPC timeout/);
+    await assert.rejects(executeTask({}, task, { rpcTimeout }), /RPC timeout/);
+    await assert.rejects(executeReadOnlyTurn({}, "brief", { rpcTimeout }), /RPC timeout/);
   }
-  assert.equal(hasActiveCoordinateTasks(), false);
+  assert.equal(hasActiveTasks(), false);
 });
 
 test("public task validation keeps scout and research read-only", () => {
@@ -937,7 +939,7 @@ test("scout and research complete through the package boundary with read-only po
   const fakePackage = packageManagerFor(events, process.cwd());
   try {
     for (const owner of ["scout", "research"]) {
-      const result = await executeCoordinateTask({ events }, {
+      const result = await executeTask({ events }, {
         owner,
         scope: "lib",
         verification: "printf evidence",
@@ -948,7 +950,7 @@ test("scout and research complete through the package boundary with read-only po
       assert.equal(result.taskResult.verification_status, "not_verified");
       assert.equal(result.taskResult.evidence_refs.length, 1);
       assert.equal(readEvidence(result.taskResult.evidence_refs[0]).content.toString(), result.result);
-      assert.equal(JSON.stringify(promoteTaskResult(result)).includes("read-only complete"), false);
+      assert.equal(JSON.stringify(result.taskResult).includes("read-only complete"), false);
       assert.equal(result.owner, owner);
       assert.match(result.result, /read-only complete/);
       const request = fakePackage.calls.find((entry) => entry?.type === owner);
@@ -968,13 +970,13 @@ test("bounded read-only capture records real truncation metadata", async () => {
   const events = new EventBus();
   const fakePackage = packageManagerFor(events, process.cwd(), "long");
   try {
-    const result = await executeCoordinateTask({ events }, { owner: "research", scope: "lib", verification: "inspect", permission: "read" }, { rpcTimeout: 1000, timeout: 1000 });
+    const result = await executeTask({ events }, { owner: "research", scope: "lib", verification: "inspect", permission: "read" }, { rpcTimeout: 1000, timeout: 1000 });
     assert.equal(result.resultTruncated, true);
     const stored = readEvidence(result.taskResult.evidence_refs[0]);
     assert.equal(stored.metadata.truncated, true);
     assert.equal(stored.metadata.bytes, Buffer.byteLength(result.result));
     assert.equal(stored.content.toString(), result.result);
-    assert.equal(JSON.stringify(promoteTaskResult(result)).includes("x".repeat(100)), false);
+    assert.equal(JSON.stringify(result.taskResult).includes("x".repeat(100)), false);
   } finally { fakePackage.restore(); }
 });
 
@@ -985,7 +987,7 @@ test("worker uses package worktree/concurrency options, runs the gate, preserves
   const events = new EventBus();
   const fakePackage = packageManagerFor(events, repo, "worker");
   try {
-    const result = await executeCoordinateTask({ events }, {
+    const result = await executeTask({ events }, {
       owner: "worker",
       scope: "file.txt with a bounded synthetic scope description",
       verification: "grep 'worker-update' file.txt && printf 'verification passed'",
@@ -1011,7 +1013,7 @@ test("worker uses package worktree/concurrency options, runs the gate, preserves
     assert.equal(items[0].content.toString(), result.result);
     assert.equal(items[1].content.toString(), result.gateEvidence);
     assert.equal(items[2].content.toString(), result.diff);
-    assert.equal(JSON.stringify(promoteTaskResult(result)).includes("+worker-update"), false);
+    assert.equal(JSON.stringify(result.taskResult).includes("+worker-update"), false);
     assert.equal(result.commitCheck.valid, true);
     assert.equal(result.atomicCommit, true);
     assert.match(result.diff, /\+worker-update/);
@@ -1038,14 +1040,14 @@ test("deterministic Verifier defers semantic criteria and rejects a failed gate"
   const events = new EventBus();
   const fakePackage = packageManagerFor(events, repo, "worker");
   try {
-    const semantic = await executeCoordinateTask({ events }, {
+    const semantic = await executeTask({ events }, {
       owner: "worker", scope: "file.txt", verification: "grep worker-update file.txt", permission: "write",
       acceptance_criteria: ["The change is readable to a new maintainer."],
     }, { cwd: repo, rpcTimeout: 1000, timeout: 1000 });
     assert.equal(semantic.taskResult.verification_status, "blocked");
     assert.match(semantic.taskResult.verification_summary, /semantic Verifier/);
     spawnSync("git", ["-C", repo, "branch", "-D", "pi-agent-smoke"]);
-    const failed = await executeCoordinateTask({ events }, {
+    const failed = await executeTask({ events }, {
       owner: "worker", scope: "file.txt", verification: "false", permission: "write",
     }, { cwd: repo, rpcTimeout: 1000, timeout: 1000 });
     assert.equal(failed.taskResult.execution_status, "execution_complete");
@@ -1060,11 +1062,11 @@ test("Harness combines passed Worker deterministic and semantic checks", async (
   const events = new EventBus();
   const fakePackage = packageManagerFor(events, repo, "worker-reviewed");
   try {
-    const result = await executeCoordinateTask({ events }, { owner: "worker", task_id: "T-worker", scope: "file.txt", verification: "grep worker-update file.txt", permission: "write", acceptance_criteria: ["The new code remains understandable."] }, { cwd: repo, rpcTimeout: 1000, timeout: 1000 });
+    const result = await executeTask({ events }, { owner: "worker", task_id: "T-worker", scope: "file.txt", verification: "grep worker-update file.txt", permission: "write", acceptance_criteria: ["The new code remains understandable."] }, { cwd: repo, rpcTimeout: 1000, timeout: 1000 });
     assert.equal(result.taskResult.verification_status, "verified");
     assert.equal(fakePackage.calls.filter((entry) => entry?.type === "reviewer").length, 1);
     assert.ok(result.taskResult.evidence_refs.some((ref) => readEvidence(ref, repo).metadata.kind === "semantic_review"));
-    assert.ok(!JSON.stringify(promoteTaskResult(result)).includes("+worker-update"));
+    assert.ok(!JSON.stringify(result.taskResult).includes("+worker-update"));
   } finally { fakePackage.restore(); rmSync(repo, { recursive: true, force: true }); }
 });
 
@@ -1074,7 +1076,7 @@ test("Evidence Store failure never gives a fake reference or verified status", a
   const old = process.env.PI_HARNESS_EVIDENCE_DIR;
   process.env.PI_HARNESS_EVIDENCE_DIR = "relative/unsafe";
   try {
-    const result = await executeCoordinateTask({ events }, { owner: "scout", scope: "lib", verification: "inspect", permission: "read" }, { timeout: 1000, rpcTimeout: 1000 });
+    const result = await executeTask({ events }, { owner: "scout", scope: "lib", verification: "inspect", permission: "read" }, { timeout: 1000, rpcTimeout: 1000 });
     assert.equal(result.taskResult.verification_status, "failed");
     assert.equal(result.taskResult.failure_code, "HARNESS_EVIDENCE_FAILED");
     assert.deepEqual(result.taskResult.evidence_refs, []);
@@ -1098,18 +1100,18 @@ test("goal-scoped cancellation aborts only the package task owned by that goal",
     }, { once: true });
   });
 
-  const pending = executeCoordinateTask({ events }, {
+  const pending = executeTask({ events }, {
     owner: "research",
     scope: "lib",
     verification: "printf evidence",
     permission: "read",
   }, { groupId: "goal-1", rpcTimeout: 1000, timeout: 1000 });
   await new Promise((resolvePromise) => setImmediate(resolvePromise));
-  assert.equal(cancelCoordinateTasks("other-goal"), 0);
-  assert.equal(cancelCoordinateTasks("goal-1"), 1);
+  assert.equal(cancelTasks("other-goal"), 0);
+  assert.equal(cancelTasks("goal-1"), 1);
   await assert.rejects(pending, error => error.code === "HARNESS_CANCELLED");
   assert.equal(request.options.signal.aborted, true);
-  assert.equal(hasActiveCoordinateTasks(), false);
+  assert.equal(hasActiveTasks(), false);
 });
 
 test("missing package settlement fails closed; a later exact promise releases retained ownership", async () => {
@@ -1126,14 +1128,14 @@ test("missing package settlement fails closed; a later exact promise releases re
     queueMicrotask(() => events.emit("subagents:completed", {id:"missing-promise",status:"completed",result:"PRIVATE"}));
   });
   try {
-    await assert.rejects(executeCoordinatorTurn({events}, "Inspect."), error => error.code === "HARNESS_CHILD_SETTLEMENT_TIMEOUT");
+    await assert.rejects(executeReadOnlyTurn({events}, "Inspect."), error => error.code === "HARNESS_CHILD_SETTLEMENT_TIMEOUT");
     assert.equal(request.options.signal.aborted, true);
-    assert.equal(hasActiveCoordinateTasks(), true);
+    assert.equal(hasActiveTasks(), true);
     record.promise = child.promise;
     request.options.onSpawned("missing-promise");
     child.resolve();
     await new Promise(resolve => setImmediate(resolve));
-    assert.equal(hasActiveCoordinateTasks(), false);
+    assert.equal(hasActiveTasks(), false);
   } finally { child.resolve(); restoreManager(); }
 });
 
@@ -1152,17 +1154,17 @@ test("queued cancellation waits for startup gate and never promotes late complet
     events.emit(`subagents:rpc:spawn:reply:${req.requestId}`, {success:true,data:{id:"queued-child"}});
   });
   try {
-    const pending = executeCoordinatorTurn({events}, "Inspect.", {signal:parent.signal});
+    const pending = executeReadOnlyTurn({events}, "Inspect.", {signal:parent.signal});
     const rejection = assert.rejects(pending, error => error.code === "HARNESS_CANCELLED" && error.childSettled === true);
     await new Promise(resolve => setImmediate(resolve));
     parent.abort();
     assert.equal(request.options.signal.aborted, true);
-    assert.equal(hasActiveCoordinateTasks(), true);
+    assert.equal(hasActiveTasks(), true);
     record.status = "stopped";
     gate.resolve();
     await rejection;
     events.emit("subagents:completed", {id:"queued-child",status:"completed",result:"LATE PRIVATE"});
-    assert.equal(hasActiveCoordinateTasks(), false);
+    assert.equal(hasActiveTasks(), false);
     assert.equal(events.listenerCount("subagents:completed"), 0);
   } finally { child.resolve(); gate.resolve(); if(previous === undefined) delete globalThis[key]; else globalThis[key] = previous; }
 });
@@ -1174,15 +1176,15 @@ test("cancellation during spawn ACK retains ownership and cleans the late RPC li
   let request;
   events.on("subagents:rpc:spawn", req => { request = req; req.options.onSpawned("cancel-ack"); });
   try {
-    const pending = executeCoordinatorTurn({events}, "Inspect.", {signal:parent.signal,rpcTimeout:1000});
+    const pending = executeReadOnlyTurn({events}, "Inspect.", {signal:parent.signal,rpcTimeout:1000});
     const rejection = assert.rejects(pending, error => error.code === "HARNESS_CANCELLED" && error.childSettled === true);
     parent.abort();
     await new Promise(resolve => setImmediate(resolve));
-    assert.equal(hasActiveCoordinateTasks(), true);
+    assert.equal(hasActiveTasks(), true);
     child.resolve();
     await rejection;
     assert.equal(events.listenerCount(`subagents:rpc:spawn:reply:${request.requestId}`), 0);
-    assert.equal(hasActiveCoordinateTasks(), false);
+    assert.equal(hasActiveTasks(), false);
   } finally { child.resolve(); restoreManager(); }
 });
 
@@ -1205,7 +1207,7 @@ test("pi-subagents real queued child cancels without starting while its sibling 
   const siblingSignal = new AbortController(), queuedSignal = new AbortController();
   const siblingId = manager.spawn(pi,ctx,"worker","Inspect.",{cwd:repo,isBackground:true,isolation:"worktree",signal:siblingSignal.signal});
   try {
-    const pending = executeCoordinatorTurn({events},"Inspect.",{cwd:repo,signal:queuedSignal.signal,rpcTimeout:1000});
+    const pending = executeReadOnlyTurn({events},"Inspect.",{cwd:repo,signal:queuedSignal.signal,rpcTimeout:1000});
     const rejection = assert.rejects(pending,error=>error.code === "HARNESS_CANCELLED" && error.childSettled === true);
     await new Promise(resolve=>setImmediate(resolve));
     assert.equal(manager.queue.length,1);
@@ -1217,7 +1219,7 @@ test("pi-subagents real queued child cancels without starting while its sibling 
     assert.equal(queued.promise,undefined,"queued child never runs");
     assert.equal(siblingSignal.signal.aborted,false);
     assert.equal(manager.getRecord(siblingId).status,"running");
-    assert.equal(hasActiveCoordinateTasks(),false);
+    assert.equal(hasActiveTasks(),false);
   } finally {
     siblingSignal.abort(); startup.resolve();
     await manager.awaitStartup(siblingId).catch(()=>{});
@@ -1240,12 +1242,12 @@ test("fake-clock terminal deadline aborts only at its exact boundary", async t =
   });
   t.mock.timers.enable({apis:["setTimeout"]});
   try {
-    const pending=executeCoordinatorTurn({events},"Inspect.",{timeout:100,rpcTimeout:1000});
+    const pending=executeReadOnlyTurn({events},"Inspect.",{timeout:100,rpcTimeout:1000});
     const rejected=assert.rejects(pending,error=>error.code === "HARNESS_CHILD_TERMINAL_TIMEOUT");
     await new Promise(resolve=>setImmediate(resolve));
     t.mock.timers.tick(99); assert.equal(signal.aborted,false);
     t.mock.timers.tick(1); assert.equal(signal.aborted,true);
-    await rejected; assert.equal(hasActiveCoordinateTasks(),false);
+    await rejected; assert.equal(hasActiveTasks(),false);
   } finally {t.mock.timers.reset();child.resolve();restoreManager();}
 });
 
@@ -1348,18 +1350,18 @@ test("fake-clock Reviewer retains its 120s default when execution budget is 300s
   });
   t.mock.timers.enable({apis:["setTimeout"]});
   try {
-    const pending=executeCoordinateTask({events},{owner:"research",scope:"Inspect.",verification:"Inspect report.",permission:"read",acceptance_criteria:["The report is sufficient."]},{timeout:300000});
+    const pending=executeTask({events},{owner:"research",scope:"Inspect.",verification:"Inspect report.",permission:"read",acceptance_criteria:["The report is sufficient."]},{timeout:300000});
     while(!reviewerSignal) await new Promise(resolve=>setImmediate(resolve));
     await new Promise(resolve=>setImmediate(resolve));
     t.mock.timers.tick(119999);assert.equal(reviewerSignal.aborted,false);
     t.mock.timers.tick(1);assert.equal(reviewerSignal.aborted,true);
     assert.equal((await pending).taskResult.verification_status,"blocked");
-    assert.equal(hasActiveCoordinateTasks(),false);
+    assert.equal(hasActiveTasks(),false);
   } finally {t.mock.timers.reset();reviewer.resolve();restoreManager();}
 });
 
 
-test("executeCoordinateTask records each spawned child against the current Attempt", async () => {
+test("executeTask records each spawned child against the current Attempt", async () => {
   const repo = makeRepo("pi-child-correlation-");
   const events = new EventBus();
   events.mockSettlement = false;
@@ -1376,7 +1378,7 @@ test("executeCoordinateTask records each spawned child against the current Attem
     queueMicrotask(() => {
       try {
         assert.deepEqual(references.at(-1), { child_id: id, role: request.type }, "spawn acknowledgement records ownership before settlement");
-        assert.deepEqual(coordinatorApi.inspectCoordinateChild(id), { state: "active" });
+        assert.deepEqual(coordinatorApi.inspectChild(id), { state: "active" });
       } catch (error) { callbackErrors.push(error); }
       const packet = request.type.endsWith("reviewer") ? JSON.parse(request.prompt.slice(request.prompt.indexOf('{"version"'))) : undefined;
       const result = packet ? JSON.stringify({ version: 1, task_id: packet.task_id, status: "verified", summary: "The criterion passed.", criteria: packet.acceptance_criteria.map((criterion) => ({ criterion, status: "passed", finding: "The report supports the criterion.", evidence_refs: [packet.evidence[0].reference] })) }) : "A selected report.";
@@ -1386,15 +1388,15 @@ test("executeCoordinateTask records each spawned child against the current Attem
     });
   });
   try {
-    await executeCoordinateTask({ events }, { owner: "worker", permission: "write", scope: "Edit file.txt", verification: "true" }, { cwd: repo, onChildStarted: (ref) => references.push(ref) });
-    await executeCoordinateTask({ events }, { task_id: "T-review", owner: "research", permission: "read", scope: "Inspect file.txt", verification: "Inspect report.", acceptance_criteria: ["The report is clear.", "The report is safe."], review_profile: { "The report is safe.": "security" } }, { cwd: repo, onChildStarted: (ref) => references.push(ref), modelRegistry: { getAvailable: () => [{ provider: "openai", id: "gpt-daybreak-blue-latest" }] } });
+    await executeTask({ events }, { owner: "worker", permission: "write", scope: "Edit file.txt", verification: "true" }, { cwd: repo, onChildStarted: (ref) => references.push(ref) });
+    await executeTask({ events }, { task_id: "T-review", owner: "research", permission: "read", scope: "Inspect file.txt", verification: "Inspect report.", acceptance_criteria: ["The report is clear.", "The report is safe."], review_profile: { "The report is safe.": "security" } }, { cwd: repo, onChildStarted: (ref) => references.push(ref), modelRegistry: { getAvailable: () => [{ provider: "openai", id: "gpt-daybreak-blue-latest" }] } });
     if (callbackErrors.length) throw callbackErrors[0];
     assert.deepEqual(references, [{ child_id: "managed-1", role: "worker" }, { child_id: "managed-2", role: "research" }, { child_id: "managed-3", role: "reviewer" }, { child_id: "managed-4", role: "security-reviewer" }]);
-    assert.deepEqual(coordinatorApi.inspectCoordinateChild("managed-1"), { state: "terminal", child_status: "completed", child_disposition: { branch_status: "unknown", worktree_status: "unknown" } });
+    assert.deepEqual(coordinatorApi.inspectChild("managed-1"), { state: "terminal", child_status: "completed", child_disposition: { branch_status: "unknown", worktree_status: "unknown" } });
     records.get("managed-1").child_disposition = { branch_status: "preserved", branch: "pi-agent-selected", worktree_status: "unknown" };
-    assert.deepEqual(coordinatorApi.inspectCoordinateChild("managed-1").child_disposition, records.get("managed-1").child_disposition);
+    assert.deepEqual(coordinatorApi.inspectChild("managed-1").child_disposition, records.get("managed-1").child_disposition);
     records.get("managed-1").child_disposition.path = "/tmp/private";
-    assert.deepEqual(coordinatorApi.inspectCoordinateChild("managed-1"), { state: "terminal", child_status: "completed", child_disposition: { branch_status: "unknown", worktree_status: "unknown" } });
-    assert.deepEqual(coordinatorApi.inspectCoordinateChild("missing"), { state: "unavailable" });
+    assert.deepEqual(coordinatorApi.inspectChild("managed-1"), { state: "terminal", child_status: "completed", child_disposition: { branch_status: "unknown", worktree_status: "unknown" } });
+    assert.deepEqual(coordinatorApi.inspectChild("missing"), { state: "unavailable" });
   } finally { restoreManager(); rmSync(repo, { recursive: true, force: true }); }
 });

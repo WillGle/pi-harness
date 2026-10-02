@@ -64,18 +64,22 @@ test("optional Skills stay explicit-only and absent from the CORE prompt catalog
   assert.match(ponytail, /preserve the requested capability and any specified architecture/i);
 });
 
+test("Workers use the budget model while the Commander policy does not select a model", () => {
+  const worker = readFileSync(".pi/agents/worker.md", "utf8");
+  const commander = readFileSync("lib/agent-english.mjs", "utf8");
+  assert.ok(worker.includes("model: openai-codex/gpt-6-luna"));
+  assert.doesNotMatch(commander, /model:|openai-codex/);
+});
+
 test("scouting has one packaged execution path and doctrine describes the supported TaskOrder subset", () => {
   const scouting = readFileSync("skills/project-scouting/SKILL.md", "utf8");
-  assert.match(scouting, /pi_harness_run_operation/);
-  assert.match(scouting, /pi_harness_coordinate` tool is disabled/);
+  assert.match(scouting, /pi_harness_delegate/);
+  assert.match(scouting, /Independent review is optional/);
   assert.doesNotMatch(scouting, /scripts\/scout\.py|\.scout_report\.md.*exists/);
-  assert.match(readFileSync(".pi/agents/coordinator.md", "utf8"), /Only the Coordinator may accept a verified TaskResult/);
-  assert.match(readFileSync(".pi/agents/coordinator.md", "utf8"), /read-only TaskOrder/);
   const cavecrew = readFileSync("skills/cavecrew/SKILL.md", "utf8");
   assert.match(cavecrew, /Do not register or spawn named cavecrew agents/);
   assert.match(cavecrew, /Never treat a receipt as a TaskResult/);
-  assert.match(readFileSync("skills/caveman/SKILL.md", "utf8"), /Never format or rewrite a Mission/);
-  assert.match(readFileSync(".pi/agents/coordinator.md", "utf8"), /Operation completion does not complete the Mission/);
+  assert.match(readFileSync("skills/caveman/SKILL.md", "utf8"), /Never format or rewrite an objective/);
   const lock = JSON.parse(readFileSync("skills/skills.lock.json", "utf8"));
   assert.equal(Object.hasOwn(lock.skills, "skill-hub"), false);
 });

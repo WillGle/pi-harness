@@ -1,3 +1,5 @@
+> Historical architecture, superseded by the direct Commander design.
+
 # Pi Harness Architecture
 
 ## Scope

@@ -1,6 +1,6 @@
 import harness from "../extensions/pi-harness.ts";
 import { mkdtempSync, rmSync } from "node:fs";
-import { contextTelemetry, deterministicContextEdits, installStablePrompt, stablePromptSections } from "../lib/context-economics.mjs";
+import { contextTelemetry, installStablePrompt, stablePromptSections } from "../lib/context-economics.mjs";
 import { buildSystemPrompt } from "../node_modules/@earendil-works/pi-coding-agent/dist/core/system-prompt.js";
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -98,7 +98,7 @@ test("Pi 0.87.1 context edits and cache-warming capability shapes are inspectabl
 });
 
 test("Phase I uses Pi-native stable sections instead of accumulating context messages", () => {
-  assert.match(extensionSource, /installStablePrompt\(event, sections/);
+  assert.match(extensionSource, /installStablePrompt\(event, stablePromptSections/);
   assert.doesNotMatch(extensionSource, /customType: "pi-harness-context"/);
 });
 
@@ -138,80 +138,18 @@ test("real Pi prompt runner keeps sections byte-stable and learn/plan invalidate
   } finally {if(old===undefined)delete process.env.PI_HARNESS_MEMORY_DIR;else process.env.PI_HARNESS_MEMORY_DIR=old;rmSync(dir,{recursive:true,force:true});}
 });
 
-test("native ContextEdit GC shrinks future context, retains raw history and protects active/unaccepted state",()=>{
-  const session=SessionManager.inMemory("/tmp/pi-gc-proof");
-  session.appendMessage({role:"user",content:"Old request.",timestamp:1});
-  const contract=session.appendCustomMessageEntry("pi-harness-context",stablePromptSections().pi_harness_contract,false);
-  const oldCall=session.appendMessage({role:"assistant",content:[{type:"toolCall",id:"old-call",name:"pi_harness_coordinate",arguments:{}}],timestamp:2});
-  const raw=JSON.stringify({version:1,operation_id:"O-ACCEPTED",task_id:"T-A",verification_status:"verified",raw_execution:"PRIVATE ".repeat(2000)});
-  const superseded=session.appendMessage({role:"toolResult",toolCallId:"old-call",toolName:"pi_harness_coordinate",content:[{type:"text",text:raw}],isError:false,timestamp:3});
-  const pending=session.appendMessage({role:"toolResult",toolCallId:"unaccepted",toolName:"pi_harness_coordinate",content:[{type:"text",text:JSON.stringify({operation_id:"O-PENDING",task_id:"T-B",raw_execution:"Preserve unaccepted."})}],isError:false,timestamp:4});
-  const later=session.appendMessage({role:"toolResult",toolCallId:"report",toolName:"pi_harness_run_operation",content:[{type:"text",text:JSON.stringify({version:1,operation_id:"O-ACCEPTED",status:"complete",accepted_task_ids:["T-A"]})}],isError:false,timestamp:5});
-  const current=session.appendMessage({role:"user",content:"Current request and unresolved decisions.",timestamp:6});
-  const active=session.appendCustomMessageEntry("pi-harness-context",stablePromptSections().pi_harness_contract,false);
-  const operations={"O-ACCEPTED":{operation_id:"O-ACCEPTED",status:"complete",required_task_ids:["T-A"],accepted_task_ids:["T-A"],task_results:{"T-A":{verification_status:"verified"}}},"O-PENDING":{status:"open"}};
-  const taskGraphs={"O-ACCEPTED":{nodes:{"T-A":{scheduler_status:"accepted"}}}};
-  const before=JSON.stringify(session.buildSessionProjection().messages);
-  const snapshot=JSON.stringify({operations,taskGraphs});
-  const collected=deterministicContextEdits(session.buildSessionProjection().entries,{operations,taskGraphs});
-  assert.deepEqual(collected.edits.map(e=>e.targetId),[contract,superseded]);
-  for(const edit of collected.edits)session.appendContextEdit(edit.targetId,edit.replacement);
-  const after=JSON.stringify(session.buildSessionProjection().messages);
-  assert.ok(Buffer.byteLength(after)<Buffer.byteLength(before)-10000);
-  assert.ok(collected.bytesRemoved>10000);
-  assert.equal(session.getEntry(superseded).message.content[0].text,raw);
-  for(const id of [oldCall,pending,later,current,active])assert.ok(session.buildSessionProjection().entries.find(e=>e.sourceEntry.id===id).messages.length);
-  assert.equal(JSON.stringify({operations,taskGraphs}),snapshot);
-  assert.equal(deterministicContextEdits(session.buildSessionProjection().entries,{operations,taskGraphs}).edits.length,0);
-  assert.equal(session.getEntries().filter(e=>e.type==="context_edit").length,2);
-});
-
-test("promotion GC supersedes a prior Harness continuation but preserves the current continuation",()=>{
-  const session=SessionManager.inMemory("/tmp/pi-continuation-gc-proof");
-  session.appendMessage({role:"user",content:"Start.",timestamp:1});
-  const old=session.appendMessage({role:"user",content:"[PI_HARNESS_MISSION_CONTINUE]\\nMission: "+"Long objective. ".repeat(100),timestamp:2});
-  const current=session.appendMessage({role:"user",content:"[PI_HARNESS_MISSION_CONTINUE]\\nMission: Current objective.",timestamp:3});
-  const collected=deterministicContextEdits(session.buildSessionProjection().entries);
-  assert.deepEqual(collected.edits.map((entry)=>entry.targetId),[old]);
-  assert.equal(collected.gcEntries.mission,1);
-  assert.equal(collected.edits[0].replacement.content.includes("Mission continuation"),true);
-  assert.ok(session.buildSessionProjection().entries.find((entry)=>entry.sourceEntry.id===current).messages.length);
-});
-
-test("promotion GC supersedes a blocked OperationReport only after a later complete OperationReport",()=>{
-  const session=SessionManager.inMemory("/tmp/pi-promotion-gc-proof");
-  session.appendMessage({role:"user",content:"Run the Operation.",timestamp:1});
-  const old=session.appendMessage({role:"toolResult",toolCallId:"old",toolName:"pi_harness_run_operation",content:[{type:"text",text:JSON.stringify({version:1,operation_id:"O-1",status:"blocked",blocker:"Old blocker."})}],isError:false,timestamp:2});
-  session.appendMessage({role:"toolResult",toolCallId:"new",toolName:"pi_harness_run_operation",content:[{type:"text",text:JSON.stringify({version:1,operation_id:"O-1",status:"complete",accepted_task_ids:["T-1"]})}],isError:false,timestamp:3});
-  session.appendMessage({role:"user",content:"Continue.",timestamp:4});
-  const operations={"O-1":{mission_id:"M-1",operation_id:"O-1",status:"complete",required_task_ids:["T-1"],accepted_task_ids:["T-1"],task_results:{"T-1":{execution_status:"execution_complete",verification_status:"verified"}}}};
-  const taskGraphs={"O-1":{nodes:{"T-1":{scheduler_status:"accepted"}}}};
-  const edits=deterministicContextEdits(session.buildSessionProjection().entries,{operations,taskGraphs});
-  assert.deepEqual(edits.edits.map((entry)=>entry.targetId),[old]);
-  assert.match(edits.edits[0].replacement.content,/later complete OperationReport/);
-  assert.equal(edits.gcEntries.operation,1);
-});
-
 test("telemetry records runtime metrics without inventing provider cost or missing token counts",()=>{
   const empty=contextTelemetry([],undefined);
   assert.equal(empty.input_tokens,null);assert.equal(empty.cache_hit_ratio,null);assert.equal(empty.provider_reported_cost,null);assert.equal(empty.runtime_catalog_cost,null);
   const usage={input:10,output:2,cacheRead:30,cacheWrite:5,totalTokens:47,cost:{total:0.01}};
   const result=contextTelemetry([{type:"message",message:{role:"assistant",usage}},{type:"usage",kind:"cache_warm",usage},{type:"context_edit"},{type:"compaction"},{customType:"pi-harness-context-maintenance",data:{gc_bytes_removed:100}}],{tokens:100,contextWindow:200});
   assert.equal(result.input_tokens,20);assert.equal(result.output_tokens,4);assert.equal(result.cache_read_tokens,60);assert.equal(result.cache_write_tokens,10);
-  assert.equal(result.total_tokens,94);assert.equal(result.cache_hit_ratio,60/90);assert.equal(result.runtime_catalog_cost,0.02);assert.equal(result.warming_runtime_catalog_cost,0.01);
-  assert.equal(result.context_edits_count,1);assert.equal(result.compaction_count,1);assert.equal(result.gc_bytes_removed,100);assert.equal(result.gc_tokens_removed,null);
+  assert.equal(result.total_tokens,94);assert.equal(result.cache_hit_ratio,60/90);assert.equal(result.runtime_catalog_cost,0.02);
+  assert.equal(result.compaction_count,1);assert.equal(result.coverage.runtime_catalog_cost.known,2);
   assert.equal(result.context_tokens_estimated,100);assert.equal(result.provider_reported_cost,null);
-  const attributed=contextTelemetry([{customType:"pi-harness-child-usage",data:{mission_id:"M-1",operation_id:"O-1",task_id:"T-1",attempt_id:"A-O-1-T-1-01",role:"worker",usage:{input:3,output:2,cacheRead:1,cacheWrite:0,totalTokens:6,cost:{total:0.02}}}}]);
-  assert.deepEqual(attributed.usage_attribution,[{mission_id:"M-1",operation_id:"O-1",task_id:"T-1",attempt_id:"A-O-1-T-1-01",role:"worker",input_tokens:3,output_tokens:2,cache_read_tokens:1,cache_write_tokens:0,total_tokens:6,runtime_catalog_cost:0.02}]);
-  const unknownAttribution=contextTelemetry([{customType:"pi-harness-child-usage",data:{mission_id:"M-1",operation_id:"O-1",task_id:"T-1",attempt_id:"A-O-1-T-1-01",role:"worker",usage:{input:3,output:2}}}]);
+  const attributed=contextTelemetry([{customType:"pi-harness-child-usage",data:{work_id:"W-1",task_id:"T-1",role:"worker",usage:{input:3,output:2,cacheRead:1,cacheWrite:0,totalTokens:6,cost:{total:0.02}}}}]);
+  assert.deepEqual(attributed.usage_attribution.map(({coverage,...item})=>item),[{work_id:"W-1",task_id:"T-1",role:"worker",input_tokens:3,output_tokens:2,cache_read_tokens:1,cache_write_tokens:0,total_tokens:6,runtime_catalog_cost:0.02}]);
+  const unknownAttribution=contextTelemetry([{customType:"pi-harness-child-usage",data:{work_id:"W-1",task_id:"T-1",role:"worker",usage:{input:3,output:2}}}]);
   assert.equal(unknownAttribution.usage_attribution[0].runtime_catalog_cost,null,"missing runtime catalog cost remains unknown");
   assert.equal(unknownAttribution.usage_attribution[0].cache_read_tokens,null,"missing token counts remain unknown");
-});
-
-test("Operation-to-Mission telemetry requires an explicit terminal Operation disposition",()=>{
-  const taskGraphs={"O-1":{nodes:{"T-1":{scheduler_status:"waived"}}}};
-  const open={"O-1":{operation_id:"O-1",status:"open",required_task_ids:["T-1"]}};
-  assert.equal(contextTelemetry([],undefined,{operations:open,taskGraphs}).promotions_operation_to_mission,0);
-  const waived={"O-1":{...open["O-1"],status:"waived",operation_disposition:{kind:"waived",authority_type:"commander",reason:"The requirement is removed.",timestamp:"2026-01-01T00:00:00.000Z"}}};
-  assert.equal(contextTelemetry([],undefined,{operations:waived,taskGraphs}).promotions_operation_to_mission,1);
 });

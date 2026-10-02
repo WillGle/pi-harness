@@ -6,25 +6,17 @@ import { spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  COMPACT_ENTRY,
-  GOAL_ENTRY,
-  PLAN_ENTRY,
-  cavemanSummary,
-  goalState,
-  isPlanAllowedTool,
-  isReadOnlyBash,
-  planState,
-  restore,
-  transitionGoal,
-} from "../lib/state.mjs";
+import { PLAN_ENTRY, isPlanAllowedTool, isReadOnlyBash, restore } from "../lib/plan.mjs";
+import { WORK_ENTRY, workSituation } from "../lib/work.mjs";
+const newestWork = (entries) => Object.values(restore(entries, WORK_ENTRY) ?? {}).at(-1);
 
 function spawnPiRpc(options = {}) {
   const tmpDir = mkdtempSync(join(tmpdir(), "pi-rpc-test-"));
-  const child = spawn(DEFAULT_PI_EXECUTABLE, ["--mode", "rpc", "-e", ".", "--no-session"], {
+  const child = spawn(DEFAULT_PI_EXECUTABLE, ["--mode", "rpc", "--offline", "--no-extensions", "-e", ".", "--no-context-files", "--no-session"], {
     stdio: ["pipe", "pipe", "pipe"],
     cwd: options.cwd || process.cwd(),
-    env: { ...defaultPiEnv(), PI_HARNESS_CONTROL_DIR: join(tmpDir, "control") },
+    env: { ...defaultPiEnv(), HOME: tmpDir, PI_CODING_AGENT_DIR: join(tmpDir, "agent"),
+      PI_CODING_AGENT_SESSION_DIR: join(tmpDir, "sessions"), PI_HARNESS_CONTROL_DIR: join(tmpDir, "control"), PI_HARNESS_EVIDENCE_DIR: join(tmpDir, "evidence") },
   });
 
   const events = [];
@@ -126,7 +118,7 @@ test("Pi RPC: /goal lifecycle, continuation, reject second goal, and cancellatio
     await pi.prompt("/plan on");
     await pi.prompt("/goal Blocked goal");
     let entries = (await pi.sendCommand({ type: "get_entries" })).data.entries;
-    let activeGoal = entries.find((e) => e.customType === GOAL_ENTRY && e.data.objective === "Blocked goal");
+    let activeGoal = entries.find((e) => e.customType === WORK_ENTRY && Object.values(e.data).some(work => work.objective === "Blocked goal"));
     assert.equal(activeGoal, undefined, "Goal should not be created when plan mode is active");
 
     // 2. Turn plan off and start goal
@@ -134,23 +126,23 @@ test("Pi RPC: /goal lifecycle, continuation, reject second goal, and cancellatio
     await pi.prompt("/goal Implement release gate");
 
     entries = (await pi.sendCommand({ type: "get_entries" })).data.entries;
-    activeGoal = [...entries].reverse().find((e) => e.customType === GOAL_ENTRY);
+    activeGoal = newestWork(entries);
     assert.ok(activeGoal);
-    assert.equal(activeGoal.data.objective, "Implement release gate");
-    assert.equal(activeGoal.data.status, "active");
+    assert.equal(activeGoal.objective, "Implement release gate");
+    assert.equal(activeGoal.status, "active");
 
     // 3. Reject second active goal
     await pi.prompt("/goal Another goal");
     entries = (await pi.sendCommand({ type: "get_entries" })).data.entries;
-    const anotherGoal = entries.find((e) => e.customType === GOAL_ENTRY && e.data.objective === "Another goal");
+    const anotherGoal = entries.find((e) => e.customType === WORK_ENTRY && Object.values(e.data).some(work => work.objective === "Another goal"));
     assert.equal(anotherGoal, undefined, "Second active goal must be rejected");
 
     // 4. Cancel goal
     await pi.prompt("/goal cancel");
     entries = (await pi.sendCommand({ type: "get_entries" })).data.entries;
-    const cancelledGoal = [...entries].reverse().find((e) => e.customType === GOAL_ENTRY);
+    const cancelledGoal = newestWork(entries);
     assert.ok(cancelledGoal);
-    assert.equal(cancelledGoal.data.status, "cancelled");
+    assert.equal(cancelledGoal.status, "cancelled");
   } finally {
     await pi.close();
   }
@@ -173,22 +165,13 @@ test("Pi RPC: compaction, restore, and fork state preservation", async () => {
     const restoredPlan = restore(entries, PLAN_ENTRY);
     assert.equal(restoredPlan.enabled, false);
 
-    const restoredGoal = restore(entries, GOAL_ENTRY);
+    const restoredGoal = newestWork(entries);
     assert.equal(restoredGoal.objective, "Verify state compaction");
     assert.equal(restoredGoal.status, "cancelled");
 
-    // Verify canonical control-state compaction contract
-    const compactSummary = cavemanSummary({
-      goal: restoredGoal,
-      plan: restoredPlan,
-      decisions: ["use-native-rpc"],
-      changedFiles: ["lib/state.mjs"],
-      gates: ["unit", "rpc"],
-      blocker: undefined,
-    });
-    assert.equal(compactSummary.format, "agent-english-v1");
-    assert.equal(compactSummary.mission.objective, "Verify state compaction");
-    assert.deepEqual(compactSummary.gates, ["unit", "rpc"]);
+    const compactSummary = workSituation(restoredGoal);
+    assert.match(compactSummary, /Original objective: Verify state compaction/);
+    assert.match(compactSummary, /cancelled/);
 
     // Test compact command execution in RPC
     const compactRes = await pi.sendCommand({ type: "compact" });
@@ -202,7 +185,7 @@ test("Pi RPC: compaction, restore, and fork state preservation", async () => {
 
     // Verify restore works when reconstructing session from entries
     const simulatedSessionStartPlan = restore(entries, PLAN_ENTRY);
-    const simulatedSessionStartGoal = restore(entries, GOAL_ENTRY);
+    const simulatedSessionStartGoal = newestWork(entries);
     assert.equal(simulatedSessionStartPlan.enabled, false);
     assert.equal(simulatedSessionStartGoal.objective, "Verify state compaction");
     assert.equal(simulatedSessionStartGoal.status, "cancelled");

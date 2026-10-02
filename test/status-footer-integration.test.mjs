@@ -50,7 +50,7 @@ test("footer renders two cached lines without history scans and exposes one boun
     assert.ok(lines.every((line) => visibleWidth(line) <= width));
   }
   const initialFooter = widget.render(160);
-  assert.match(initialFooter[0], /Mission Idle/);
+  assert.match(initialFooter[0], /Work Idle/);
   assert.match(initialFooter[1], /Test Model · Off/);
   for (let index = 0; index < 30; index++) widget.render(120);
   assert.equal(entriesReads, readsAfterStartup, "footer render performs no session-history reads");

@@ -208,9 +208,9 @@ test("Evidence, memory, precise edits, and Worker verification fail before files
 
     const dispatch = runNode(`
       Object.defineProperty(process, "platform", { value: "darwin" });
-      const { executeCoordinateTask } = await import("./lib/coordinator.mjs");
+      const { executeTask } = await import("./lib/executor.mjs");
       const pi = { events: { emit() { console.log("DISPATCHED"); } } };
-      try { await executeCoordinateTask(pi, { owner: "worker", scope: "must not dispatch", permission: "read", verification: "true" }); }
+      try { await executeTask(pi, { owner: "worker", scope: "must not dispatch", permission: "read", verification: "true" }); }
       catch (error) { console.log(error.message); }
     `);
     assert.equal(dispatch.status, 0, dispatch.stderr);

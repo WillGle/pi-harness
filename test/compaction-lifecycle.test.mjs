@@ -1,22 +1,13 @@
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-import { stablePromptSections } from "../lib/context-economics.mjs";
-import { reconcileAttemptLedger } from "../lib/attempt-ledger.mjs";
-import { CONTROL_STATE_VERSION, readControlState } from "../lib/control-state-store.mjs";
-import { getProjectIdentifier } from "../lib/memory.mjs";
-import { createMission, validateMissionOwnership } from "../lib/mission.mjs";
-import { acceptTaskResult, createOperation, recordTaskResult } from "../lib/operation.mjs";
-import { acceptGraphTask, claimTask, createTaskGraph, recordTaskGraphResult } from "../lib/task-graph.mjs";
-import { goalState } from "../lib/state.mjs";
-import { mockSettlement } from "./helpers/mock-settlement.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { executeCoordinateTask } from "../lib/coordinator.mjs";
-import harness from "../extensions/pi-harness.ts";
-import { PROACTIVE_COMPACT_ENTRY, setProactiveThreshold } from "../lib/compaction-policy.mjs";
 import { randomUUID } from "node:crypto";
+import harness from "../extensions/pi-harness.ts";
+import { addWorkTask, claimWorkTask, createWork, WORK_ENTRY } from "../lib/work.mjs";
+import { PLAN_ENTRY } from "../lib/plan.mjs";
+import { mockSettlement } from "./helpers/mock-settlement.mjs";
 import { trackControlPi } from "./helpers/control-state-isolation.mjs";
 
 function fixture(entries = [], existingCwd = undefined) {
@@ -48,247 +39,45 @@ function fixture(entries = [], existingCwd = undefined) {
     return result;
   };
   const emit = (name, event = {}) => {if(name === "agent_settled" && idle)boundary();return handlers.get(name)?.(event, ctx);};
-  emit("session_start");
+  const ready = emit("session_start");
   pi.shutdown = () => handlers.get("session_shutdown")?.();
   trackControlPi(pi);
-  return { pi, ctx, emit, session, boundary, maintenance:()=>session.getEntries().filter(e=>e.customType === "pi-harness-context-maintenance"), setPercent: (value) => { percent = value; }, setIdle: (value) => { idle = value; },
+  return { ready, pi, ctx, emit, session, boundary, maintenance:()=>session.getEntries().filter(e=>e.customType === "pi-harness-context-maintenance"), setPercent: (value) => { percent = value; }, setIdle: (value) => { idle = value; },
     command: (name, args) => commands.get(name).handler(args, ctx),
     latest: (name) => session.getEntries().filter((entry) => entry.customType === name).at(-1)?.data };
 }
 
-test("70% is a configurable soft GC trigger, never a Harness compaction threshold",async()=>{
-  const f=fixture();await f.command("harness-compact","status");assert.match(f.pi.notices.at(-1).message,/enabled at 70%/);
-  f.setPercent(69);f.emit("context");f.emit("agent_settled");assert.equal(f.maintenance().length,0);
-  f.setPercent(70);f.emit("context");f.emit("agent_settled");assert.equal(f.maintenance().length,1);assert.equal(f.pi.compactions.length,0);
-  await f.command("harness-compact","set 73");assert.deepEqual(f.latest(PROACTIVE_COMPACT_ENTRY),{enabled:true,threshold_percent:73});
-  for(const value of ["49","91","73.5","abc"])assert.throws(()=>setProactiveThreshold(value));
-  const restored=fixture(f.pi.entries);await restored.command("harness-compact","status");assert.match(restored.pi.notices.at(-1).message,/enabled at 73%/);
-  await restored.command("harness-compact","disable");restored.setPercent(95);restored.emit("context");restored.emit("agent_settled");assert.equal(restored.maintenance().length,1);assert.equal(restored.pi.compactions.length,0);
+test("explicit work resume retains the original objective and interrupted child provenance", async () => {
+  const created = addWorkTask(createWork("Preserve the requested API.", ["Keep unrelated changes."]), { owner: "research", scope: "Inspect source.", permission: "read", verification: "Review findings.", acceptance_criteria: ["Name the entry point."] });
+  const work = claimWorkTask(created.work, created.task_id);
+  const f = fixture([{ customType: WORK_ENTRY, data: { [work.work_id]: work } }]); await f.ready;
+  assert.equal(f.pi.continuations.length, 0);
+  await f.command("work", "resume " + work.work_id);
+  assert.match(f.pi.continuations.at(-1), /Original objective: Preserve the requested API/);
+  assert.match(f.pi.continuations.at(-1), /Keep unrelated changes/);
+  assert.equal(f.latest(WORK_ENTRY)[work.work_id].tasks[created.task_id].status, "unknown");
+  await assert.rejects(f.pi.tools.get("pi_harness_goal").execute("complete", { status: "complete", evidence: "No result exists." }), /unresolved/);
 });
 
-test("explicit Mission resume gives the Commander the resume event and durable Situation Board", async () => {
-  const cwd = mkdtempSync(join(tmpdir(), "pi-mission-resume-"));
-  const mission_id = "M-resume";
-  const operation_id = "O-resume";
-  const task_id = "T-resume-01";
-  const objective = "Complete the accepted Mission.";
-  const mission = createMission({ mission_id, objective, operation_ids: [operation_id] });
-  let operation = createOperation({
-    operation_id,
-    mission_id,
-    objective: "Verify the accepted artifact.",
-    required_task_ids: [task_id],
-    task_intents: { [task_id]: "Create the verified artifact." },
-    task_specs: { [task_id]: { owner: "worker", permission: "write", verification: "git diff --check", acceptance_criteria: ["The artifact is verified."] } },
-  });
-  let graph = claimTask(createTaskGraph(operation), operation, task_id);
-  operation = recordTaskResult(operation, { version: 1, operation_id, task_id, execution_status: "execution_complete", verification_status: "verified", evidence_refs: [] });
-  graph = recordTaskGraphResult(graph, operation, task_id);
-  const acceptedOperation = acceptTaskResult(operation, task_id);
-  graph = acceptGraphTask(graph, operation, acceptedOperation, task_id);
-  operation = acceptedOperation;
-  const operations = { [operation_id]: operation };
-  const taskGraphs = { [operation_id]: graph };
-  const attempt_ledger = reconcileAttemptLedger({}, operations, taskGraphs);
-  const missions = { [mission_id]: mission };
-  validateMissionOwnership(missions, operations, taskGraphs, attempt_ledger);
-  const snapshot = {
-    missions,
-    operations,
-    task_graphs: taskGraphs,
-    attempt_ledger,
-    mission_goals: { [mission_id]: goalState(objective) },
-    coordinator_states: {},
-    version: CONTROL_STATE_VERSION,
-    project_id: getProjectIdentifier(cwd),
-    revision: 1,
-    updated_at: new Date().toISOString(),
-  };
-  const controlDir = process.env.PI_HARNESS_CONTROL_DIR;
-  mkdirSync(controlDir, { recursive: true, mode: 0o700 });
-  writeFileSync(join(controlDir, `${snapshot.project_id}.json`), JSON.stringify(snapshot), { mode: 0o600 });
-
-  const f = fixture([], cwd);
-  try {
-    await f.command("mission", `resume ${mission_id}`);
-    const continuation = f.pi.continuations.at(-1);
-    assert.match(continuation, new RegExp(`Mission ${mission_id} was explicitly resumed by ID in this Pi session\\.`));
-    assert.match(continuation, /The fresh-session resume requirement is satisfied/);
-    assert.match(continuation, new RegExp(`Current Mission Situation Board:\\nMission ${mission_id}\\nStatus: active\\.\\nClosable: true\\.\\nOperation ${operation_id}: complete\\.`));
-    assert.match(continuation, /Do not recreate completed Operations or accepted Tasks/);
-
-    const resumed = readControlState(cwd);
-    assert.equal(resumed.missions[mission_id].status, "active");
-    assert.equal(resumed.operations[operation_id].status, "complete");
-    assert.equal(resumed.task_graphs[operation_id].nodes[task_id].scheduler_status, "accepted");
-    assert.equal(resumed.attempt_ledger[`A-${operation_id}-${task_id}-01`].status, "execution_complete");
-  } finally {
-    await f.pi.shutdown();
-    rmSync(cwd, { recursive: true, force: true });
-  }
-});
-
-test("92.5% long active turn waits for safe boundary, GC shrinks context, native Pi owns reserve",async()=>{
-  const f=fixture();f.session.appendMessage({role:"user",content:"Old request.",timestamp:1});
-  const old=f.session.appendCustomMessageEntry("pi-harness-context",stablePromptSections().pi_harness_contract,false);
-  f.session.appendMessage({role:"user",content:"Current request must remain.",timestamp:2});
-  const before=JSON.stringify(f.session.buildSessionProjection().messages);
-  f.setIdle(false);f.setPercent(92.5);f.emit("tool_execution_start",{toolCallId:"active"});f.emit("context");
-  await f.command("goal","Preserve this Mission.");
-  assert.equal(f.pi.continuations.length,0);assert.equal(f.boundary(),undefined);
-  assert.equal(JSON.stringify(f.session.buildSessionProjection().messages),before);
-  f.emit("tool_execution_end",{toolCallId:"active"});assert.equal(f.maintenance().length,0);
-  f.boundary();assert.equal(f.maintenance().length,1);
-  assert.ok(JSON.stringify(f.session.buildSessionProjection().messages).length<before.length);
-  assert.ok(f.session.getEntry(old).content.includes("COMMUNICATION CONTRACT"));
-  assert.equal(f.latest("pi-harness-goal-state").status,"active");
-  f.setIdle(true);f.emit("agent_settled");assert.equal(f.pi.continuations.length,1);
-  assert.equal(f.pi.compactions.length,0);assert.equal(f.latest("pi-harness-context-maintenance").context_edits,1);
-});
-
-test("GC does not loop at the same high-water mark; native failure does not decide Mission",async()=>{
-  const f=fixture();f.setPercent(80);f.emit("context");f.emit("agent_settled");
-  for(let i=0;i<3;i++){f.emit("context");f.emit("agent_settled");}assert.equal(f.maintenance().length,1);
-  f.emit("session_compact_failed");f.emit("context");f.emit("agent_settled");assert.equal(f.maintenance().length,1);
-  f.setPercent(40);f.emit("context");f.setPercent(80);f.emit("context");f.emit("agent_settled");assert.equal(f.maintenance().length,2);
-  assert.equal(f.pi.compactions.length,0);
-});
-
-test("active tool structure prevents GC until an explicit safe boundary",async()=>{
-  const f=fixture();f.setPercent(80);f.emit("tool_execution_start",{toolCallId:"reviewer"});f.emit("context");f.boundary();assert.equal(f.maintenance().length,0);
-  f.emit("tool_execution_end",{toolCallId:"reviewer"});assert.equal(f.maintenance().length,0);
-  f.boundary();assert.equal(f.maintenance().length,1);assert.equal(f.pi.compactions.length,0);
-});
-
-test("active direct TaskOrder and semantic Reviewer are never aborted by context maintenance", async () => {
-  const f = fixture();
-  const cwd = mkdtempSync(join(tmpdir(), "pi-compact-review-"));
-  const before = process.env.PI_HARNESS_EVIDENCE_DIR;
-  process.env.PI_HARNESS_EVIDENCE_DIR = cwd;
-  try {
-    await f.command("harness-compact", "set 55");
-    f.setPercent(60); f.emit("context");
-    let review;
-    f.pi.events.on("subagents:rpc:spawn", (request) => {
-      const id = request.type === "research" ? "research-1" : "reviewer-1";
-      f.pi.events.emit(`subagents:rpc:spawn:reply:${request.requestId}`, { success: true, data: { id } });
-      if (request.type === "research") queueMicrotask(() => f.pi.events.emit("subagents:completed", { id, status: "completed", result: "The report identifies a source." }));
-      else review = { request, id };
-    });
-    const task = executeCoordinateTask(f.pi, { owner: "research", task_id: "T-1", scope: "Read source", verification: "Check report", permission: "read", acceptance_criteria: ["The report identifies a source."] }, { cwd, timeout: 1500, rpcTimeout: 1000 });
-    for (let i = 0; i < 30 && !review; i++) await new Promise((resolve) => setTimeout(resolve, 5));
-    assert.ok(review);
-    f.emit("agent_settled");
-    assert.equal(f.pi.compactions.length, 0);
-    assert.equal(review.request.options.signal.aborted, false);
-    const packet = JSON.parse(review.request.prompt.slice(review.request.prompt.indexOf('{"version"')));
-    f.pi.events.emit("subagents:completed", { id: review.id, status: "completed", result: JSON.stringify({ version: 1, task_id: "T-1", status: "verified", summary: "Checked.", criteria: [{ criterion: "The report identifies a source.", status: "passed", finding: "The report names its source.", evidence_refs: [packet.evidence[0].reference] }] }) });
-    assert.equal((await task).taskResult.verification_status, "verified");
-    f.emit("agent_settled");
-    assert.equal(f.maintenance().length, 1);
-    assert.equal(f.pi.compactions.length, 0);
-    assert.equal(review.request.options.signal.aborted, false);
-  } finally {
-    if (before === undefined) delete process.env.PI_HARNESS_EVIDENCE_DIR; else process.env.PI_HARNESS_EVIDENCE_DIR = before;
-    rmSync(cwd, { force: true, recursive: true });
-  }
-});
-
-test("context maintenance waits until both parallel Task pipelines settle", async () => {
-  const f = fixture();
-  const cwd = mkdtempSync(join(tmpdir(), "pi-compact-wave-"));
-  const before = process.env.PI_HARNESS_EVIDENCE_DIR;
-  process.env.PI_HARNESS_EVIDENCE_DIR = cwd;
-  try {
-    await f.command("harness-compact", "set 55");
-    f.setPercent(60); f.emit("context");
-    const children = [];
-    f.pi.events.on("subagents:rpc:spawn", (request) => {
-      const id = `research-${children.length + 1}`;
-      children.push({ id, request });
-      f.pi.events.emit(`subagents:rpc:spawn:reply:${request.requestId}`, { success: true, data: { id } });
-    });
-    const input = (task_id) => ({ owner: "research", task_id, scope: `Inspect ${task_id}`, verification: "Inspect report", permission: "read" });
-    const first = executeCoordinateTask(f.pi, input("T-1"), { cwd, timeout: 1500, rpcTimeout: 1000 });
-    const second = executeCoordinateTask(f.pi, input("T-2"), { cwd, timeout: 1500, rpcTimeout: 1000 });
-    for (let i = 0; i < 30 && children.length < 2; i++) await new Promise((resolve) => setTimeout(resolve, 5));
-    assert.equal(children.length, 2);
-    f.emit("agent_settled");
-    assert.equal(f.pi.compactions.length, 0);
-    f.pi.events.emit("subagents:completed", { id: children[0].id, status: "completed", result: "First report." });
-    await first;
-    f.emit("agent_settled");
-    assert.equal(f.pi.compactions.length, 0);
-    f.pi.events.emit("subagents:completed", { id: children[1].id, status: "completed", result: "Second report." });
-    await second;
-    f.emit("agent_settled");
-    assert.equal(f.maintenance().length, 1);
-    assert.equal(f.pi.compactions.length, 0);
-  } finally {
-    if (before === undefined) delete process.env.PI_HARNESS_EVIDENCE_DIR; else process.env.PI_HARNESS_EVIDENCE_DIR = before;
-    rmSync(cwd, { force: true, recursive: true });
-  }
-});
-
-test("Mission cannot complete while it owns an unresolved TaskOrder", async () => {
-  const f = fixture();
-  await f.command("goal", "Complete only after accountable work.");
-  await f.pi.tools.get("pi_harness_operation").execute("id", { action: "create", operation_id: "O-open", objective: "Inspect the source.", required_task_ids: ["T-open"] });
-  await assert.rejects(() => f.pi.tools.get("pi_harness_goal").execute("id", { status: "complete", evidence: "The Commander evaluated the Mission." }), /unresolved obligations/);
-});
-
-test("Mission cannot complete while it owns an unmaterialized planning Operation", async () => {
-  const f = fixture();
-  await f.command("goal", "Complete only after planning materializes accountable work.");
-  await f.pi.tools.get("pi_harness_operation").execute("id", { action: "create", operation_id: "O-planning", objective: "Plan the source inspection." });
-  await assert.rejects(() => f.pi.tools.get("pi_harness_goal").execute("id", { status: "complete", evidence: "The Commander evaluated the Mission." }), /unresolved obligations/);
-});
-
-test("Mission Situation Board is a replaceable bounded context projection", async () => {
-  const f = fixture();
-  await f.command("goal", "Track this Mission.");
-  f.session.appendMessage({ role: "user", content: "Track this Mission.", timestamp: 1 });
-  await f.pi.tools.get("pi_harness_operation").execute("id", { action: "create", operation_id: "O-board", objective: "Inspect the source.", required_task_ids: ["T-board"] });
-  f.boundary();
-  const board = f.session.getEntries().find((entry) => entry.type === "custom_message" && entry.customType === "pi-harness-situation-board");
-  assert.ok(board);
-  assert.match(board.content, /Mission M-/);
-  assert.match(board.content, /TaskOrder T-board: ready/);
-  assert.equal(board.display, false);
-});
-
-test("native compaction satisfies pending request without a second Harness compaction", async () => {
-  const f = fixture();
-  await f.command("goal", "Preserve the TaskGraph.");
-  await f.command("harness-compact", "set 75");
-  await f.pi.tools.get("pi_harness_operation").execute("id", { action: "create", operation_id: "O-1", objective: "Inspect the source.", required_task_ids: ["T-1"] });
-  f.setPercent(76); f.emit("context");
-  f.emit("session_before_compact", { reason: "threshold" });
+test("native compaction checkpoints work and plan without editing session history or deciding completion", async () => {
+  const work = createWork("Keep the objective across compaction.");
+  const f = fixture([{ customType: WORK_ENTRY, data: { [work.work_id]: work } }]); await f.ready;
+  await f.command("work", "resume " + work.work_id); await f.command("plan", "on");
+  f.session.appendMessage({ role: "user", content: "Keep this request.", timestamp: 1 });
+  const before = JSON.stringify(f.session.buildSessionProjection().messages);
+  const instructions = await f.emit("session_before_compact", { reason: "threshold" });
+  assert.match(instructions.customInstructions, /original objective/);
+  assert.equal(f.latest(WORK_ENTRY)[work.work_id].status, "active");
+  assert.equal(f.latest(PLAN_ENTRY).enabled, true);
   assert.equal(f.pi.compactions.length, 0);
-  assert.ok(f.latest("pi-harness-compact-state"));
-  assert.deepEqual(f.latest(PROACTIVE_COMPACT_ENTRY), { enabled: true, threshold_percent: 75 });
-  assert.equal(f.latest("pi-harness-operation-state")["O-1"].status, "open");
-  assert.deepEqual(f.latest("pi-harness-coordinator-state"), {});
-  const snapshot = f.latest("pi-harness-task-graph-state");
-  assert.equal(snapshot.operations["O-1"].status, "open");
-  assert.equal(snapshot.task_graphs["O-1"].nodes["T-1"].scheduler_status, "ready");
-  f.emit("session_compact", { reason: "threshold" });
-  f.emit("agent_settled");
-  assert.equal(f.pi.compactions.length, 0);
-  assert.equal(f.latest("pi-harness-task-graph-state").task_graphs["O-1"].nodes["T-1"].scheduler_status, "ready");
+  assert.equal(JSON.stringify(f.session.buildSessionProjection().messages), before);
+  assert.equal(f.maintenance().length, 0);
 });
 
-test("Pi-owned warming stops only for prefix changes, pending GC, native compaction or shutdown",async()=>{
-  const f=fixture();const decision={action:"warm",warmCost:0,missCost:1,continuationProbability:1};
-  assert.deepEqual(f.emit("cache_warming_decision",decision),{action:"stop"});
-  f.emit("before_agent_start",{systemPromptOptions:{sections:{}}});
-  assert.equal(f.emit("cache_warming_decision",decision),undefined);
-  await f.command("plan","on");assert.deepEqual(f.emit("cache_warming_decision",decision),{action:"stop"});
-  f.emit("before_agent_start",{systemPromptOptions:{sections:{}}});assert.equal(f.emit("cache_warming_decision",decision),undefined);
-  f.setPercent(80);f.emit("context");assert.deepEqual(f.emit("cache_warming_decision",decision),{action:"stop"});
-  f.boundary();assert.equal(f.emit("cache_warming_decision",decision),undefined);
-  f.emit("session_before_compact");assert.deepEqual(f.emit("cache_warming_decision",decision),{action:"stop"});
-  f.emit("session_compact");assert.equal(f.emit("cache_warming_decision",decision),undefined);
-  f.emit("session_shutdown");assert.deepEqual(f.emit("cache_warming_decision",decision),{action:"stop"});
-  assert.equal(f.pi.continuations.length,0);assert.equal(f.pi.compactions.length,0);
+test("high context and native failure do not trigger a second Harness compaction", async () => {
+  const f = fixture(); await f.ready;
+  f.setPercent(95); f.emit("context"); f.emit("session_compact_failed"); f.emit("agent_settled");
+  assert.equal(f.pi.compactions.length, 0);
+  assert.equal(f.maintenance().length, 0);
+  assert.equal(f.emit("cache_warming_decision", { action: "warm" }), undefined);
 });

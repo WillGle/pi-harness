@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { executeCoordinateTask, validateTask, cancelCoordinateTasks, securityReviewModel } from "../lib/coordinator.mjs";
+import { executeTask, validateTask, cancelTasks, securityReviewModel } from "../lib/executor.mjs";
 import { taskOrder, taskResult } from "../lib/communication.mjs";
 import { loadCustomAgents } from "../node_modules/@tintinweb/pi-subagents/dist/custom-agents.js";
 
@@ -57,7 +57,7 @@ test("Review Profile validation is exact, independent, bounded, and opt-in", () 
   assert.equal(config.promptMode, "replace");
   // The installed 0.19.0 parser grants all built-ins when tools is omitted,
   // but zero built-ins for this role's explicit `tools: none` declaration.
-  assert.deepEqual(loadCustomAgents(process.cwd(), true).get("coordinator").builtinToolNames, ["read"]);
+  assert.deepEqual(loadCustomAgents(process.cwd(), true).get("research").builtinToolNames, ["read", "grep", "find", "ls"]);
   const agentDir = join(dir, ".pi", "agents");
   mkdirSync(agentDir, { recursive: true });
   writeFileSync(join(agentDir, "probe-none.md"), "---\nname: probe-none\ntools: none\n---\nDo not use tools.\n");
@@ -72,7 +72,7 @@ test("mixed criteria partition and model route; only selected Evidence and no tr
   const symbol = Symbol.for("pi-subagents:manager"), prior = globalThis[symbol];
   globalThis[symbol] = { getRecord: () => ({ invocation: { modelId: securityReviewModel() } }) };
   try {
-    const result = await executeCoordinateTask(f, input(), { cwd: process.cwd(), timeout: 1000, rpcTimeout: 1000, modelRegistry });
+    const result = await executeTask(f, input(), { cwd: process.cwd(), timeout: 1000, rpcTimeout: 1000, modelRegistry });
     assert.deepEqual(f.spawns.map((s) => s.type), ["research", "reviewer", "security-reviewer"]);
     assert.equal(f.spawns[1].options.model, null);
     assert.equal(f.spawns[2].options.model, securityReviewModel());
@@ -89,14 +89,14 @@ test("mixed criteria partition and model route; only selected Evidence and no tr
 
 test("security availability fails closed without default fallback or false provenance", async () => {
   const f = fake({ available: false });
-  const result = await executeCoordinateTask(f, { ...input(), acceptance_criteria: [criteria[0]], review_profile: { [criteria[0]]: "security" } }, { cwd: process.cwd(), timeout: 1000, rpcTimeout: 1000, modelRegistry });
+  const result = await executeTask(f, { ...input(), acceptance_criteria: [criteria[0]], review_profile: { [criteria[0]]: "security" } }, { cwd: process.cwd(), timeout: 1000, rpcTimeout: 1000, modelRegistry });
   assert.deepEqual(f.spawns.map((s) => s.type), ["research", "security-reviewer"]);
   assert.equal(result.taskResult.verification_status, "blocked");
   assert.match(result.taskResult.verification_summary, /not available through the current Pi\/provider configuration/);
   assert.equal(result.taskResult.semantic_verification.criteria[0].verifier, "security");
   assert.equal(result.taskResult.semantic_verification.criteria[0].status, "not_checked");
   const missing = fake();
-  const blocked = await executeCoordinateTask(missing, { ...input("NO-MODEL"), acceptance_criteria: [criteria[0]], review_profile: { [criteria[0]]: "security" } }, { cwd: process.cwd(), timeout: 1000, rpcTimeout: 1000, modelRegistry: { getAvailable: () => [] } });
+  const blocked = await executeTask(missing, { ...input("NO-MODEL"), acceptance_criteria: [criteria[0]], review_profile: { [criteria[0]]: "security" } }, { cwd: process.cwd(), timeout: 1000, rpcTimeout: 1000, modelRegistry: { getAvailable: () => [] } });
   assert.equal(blocked.taskResult.verification_status, "blocked");
   assert.deepEqual(missing.spawns.map((s) => s.type), ["research"]);
   const symbol = Symbol.for("pi-subagents:manager"), prior = globalThis[symbol];
@@ -104,7 +104,7 @@ test("security availability fails closed without default fallback or false prove
   try {
     const wrong = fake();
     const task = { ...input("WRONG-MODEL"), acceptance_criteria: [criteria[0]], review_profile: { [criteria[0]]: "security" } };
-    const outcome = await executeCoordinateTask(wrong, task, { cwd: process.cwd(), timeout: 1000, rpcTimeout: 1000, modelRegistry });
+    const outcome = await executeTask(wrong, task, { cwd: process.cwd(), timeout: 1000, rpcTimeout: 1000, modelRegistry });
     assert.equal(outcome.taskResult.verification_status, "blocked");
     assert.equal(outcome.taskResult.semantic_verification.criteria[0].status, "not_checked");
   } finally { if (prior === undefined) delete globalThis[symbol]; else globalThis[symbol] = prior; }
@@ -115,20 +115,20 @@ test("security pass cannot override general failure; group cancellation aborts s
   globalThis[symbol] = { getRecord: () => ({ invocation: { modelId: securityReviewModel() } }) };
   try {
     const f = fake({ failed: true });
-    const result = await executeCoordinateTask(f, input("FAIL"), { cwd: process.cwd(), timeout: 1000, rpcTimeout: 1000, modelRegistry });
+    const result = await executeTask(f, input("FAIL"), { cwd: process.cwd(), timeout: 1000, rpcTimeout: 1000, modelRegistry });
     assert.equal(result.taskResult.verification_status, "failed");
     const worker = taskOrder({ ...input("GATE-FAIL"), owner: "worker", permission: "write", acceptance_criteria: [criteria[0]], review_profile: { [criteria[0]]: "security" } });
     assert.equal(taskResult(worker, { status: "completed", verificationRan: true, gatePassed: false }, { semanticVerification: { ...result.taskResult.semantic_verification, task_id: worker.task_id, status: "verified" } }).verification_status, "failed");
     const pending = fake({ stalled: true });
-    const a = executeCoordinateTask(pending, { ...input("CANCEL"), acceptance_criteria: [criteria[0]], review_profile: { [criteria[0]]: "security" } }, { cwd: process.cwd(), groupId: "G-SEC", timeout: 1000, rpcTimeout: 1000, modelRegistry });
+    const a = executeTask(pending, { ...input("CANCEL"), acceptance_criteria: [criteria[0]], review_profile: { [criteria[0]]: "security" } }, { cwd: process.cwd(), groupId: "G-SEC", timeout: 1000, rpcTimeout: 1000, modelRegistry });
     for (let i = 0; i < 30 && !pending.spawns.some((s) => s.type === "security-reviewer"); i++) await new Promise((resolve) => setTimeout(resolve, 5));
-    const other = executeCoordinateTask(pending, { ...input("OTHER"), acceptance_criteria: [criteria[0]], review_profile: { [criteria[0]]: "security" } }, { cwd: process.cwd(), groupId: "G-OTHER", timeout: 1000, rpcTimeout: 1000, modelRegistry });
+    const other = executeTask(pending, { ...input("OTHER"), acceptance_criteria: [criteria[0]], review_profile: { [criteria[0]]: "security" } }, { cwd: process.cwd(), groupId: "G-OTHER", timeout: 1000, rpcTimeout: 1000, modelRegistry });
     for (let i = 0; i < 30 && pending.spawns.filter((s) => s.type === "security-reviewer").length !== 2; i++) await new Promise((resolve) => setTimeout(resolve, 5));
     const [cancelledRequest, unrelatedRequest] = pending.spawns.filter((s) => s.type === "security-reviewer");
-    assert.equal(cancelCoordinateTasks("G-SEC"), 1);
+    assert.equal(cancelTasks("G-SEC"), 1);
     assert.equal(cancelledRequest.options.signal.aborted, true);
     assert.equal(unrelatedRequest.options.signal.aborted, false);
-    cancelCoordinateTasks("G-OTHER");
+    cancelTasks("G-OTHER");
     assert.equal((await other).taskResult.verification_status, "blocked");
     assert.equal((await a).taskResult.verification_status, "blocked");
   } finally { if (prior === undefined) delete globalThis[symbol]; else globalThis[symbol] = prior; }

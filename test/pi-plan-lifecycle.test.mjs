@@ -16,12 +16,8 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { COMPACT_ENTRY, PLAN_ENTRY } from "../lib/state.mjs";
-import { PROACTIVE_COMPACT_ENTRY } from "../lib/compaction-policy.mjs";
-import { TASK_GRAPH_ENTRY, claimTask, createTaskGraph, reconcileTaskGraph } from "../lib/task-graph.mjs";
-import { MISSION_ENTRY, createMission } from "../lib/mission.mjs";
-import { createOperation } from "../lib/operation.mjs";
-import { attemptId, recordAttemptChild, reconcileAttemptLedger } from "../lib/attempt-ledger.mjs";
+import { PLAN_ENTRY } from "../lib/plan.mjs";
+import { addWorkTask, claimWorkTask, createWork, recordWorkChild, WORK_ENTRY } from "../lib/work.mjs";
 import { readEvidence } from "../lib/evidence.mjs";
 import { DEFAULT_PI_EXECUTABLE, defaultPiEnv } from "./helpers/default-pi.mjs";
 
@@ -38,9 +34,9 @@ const PI_TOOLS = [
   "pi_harness_find_symbol",
   "pi_harness_references",
   "pi_harness_patch",
-  "pi_harness_coordinate",
-  "pi_harness_operation",
-  "pi_harness_run_operation",
+  "pi_harness_start_work",
+  "pi_harness_delegate",
+  "pi_harness_work",
   "pi_harness_goal",
 ].join(",");
 
@@ -132,7 +128,7 @@ class DisposableProvider {
     const body = JSON.parse(raw);
     const messages = body.messages ?? [];
     const markerIndex = messages.reduce((latest, message, index) => {
-      if (message.role === "user" && (messageText(message).includes("CALL_") || messageText(message).includes("[PI_HARNESS_MISSION_CONTINUE]"))) return index;
+      if (message.role === "user" && (messageText(message).includes("CALL_") || messageText(message).includes("[PI_HARNESS_WORK_CONTINUE]"))) return index;
       return latest;
     }, -1);
     const marker = markerIndex >= 0 ? messageText(messages[markerIndex]) : undefined;
@@ -148,85 +144,48 @@ class DisposableProvider {
     let toolName;
     let argumentsForTool;
     let responseText = "DONE";
-    if (this.mode === "coordinator-recovery") {
+    if (this.mode === "commander-recovery") {
       const fullText = messages.map(messageText).join("\n");
-      const packet = jsonObjectAfter(fullText, '{"OperationBrief"');
-      if (packet?.OperationBrief) {
-        const brief = packet.OperationBrief;
-        if (brief.planning) {
-          responseText = JSON.stringify({
-            version: 1,
-            operation_id: brief.operation_id,
-            action: "plan_tasks",
-            reason: "The Worker TaskOrder is the smallest useful recovery check.",
-            tasks: [{
-              local_ref: "worker-evidence",
-              role: "worker",
-              scope: "Write recovery-evidence.txt with the content 'verified from the assigned worktree'.",
-              dependencies: [],
-              acceptance_criteria: ["The Worker verification command passes."],
-              execution_policy_id: "worker-write",
-            }],
-          });
-        } else if (brief.operation_id === "O-old") {
-          responseText = JSON.stringify({ version: 1, operation_id: "O-old", action: "dispatch", reason: "The Coordinator attempts the persisted TaskOrder.", task_id: "T-old" });
-        } else if (brief.result_available_task_ids?.length) {
-          const taskId = brief.result_available_task_ids[0];
-          responseText = JSON.stringify({ version: 1, operation_id: brief.operation_id, action: "accept_task", reason: "The matching verified TaskResult contains Evidence.", task_id: taskId });
-        } else if (brief.ready_task_ids?.length) {
-          const taskId = brief.ready_task_ids[0];
-          responseText = JSON.stringify({ version: 1, operation_id: brief.operation_id, action: "dispatch", reason: "The Coordinator dispatches the ready TaskOrder.", task_id: taskId });
-        } else {
-          responseText = JSON.stringify({ version: 1, operation_id: brief.operation_id, action: "block", reason: "No TaskOrder is ready.", blocked_action: "dispatch a TaskOrder", required_condition: "the Scheduler releases the exact TaskOrder" });
-        }
-      } else {
-        const workerPromptIndex = messages.findLastIndex((message) => message.role === "user" && /^TaskOrder T-[A-Za-z0-9-]+\nOperation O-/m.test(messageText(message)));
-        if (workerPromptIndex >= 0) {
-          const workerHasToolResult = messages.slice(workerPromptIndex + 1).some((message) => message.role === "tool");
-          if (!workerHasToolResult) {
-            const workerCwd = messageText(messages.find((message) => message.role === "system") ?? {}).match(/^Working directory: (.+)$/m)?.[1];
-            toolName = "write";
-            argumentsForTool = { path: "recovery-evidence.txt", content: `verified from the assigned worktree\nWorker working directory: ${workerCwd}\n` };
-          } else responseText = "The Worker wrote the requested Evidence file.";
-        } else if (marker?.includes("[PI_HARNESS_MISSION_CONTINUE]")) {
-          const previousCall = lastToolCall(messages);
-          if (this.phase === "old") {
-            if (!previousCall || previousCall.name === "pi_harness_start_mission") {
-              toolName = "pi_harness_operation";
-              argumentsForTool = { action: "resolve_attempt", operation_id: "O-old", attempt_id: "A-O-old-T-old-01" };
-            } else if (previousCall.name === "pi_harness_operation" && previousCall.arguments.action === "resolve_attempt") {
-              toolName = "pi_harness_operation";
-              argumentsForTool = { action: "status", operation_id: "O-old" };
-            } else if (previousCall.name === "pi_harness_operation") {
-              toolName = "pi_harness_run_operation";
-              argumentsForTool = { operation_id: "O-old" };
-            } else if (previousCall.name === "pi_harness_run_operation") {
-              toolName = "pi_harness_goal";
-              argumentsForTool = { status: "blocked", evidence: "The exact child is unavailable and the TaskOrder remains blocked.", blocker: "The prior Worker Attempt remains unknown." };
-            }
-          } else if (this.phase === "new") {
-            if (!previousCall || previousCall.name === "pi_harness_goal" && previousCall.arguments.status === "blocked") {
-              toolName = "pi_harness_operation";
-              argumentsForTool = { action: "create", operation_id: "O-new", objective: "Verify the restored Coordinator path.", allowed_policy_ids: ["worker-write"] };
-            } else if (previousCall.name === "pi_harness_operation") {
-              toolName = "pi_harness_run_operation";
-              argumentsForTool = { operation_id: "O-new" };
-            } else if (previousCall.name === "pi_harness_run_operation") {
-              toolName = "pi_harness_goal";
-              argumentsForTool = { status: "complete", evidence: "The new Mission has one accepted verified Worker TaskResult with matching Evidence." };
-            }
-          }
-        } else if (marker?.includes("CALL_WRITE") && !hasToolResultAfterMarker) {
+      const workerPromptIndex = messages.findLastIndex((message) => message.role === "user" && /^TaskOrder T-[A-Za-z0-9-]+\nOperation W-/m.test(messageText(message)));
+      if (workerPromptIndex >= 0) {
+        const workerHasToolResult = messages.slice(workerPromptIndex + 1).some((message) => message.role === "tool");
+        if (!workerHasToolResult) {
+          const workerCwd = messageText(messages.find((message) => message.role === "system") ?? {}).match(/^Working directory: (.+)$/m)?.[1];
           toolName = "write";
-          argumentsForTool = { path: "blocked-write.txt", content: "blocked-write.txt\n" };
+          argumentsForTool = { path: "recovery-evidence.txt", content: `verified from the assigned worktree\nWorker working directory: ${workerCwd}\n` };
+        } else responseText = "The Worker wrote the requested Evidence file.";
+      } else if (marker?.includes("[PI_HARNESS_WORK_CONTINUE]")) {
+        const previousCall = lastToolCall(messages);
+        if (this.phase === "old") {
+          if (!hasToolResultAfterMarker) {
+            toolName = "pi_harness_work";
+            argumentsForTool = { action: "resolve", task_id: this.oldTaskId };
+          } else {
+            toolName = "pi_harness_goal";
+            argumentsForTool = { status: "blocked", evidence: "The exact child is unavailable and remains unknown.", blocker: "The prior child outcome cannot be established." };
+          }
+        } else if (this.phase === "new") {
+          if (!hasToolResultAfterMarker) {
+            toolName = "pi_harness_delegate";
+            argumentsForTool = { owner: "worker", scope: "Write recovery-evidence.txt with the content 'verified from the assigned worktree'.", verification: "git diff --check", acceptance_criteria: ["The Worker verification command passes."] };
+          } else if (previousCall?.name === "pi_harness_delegate") {
+            const receipt = JSON.parse(messageText(messages.findLast((message) => message.role === "tool")));
+            toolName = "pi_harness_work";
+            argumentsForTool = { action: "accept", task_id: receipt.task.task_id, evidence: "The matching Worker Evidence and verification command satisfy the assigned criteria." };
+          } else if (previousCall?.name === "pi_harness_work") {
+            toolName = "pi_harness_goal";
+            argumentsForTool = { status: "complete", evidence: "The accepted Worker result satisfies the original objective." };
+          }
         }
+      } else if (marker?.includes("CALL_WRITE") && !hasToolResultAfterMarker) {
+        toolName = "write"; argumentsForTool = { path: "blocked-write.txt", content: "blocked-write.txt\n" };
       }
     }
-    if (this.mode === "invalid-terminal" && marker?.includes("[PI_HARNESS_MISSION_CONTINUE]") && !hasToolResultAfterMarker) {
+    if (this.mode === "invalid-terminal" && marker?.includes("[PI_HARNESS_WORK_CONTINUE]") && !hasToolResultAfterMarker) {
       toolName = "pi_harness_goal";
       argumentsForTool = { status: "complete", evidence: "" };
     }
-    if (this.mode !== "coordinator-recovery" && marker && !hasToolResultAfterMarker && (body.tools?.length ?? 0) > 0) {
+    if (this.mode !== "commander-recovery" && marker && !hasToolResultAfterMarker && (body.tools?.length ?? 0) > 0) {
       if (marker.includes("CALL_WRITE") || marker.includes("CALL_CHILD_WRITE") || marker.includes("CALL_PARENT_WRITE")) {
         toolName = "write";
         const path = marker.includes("CALL_CHILD_WRITE")
@@ -235,9 +194,6 @@ class DisposableProvider {
             ? "parent-write.txt"
             : "blocked-write.txt";
         argumentsForTool = { path, content: `${path}\n` };
-      } else if (marker.includes("CALL_OPERATION_CREATE")) {
-        toolName = "pi_harness_operation";
-        argumentsForTool = { action: "create", operation_id: "O-compact", objective: "Preserve the TaskGraph.", required_task_ids: ["T-root", "T-child"], dependencies: { "T-child": ["T-root"] } };
       } else if (marker.includes("CALL_EDIT")) {
         toolName = "edit";
         argumentsForTool = { path: "edit-target.txt", oldText: "original\n", newText: "edited\n" };
@@ -469,22 +425,9 @@ async function createFixture(options = {}) {
   writeFileSync(join(project, "patch-target.txt"), "original\n");
   writeFileSync(join(project, "read-target.txt"), "read me\n");
 
-  if (options.mode === "coordinator-recovery") {
+  if (options.mode === "commander-recovery") {
     const projectAgents = join(project, ".pi", "agents");
     mkdirSync(projectAgents, { recursive: true });
-    writeFileSync(join(projectAgents, "coordinator.md"), [
-      "---",
-      "name: coordinator",
-      "model: fake/dummy",
-      "tools: read",
-      "extensions: false",
-      "skills: false",
-      "isolation: off",
-      "prompt_mode: replace",
-      "---",
-      "Return only the CoordinatorDecision requested by the Harness.",
-      "",
-    ].join("\n"));
     writeFileSync(join(projectAgents, "worker.md"), [
       "---",
       "name: worker",
@@ -532,7 +475,7 @@ async function createFixture(options = {}) {
     provider,
     sessionPath: join(root, "session.jsonl"),
     spawn(sessionPath = join(root, "session.jsonl"), piOptions = {}) {
-      const extensionPaths = piOptions.extensionPaths ?? (options.mode === "coordinator-recovery"
+      const extensionPaths = piOptions.extensionPaths ?? (options.mode === "commander-recovery"
         ? [
             join(REPO_ROOT, "extensions", "platform-guard.mjs"),
             join(REPO_ROOT, "node_modules", "@tintinweb", "pi-subagents", "dist", "index.js"),
@@ -659,37 +602,24 @@ test("Pi plan mode persists across RPC reload and restores mutations after /plan
   }
 });
 
-test("Pi RPC restart restores a managed Operation and its TaskGraph", async () => {
-  const fixture = await createFixture();
-  let pi;
+test("Pi RPC restart preserves one work record without inferring a child result", async () => {
+  const fixture = await createFixture(); let pi;
   try {
-    pi = fixture.spawn();
-    await pi.prompt("/goal Preserve the TaskGraph.");
-    const operationEvents = pi.events.length;
-    const queuedOperation = await pi.send({ type: "prompt", message: "CALL_OPERATION_CREATE", streamingBehavior: "followUp" });
-    assert.equal(queuedOperation.success, true);
-    await pi.waitFor((event) => event.type === "tool_execution_end" && event.toolName === "pi_harness_operation" && !event.isError && pi.events.indexOf(event) >= operationEvents);
-    const cancelled = await pi.send({ type: "prompt", message: "/goal cancel", streamingBehavior: "followUp" });
-    assert.equal(cancelled.success, true);
-    await pi.waitFor((event) => event.type === "extension_ui_request" && /^Goal cancelled/.test(event.message ?? ""));
-    const beforeEntries = (await pi.send({ type: "get_entries" })).data.entries;
-    const before = latestCustom(beforeEntries, TASK_GRAPH_ENTRY)?.data;
-    assert.ok(before);
-    assert.equal(before.operations["O-compact"].status, "open");
-    const beforeGraph = structuredClone(before.task_graphs["O-compact"]);
-    assert.deepEqual([beforeGraph.nodes["T-root"].scheduler_status, beforeGraph.nodes["T-child"].scheduler_status], ["ready", "pending"]);
-
-    await pi.close();
-    pi = fixture.spawn();
-    const afterEntries = (await pi.send({ type: "get_entries" })).data.entries;
-    const after = latestCustom(afterEntries, TASK_GRAPH_ENTRY)?.data;
-    assert.ok(after);
-    assert.equal(after.operations["O-compact"].status, "open");
-    assert.deepEqual(after.task_graphs["O-compact"], beforeGraph);
-  } finally {
-    if (pi) await pi.close();
-    await fixture.close();
-  }
+    const added = addWorkTask(createWork("Keep interrupted work."), { owner: "research", scope: "Inspect source.", permission: "read", verification: "Review report.", acceptance_criteria: ["State the entry point."] });
+    const work = claimWorkTask(added.work, added.task_id);
+    const seed = SessionManager.create(fixture.project, join(fixture.root, "seeded"));
+    seed.appendCustomEntry(WORK_ENTRY, { [work.work_id]: work });
+    seed.appendMessage({ role: "user", content: "Persist this checkpoint.", timestamp: 1 });
+    seed.appendMessage({ role: "assistant", content: [{ type: "text", text: "Checkpoint saved." }], api: "openai-completions", provider: "fake", model: "dummy", usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { total: 0 } }, stopReason: "stop", timestamp: 2 });
+    pi = fixture.spawn(seed.getSessionFile()); await pi.prompt("checkpoint"); await pi.close();
+    seed.appendMessage({ role: "assistant", content: [{ type: "text", text: "Checkpoint saved." }], api: "openai-completions", provider: "fake", model: "dummy", usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { total: 0 } }, stopReason: "stop", timestamp: 2 });
+    pi = fixture.spawn(seed.getSessionFile()); await pi.prompt("checkpoint after restart");
+    const restored = latestCustom((await pi.send({ type: "get_entries" })).data.entries, WORK_ENTRY)?.data;
+    // Native compaction checkpoints are not needed to preserve the original entry.
+    assert.equal(restored[work.work_id].objective, work.objective);
+    assert.equal(restored[work.work_id].tasks[added.task_id].attempts.length, 1);
+    assert.equal(restored[work.work_id].tasks[added.task_id].attempts[0].result, undefined);
+  } finally { if (pi) await pi.close(); await fixture.close(); }
 });
 
 test("Pi plan mode survives real compaction and still blocks built-in and Harness mutation", async () => {
@@ -697,17 +627,7 @@ test("Pi plan mode survives real compaction and still blocks built-in and Harnes
   let pi;
   try {
     pi = fixture.spawn();
-    await pi.prompt("/goal Preserve the TaskGraph.");
-    const operationEvents = pi.events.length;
-    const queuedOperation = await pi.send({ type: "prompt", message: "CALL_OPERATION_CREATE", streamingBehavior: "followUp" });
-    assert.equal(queuedOperation.success, true);
-    await pi.waitFor((event) => event.type === "tool_execution_end" && event.toolName === "pi_harness_operation" && !event.isError && pi.events.indexOf(event) >= operationEvents);
-    const cancelled = await pi.send({ type: "prompt", message: "/goal cancel", streamingBehavior: "followUp" });
-    assert.equal(cancelled.success, true);
-    await pi.waitFor((event) => event.type === "extension_ui_request" && /^Goal cancelled/.test(event.message ?? ""));
-    assert.equal(latestCustom((await pi.send({ type: "get_entries" })).data.entries, TASK_GRAPH_ENTRY)?.data.task_graphs["O-compact"].nodes["T-root"].scheduler_status, "ready");
     await pi.prompt("/plan on");
-    await pi.prompt("/harness-compact set 73");
     const autoCompaction = await pi.send({ type: "set_auto_compaction", enabled: false });
     assert.equal(autoCompaction.success, true);
     await pi.prompt("compaction-prefix-a");
@@ -730,9 +650,6 @@ test("Pi plan mode survives real compaction and still blocks built-in and Harnes
 
     const compactEntries = (await pi.send({ type: "get_entries" })).data.entries;
     assert.ok(compactEntries.some((entry) => entry.type === "compaction"), "a real compaction entry must be persisted");
-    assert.ok(latestCustom(compactEntries, COMPACT_ENTRY), `missing ${COMPACT_ENTRY} after real compaction`);
-    assert.deepEqual(latestCustom(compactEntries, PROACTIVE_COMPACT_ENTRY)?.data, { enabled: true, threshold_percent: 73 });
-    assert.equal(latestCustom(compactEntries, TASK_GRAPH_ENTRY)?.data.task_graphs["O-compact"].nodes["T-child"].scheduler_status, "pending");
     assertPlanEntry(compactEntries, true, "plan state immediately after compaction");
 
     const writeEvents = pi.events.length;
@@ -774,11 +691,6 @@ test("Pi plan mode survives real compaction and still blocks built-in and Harnes
     pi = fixture.spawn();
     const reloadedEntries = (await pi.send({ type: "get_entries" })).data.entries;
     assertPlanEntry(reloadedEntries, true, "plan state after compaction reload");
-    assert.deepEqual(latestCustom(reloadedEntries, PROACTIVE_COMPACT_ENTRY)?.data, { enabled: true, threshold_percent: 73 });
-    assert.equal(latestCustom(reloadedEntries, TASK_GRAPH_ENTRY)?.data.task_graphs["O-compact"].nodes["T-root"].scheduler_status, "ready");
-    assert.equal(latestCustom(reloadedEntries, TASK_GRAPH_ENTRY)?.data.task_graphs["O-compact"].nodes["T-child"].scheduler_status, "pending");
-    await pi.prompt("/harness-compact status");
-    await pi.waitFor((event) => event.type === "extension_ui_request" && /enabled at 73%/.test(event.message ?? ""));
     await pi.prompt("/plan status");
     await pi.waitFor((event) => event.type === "extension_ui_request" && event.message === "Plan mode: on");
     await pi.prompt("CALL_WRITE");
@@ -787,30 +699,6 @@ test("Pi plan mode survives real compaction and still blocks built-in and Harnes
     if (pi) await pi.close();
     await fixture.close();
   }
-});
-
-test("Pi 0.87.1 runs ContextEdit GC after a settled tool, retaining history and native compaction ownership",async()=>{
-  const fixture=await createFixture();let pi;
-  try {
-    const modelsPath=join(fixture.root,"home",".pi","agent","models.json");
-    const models=JSON.parse(readFileSync(modelsPath,"utf8"));models.providers.fake.models[0].contextWindow=80000;writeFileSync(modelsPath,JSON.stringify(models));
-    const seed=SessionManager.create(fixture.project,join(fixture.root,"seeded"));
-    seed.appendMessage({role:"user",content:"Previous request.",timestamp:1});
-    const legacy=seed.appendCustomMessageEntry("pi-harness-context",stablePromptSections().pi_harness_contract,false);
-    seed.appendMessage({role:"assistant",content:[{type:"text",text:"Seed complete."}],api:"openai-completions",provider:"fake",model:"dummy",usage:{input:1,output:1,cacheRead:0,cacheWrite:0,totalTokens:2,cost:{total:0}},stopReason:"stop",timestamp:2});
-    pi=fixture.spawn(seed.getSessionFile());
-    await pi.prompt("maintenance-prefix-a");await pi.prompt("maintenance-prefix-b");await pi.prompt("/harness-compact set 50");
-    const start=pi.events.length;await pi.prompt("CALL_HASHLINES");
-    const entries=(await pi.send({type:"get_entries"})).data.entries;
-    assert.ok(entries.some(entry=>entry.type === "context_edit" && entry.targetId === legacy));
-    assert.ok(entries.find(entry=>entry.id === legacy).content.includes("COMMUNICATION CONTRACT"));
-    const toolEnd=pi.events.findIndex((event,index)=>index>=start&&event.type === "tool_execution_end"&&event.toolName === "pi_harness_hashlines");
-    assert.ok(toolEnd>=0);assert.equal(pi.events[toolEnd].isError,false);
-    assert.equal(pi.events.slice(start).filter(event=>event.type === "compaction_start").length,0,"Harness must not request lossy manual compaction");
-    const after=fixture.provider.requests.find(request=>request.trigger === "CALL_HASHLINES"&&request.hasToolResultAfterMarker);
-    assert.ok(after);assert.equal(after.body.messages.filter(message=>message.role!=="system"&&messageText(message).includes("[PI HARNESS COMMUNICATION CONTRACT]")).length,0);
-    assert.deepEqual(latestCustom(entries,PROACTIVE_COMPACT_ENTRY).data,{enabled:true,threshold_percent:50});
-  } finally {if(pi)await pi.close();await fixture.close();}
 });
 
 test("Pi plan mode is independent across real fork and switch_session operations", async () => {
@@ -863,12 +751,12 @@ test("Pi goal failure modes stop at a bounded continuation error", async () => {
       let goalEntry;
       for (let attempt = 0; attempt < 250; attempt += 1) {
         const entries = (await pi.send({ type: "get_entries" })).data.entries;
-        goalEntry = latestCustom(entries, "pi-harness-goal-state");
-        if (goalEntry?.data?.status !== "active") break;
+        goalEntry = Object.values(latestCustom(entries, WORK_ENTRY)?.data ?? {})[0];
+        if (goalEntry?.status !== "active") break;
         await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
       }
-      assert.equal(goalEntry?.data?.status, "error", `${mode}: goal must terminate with a safety error`);
-      assert.match(goalEntry.data.evidence.at(-1), /Automatic continuation limit/);
+      assert.equal(goalEntry?.status, "blocked", `${mode}: work must stop after the continuation allowance`);
+      assert.match(goalEntry.evidence, /continuation allowance/);
       assert.ok(fixture.provider.requests.length <= 50, `${mode}: continuation was not bounded`);
     } finally {
       if (pi) await pi.close();
@@ -877,132 +765,61 @@ test("Pi goal failure modes stop at a bounded continuation error", async () => {
   }
 });
 
-test("Pi RPC recovery preserves an unavailable Attempt and accepts only matching Worker Evidence in a fresh Mission", async () => {
-  const fixture = await createFixture({ mode: "coordinator-recovery" });
+test("Pi RPC recovery preserves an unavailable child and accepts matching Worker Evidence in fresh work", async () => {
+  const fixture = await createFixture({ mode: "commander-recovery" });
   const priorEvidenceDir = process.env.PI_HARNESS_EVIDENCE_DIR;
   process.env.PI_HARNESS_EVIDENCE_DIR = fixture.evidenceDir;
   let pi;
   try {
-    const oldOperation = createOperation({
-      mission_id: "M-old",
-      operation_id: "O-old",
-      objective: "Recover the interrupted Worker TaskOrder.",
-      required_task_ids: ["T-old"],
-      task_intents: { "T-old": "Write the old Worker Evidence file." },
-      task_specs: { "T-old": { owner: "worker", permission: "write", verification: "git diff --check", acceptance_criteria: ["The Worker verification command passes."] } },
-    });
-    const oldMission = createMission({ mission_id: "M-old", objective: oldOperation.objective, operation_ids: ["O-old"] });
-    const runningGraph = claimTask(createTaskGraph(oldOperation), oldOperation, "T-old");
-    const oldGraph = reconcileTaskGraph(runningGraph, oldOperation);
-    let oldLedger = reconcileAttemptLedger({}, { "O-old": oldOperation }, { "O-old": oldGraph });
-    oldLedger = recordAttemptChild(oldLedger, attemptId("O-old", "T-old", 1), { child_id: "worker-from-unavailable-session", role: "worker" });
-    const seed = SessionManager.create(fixture.project, join(fixture.root, "seeded-sessions"));
-    seed.appendMessage({ role: "user", content: "Seed the interrupted Mission.", timestamp: 1 });
-    seed.appendCustomEntry(TASK_GRAPH_ENTRY, {
-      version: 2,
-      missions: { "M-old": oldMission },
-      operations: { "O-old": oldOperation },
-      task_graphs: { "O-old": oldGraph },
-      attempt_ledger: oldLedger,
-    });
-    seed.appendCustomEntry(MISSION_ENTRY, { "M-old": oldMission });
-    seed.appendMessage({
-      role: "assistant",
-      content: [{ type: "text", text: "Seeded the interrupted Mission state." }],
-      api: "openai-completions",
-      provider: "fake",
-      model: "dummy",
-      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { total: 0 } },
-      stopReason: "stop",
-      timestamp: 2,
-    });
-
-    const extensionPaths = [
-      join(REPO_ROOT, "extensions", "platform-guard.mjs"),
-      join(REPO_ROOT, "node_modules", "@tintinweb", "pi-subagents", "dist", "index.js"),
-      join(REPO_ROOT, "extensions", "pi-harness.ts"),
-    ];
-    pi = fixture.spawn(seed.getSessionFile(), { extensionPaths });
-    const commandList = await pi.send({ type: "get_commands" });
-    assert.equal(commandList.success, true);
-    assert.ok(commandList.data.commands.some((command) => command.name === "mission"));
-
-    const oldRunStart = pi.events.length;
-    await pi.prompt("/mission resume M-old");
-    await pi.waitFor((event) => event.type === "tool_execution_end" && event.toolName === "pi_harness_goal" && pi.events.indexOf(event) >= oldRunStart, 8000);
-    const oldEntriesBeforeCancel = (await pi.send({ type: "get_entries" })).data.entries;
-    const oldPersistedBeforeCancel = latestCustom(oldEntriesBeforeCancel, TASK_GRAPH_ENTRY)?.data;
-    assert.ok(oldPersistedBeforeCancel);
-    assert.equal(oldPersistedBeforeCancel.missions["M-old"].status, "blocked");
-    assert.equal(oldPersistedBeforeCancel.task_graphs["O-old"].nodes["T-old"].scheduler_status, "blocked");
-    assert.equal(oldPersistedBeforeCancel.operations["O-old"].task_results["T-old"], undefined);
-    assert.equal(oldPersistedBeforeCancel.operations["O-old"].accepted_task_ids.length, 0);
-    const oldAttemptId = attemptId("O-old", "T-old", 1);
-    assert.equal(oldPersistedBeforeCancel.attempt_ledger[oldAttemptId].status, "unknown");
-    assert.deepEqual(oldPersistedBeforeCancel.attempt_ledger[oldAttemptId].child_refs, [{ child_id: "worker-from-unavailable-session", role: "worker" }]);
-    assert.ok(pi.events.some((event) => event.type === "tool_execution_end" && event.toolName === "pi_harness_operation" && event.isError), "exact unavailable-child resolution must fail closed");
-    assert.ok(!fixture.provider.requests.some((request) => request.body.messages.some((message) => message.role === "user" && /^TaskOrder T-old\nOperation O-old/m.test(messageText(message)))), "the blocked TaskOrder must not spawn a Worker");
-
-    const cancelStart = pi.events.length;
-    await pi.prompt("/mission cancel M-old");
-    await pi.waitFor((event) => event.type === "extension_ui_request" && /Mission M-old cancelled/.test(event.message ?? "") && pi.events.indexOf(event) >= cancelStart);
-    const oldEntriesAfterCancel = (await pi.send({ type: "get_entries" })).data.entries;
-    const oldPersistedAfterCancel = latestCustom(oldEntriesAfterCancel, TASK_GRAPH_ENTRY)?.data;
-    assert.equal(oldPersistedAfterCancel.missions["M-old"].status, "cancelled");
-    assert.deepEqual(oldPersistedAfterCancel.operations["O-old"], oldPersistedBeforeCancel.operations["O-old"]);
-    assert.deepEqual(oldPersistedAfterCancel.task_graphs["O-old"], oldPersistedBeforeCancel.task_graphs["O-old"]);
-    assert.deepEqual(oldPersistedAfterCancel.attempt_ledger[oldAttemptId], oldPersistedBeforeCancel.attempt_ledger[oldAttemptId]);
-
+    const added = addWorkTask(createWork("Recover the interrupted child."), { owner: "worker", permission: "write", scope: "Write old Evidence.", verification: "git diff --check", acceptance_criteria: ["The Worker verification command passes."] });
+    const oldWork = recordWorkChild(claimWorkTask(added.work, added.task_id), added.task_id, { child_id: "worker-from-unavailable-session", role: "worker" });
+    fixture.provider.oldTaskId = added.task_id;
+    const seed = SessionManager.create(fixture.project, join(fixture.root, "seeded"));
+    seed.appendCustomEntry(WORK_ENTRY, { [oldWork.work_id]: oldWork });
+    seed.appendMessage({ role: "user", content: "Persist the interrupted work.", timestamp: 1 });
+    seed.appendMessage({ role: "assistant", content: [{ type: "text", text: "Checkpoint saved." }], api: "openai-completions", provider: "fake", model: "dummy", usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { total: 0 } }, stopReason: "stop", timestamp: 2 });
+    pi = fixture.spawn(seed.getSessionFile());
+    await pi.prompt("/work resume " + oldWork.work_id);
+    const blocked = await waitForWorkState(pi, (works) => works[oldWork.work_id]?.status === "blocked", 8000);
+    const oldTask = blocked[oldWork.work_id].tasks[added.task_id];
+    assert.equal(oldTask.status, "unknown");
+    assert.deepEqual(oldTask.attempts[0].children, [{ child_id: "worker-from-unavailable-session", role: "worker" }]);
+    assert.equal(oldTask.attempts[0].result, undefined);
+    assert.ok(pi.events.some((event) => event.type === "tool_execution_end" && event.toolName === "pi_harness_work" && event.isError));
+    // Explicitly resume, then cancel, before starting independent work.
+    await pi.prompt("/work cancel");
     fixture.provider.phase = "new";
-    await pi.prompt("/goal Verify the restored Coordinator path.");
-    const freshState = await waitForSchedulerState(pi, (state) => state.operations?.["O-new"]?.status === "complete", 45000);
-    const freshTaskId = freshState.operations["O-new"].required_task_ids[0];
-    assert.equal(freshState.missions["M-old"].status, "cancelled");
-    assert.equal(freshState.operations["O-old"].accepted_task_ids.length, 0);
-    assert.equal(freshState.operations["O-old"].task_results["T-old"], undefined);
-    assert.equal(freshState.attempt_ledger[oldAttemptId].status, "unknown");
-    assert.deepEqual(freshState.operations["O-new"].accepted_task_ids, [freshTaskId]);
-    const result = freshState.operations["O-new"].task_results[freshTaskId];
-    assert.equal(result.operation_id, "O-new");
-    assert.equal(result.task_id, freshTaskId);
-    assert.equal(result.execution_status, "execution_complete");
-    assert.equal(result.verification_status, "verified");
-    assert.ok(result.evidence_refs.length > 0);
+    await pi.prompt("/goal Verify direct Commander delegation.");
+    const fresh = await waitForWorkState(pi, (works) => Object.values(works).some((work) => work.status === "complete"), 45000);
+    assert.equal(fresh[oldWork.work_id].status, "cancelled");
+    assert.deepEqual(fresh[oldWork.work_id].tasks[added.task_id], oldTask);
+    const work = Object.values(fresh).find((work) => work.status === "complete");
+    const task = Object.values(work.tasks)[0], result = task.attempts[0].result;
+    assert.equal(task.status, "accepted"); assert.equal(task.attempts.length, 1);
+    assert.equal(result.operation_id, work.work_id); assert.equal(result.task_id, task.task_id);
+    assert.equal(result.execution_status, "execution_complete"); assert.equal(result.verification_status, "verified");
+    assert.ok(result.evidence_refs.length);
     for (const reference of result.evidence_refs) {
       const { metadata } = readEvidence(reference, fixture.project);
-      assert.equal(metadata.operation_id, "O-new");
-      assert.equal(metadata.task_id, freshTaskId);
+      assert.equal(metadata.operation_id, work.work_id); assert.equal(metadata.task_id, task.task_id);
     }
-    const workerRequest = fixture.provider.requests.find((request) => request.body.messages.map(messageText).join("\n").includes(`TaskOrder ${freshTaskId}`));
-    assert.ok(workerRequest, "the fresh Operation must spawn its registered Worker TaskOrder");
-    const workerSystem = messageText(workerRequest.body.messages.find((message) => message.role === "system"));
-    assert.ok(workerSystem.includes(`isolated git worktree copy of ${fixture.project}`), "the Worker worktree must be rooted in the disposable target project");
-    const workerCwd = workerSystem.match(/^Working directory: (.+)$/m)?.[1];
-    assert.ok(workerCwd && workerCwd !== fixture.project, "the Worker must run from its isolated worktree directory");
     const branch = result.artifact_refs[0];
-    const branchCommit = spawnSync("git", ["-C", fixture.project, "show", "-s", "--format=%B", branch], { encoding: "utf8" });
-    assert.equal(branchCommit.status, 0, "the Worker artifact branch must belong to the disposable target project");
-    assert.match(branchCommit.stdout, /Scope:.*Reason:/s);
-    const workerArtifact = spawnSync("git", ["-C", fixture.project, "show", `${branch}:recovery-evidence.txt`], { encoding: "utf8" });
-    assert.equal(workerArtifact.status, 0, "the Worker must write Evidence inside the target project's artifact branch");
-    assert.equal(workerArtifact.stdout, `verified from the assigned worktree\nWorker working directory: ${workerCwd}\n`);
-    assert.ok(fixture.provider.requests.every((request) => request.body.model === "dummy"), "the fixture must use only its fake provider model");
+    const artifact = spawnSync("git", ["-C", fixture.project, "show", `${branch}:recovery-evidence.txt`], { encoding: "utf8" });
+    assert.equal(artifact.status, 0); assert.match(artifact.stdout, /^verified from the assigned worktree/);
+    assert.ok(fixture.provider.requests.every((request) => request.body.model === "dummy"));
+    assert.ok(!fixture.provider.requests.some((request) => request.body.messages.some((message) => messageText(message).includes('"OperationBrief"'))));
   } finally {
-    if (priorEvidenceDir === undefined) delete process.env.PI_HARNESS_EVIDENCE_DIR;
-    else process.env.PI_HARNESS_EVIDENCE_DIR = priorEvidenceDir;
-    if (pi) await pi.close();
-    await fixture.close();
+    if (priorEvidenceDir === undefined) delete process.env.PI_HARNESS_EVIDENCE_DIR; else process.env.PI_HARNESS_EVIDENCE_DIR = priorEvidenceDir;
+    if (pi) await pi.close(); await fixture.close();
   }
 });
 
-async function waitForSchedulerState(pi, predicate, timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  let lastState;
+async function waitForWorkState(pi, predicate, timeoutMs) {
+  const deadline = Date.now() + timeoutMs; let state;
   while (Date.now() < deadline) {
-    const entries = (await pi.send({ type: "get_entries" })).data.entries;
-    lastState = latestCustom(entries, TASK_GRAPH_ENTRY)?.data;
-    if (lastState && predicate(lastState)) return lastState;
+    state = latestCustom((await pi.send({ type: "get_entries" })).data.entries, WORK_ENTRY)?.data;
+    if (state && predicate(state)) return state;
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
   }
-  throw new Error(`Timed out waiting for disposable Mission state: ${JSON.stringify(lastState)}`);
+  throw new Error(`Timed out waiting for disposable work: ${JSON.stringify(state)}`);
 }
